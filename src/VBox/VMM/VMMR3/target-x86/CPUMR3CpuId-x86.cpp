@@ -907,6 +907,11 @@ static int cpumR3CpuIdInstallAndExplodeLeaves(PVM pVM, PCPUM pCpum, PCPUMCPUIDLE
         pCpum->GuestInfo.uScalableBusFreq = pCpum->GuestFeatures.enmMicroarch >= kCpumMicroarch_Intel_Core7_SandyBridge
                                           ? UINT64_C(100000000)  /* 100MHz */
                                           : UINT64_C(133333333); /* 133MHz */
+    /* Goldmont and later atoms (incl. the unknown future ones, typically E-core
+       only parts of hybrid generations) use a 100MHz reference clock as well. */
+    else if (   pVM->cpum.s.GuestFeatures.enmMicroarch >= kCpumMicroarch_Intel_Atom_Goldmont
+             && pVM->cpum.s.GuestFeatures.enmMicroarch <= kCpumMicroarch_Intel_Atom_Unknown)
+        pCpum->GuestInfo.uScalableBusFreq = UINT64_C(100000000);  /* 100MHz */
 
     /*
      * Populate the legacy arrays.  Currently used for everything, later only
@@ -1044,6 +1049,15 @@ typedef struct CPUMCPUIDCONFIG
     CPUMISAEXTCFG   enmMcdtNo;
     CPUMISAEXTCFG   enmMonitorMitgNo;
     CPUMISAEXTCFG   enmTsc;
+    CPUMISAEXTCFG   enmFastStrings;
+    CPUMISAEXTCFG   enmXSaveOpt;
+    CPUMISAEXTCFG   enmXSaveC;
+    CPUMISAEXTCFG   enmGfni;
+    CPUMISAEXTCFG   enmVaes;
+    CPUMISAEXTCFG   enmVpclmulqdq;
+    CPUMISAEXTCFG   enmAvxVnni;
+    CPUMISAEXTCFG   enmAvxIfma;
+    CPUMISAEXTCFG   enmAvxNeConvert;
 
     CPUMISAEXTCFG   enmAbm;
     CPUMISAEXTCFG   enmSse4A;
@@ -1055,6 +1069,7 @@ typedef struct CPUMCPUIDCONFIG
     uint32_t        uMaxExtLeaf;
     uint32_t        uMaxCentaurLeaf;
     uint32_t        uMaxIntelFamilyModelStep;
+    bool            fForceIntelFamilyModelStep;
     char            szCpuName[128];
 } CPUMCPUIDCONFIG;
 /** Pointer to CPUID config (from CFGM). */
@@ -1064,7 +1079,8 @@ typedef CPUMCPUIDCONFIG *PCPUMCPUIDCONFIG;
 /**
  * Mini CPU selection support for making Mac OS X happy.
  *
- * Executes the  /CPUM/MaxIntelFamilyModelStep config.
+ * Executes the  /CPUM/MaxIntelFamilyModelStep and
+ * /CPUM/ForceIntelFamilyModelStep config.
  *
  * @param   pCpum       The CPUM instance data.
  * @param   pConfig     The CPUID configuration we've read from CFGM.
@@ -1079,7 +1095,10 @@ static void cpumR3CpuIdLimitIntelFamModStep(PCPUM pCpum, PCPUMCPUIDCONFIG pConfi
                                                                 RTX86GetCpuFamily(pStdFeatureLeaf->uEax),
                                                                 0);
         uint32_t uMaxIntelFamilyModelStep = pConfig->uMaxIntelFamilyModelStep;
-        if (pConfig->uMaxIntelFamilyModelStep < uCurIntelFamilyModelStep)
+        if (   uMaxIntelFamilyModelStep < uCurIntelFamilyModelStep
+            || (   pConfig->fForceIntelFamilyModelStep
+                && uMaxIntelFamilyModelStep != UINT32_MAX
+                && uMaxIntelFamilyModelStep != uCurIntelFamilyModelStep))
         {
             uint32_t uNew = pStdFeatureLeaf->uEax & UINT32_C(0xf0003000);
             uNew |= RT_BYTE1(uMaxIntelFamilyModelStep) & 0xf; /* stepping */
@@ -1838,6 +1857,12 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
         {
             case 0:
             {
+                /* Feature dependencies on the already sanitized leaf 1 values. */
+                PCCPUMCPUIDLEAF const pGstStd1 = cpumR3CpuIdGetExactLeaf(pCpum, 1, 0);
+                bool const fGstAvx    = pGstStd1 && (pGstStd1->uEcx & X86_CPUID_FEATURE_ECX_AVX);
+                bool const fGstAesNi  = pGstStd1 && (pGstStd1->uEcx & X86_CPUID_FEATURE_ECX_AES);
+                bool const fGstPclMul = pGstStd1 && (pGstStd1->uEcx & X86_CPUID_FEATURE_ECX_PCLMUL);
+
                 pCurLeaf->uEax  = RT_MIN(pCurLeaf->uEax, 2); /* Max ECX input is 2. */
                 pCurLeaf->uEbx &= 0
                                | PASSTHRU_FEATURE(pConfig->enmFsGsBase, pHstFeat->fFsGsBase, X86_CPUID_STEXT_FEATURE_EBX_FSGSBASE)
@@ -1849,7 +1874,7 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
                                | X86_CPUID_STEXT_FEATURE_EBX_FDP_EXCPTN_ONLY
                                //| X86_CPUID_STEXT_FEATURE_EBX_SMEP              RT_BIT(7)
                                | X86_CPUID_STEXT_FEATURE_EBX_BMI2
-                               //| X86_CPUID_STEXT_FEATURE_EBX_ERMS              RT_BIT(9)
+                               | PASSTHRU_FEATURE(pConfig->enmFastStrings, pHstFeat->fErms, X86_CPUID_STEXT_FEATURE_EBX_ERMS)
                                | PASSTHRU_FEATURE_NOT_IEM(pConfig->enmInvpcid, pHstFeat->fInvpcid, X86_CPUID_STEXT_FEATURE_EBX_INVPCID)
                                //| X86_CPUID_STEXT_FEATURE_EBX_RTM               RT_BIT(11)
                                //| X86_CPUID_STEXT_FEATURE_EBX_PQM               RT_BIT(12)
@@ -1864,7 +1889,6 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
                                //| RT_BIT(21) - reserved
                                //| RT_BIT(22) - reserved
                                | PASSTHRU_FEATURE(pConfig->enmCLFlushOpt, pHstFeat->fClFlushOpt, X86_CPUID_STEXT_FEATURE_EBX_CLFLUSHOPT)
-                               //| RT_BIT(24) - reserved
                                //| X86_CPUID_STEXT_FEATURE_EBX_INTEL_PT          RT_BIT(25)
                                //| X86_CPUID_STEXT_FEATURE_EBX_AVX512PF          RT_BIT(26)
                                //| X86_CPUID_STEXT_FEATURE_EBX_AVX512ER          RT_BIT(27)
@@ -1875,11 +1899,21 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
                                ;
                 pCurLeaf->uEcx &= 0
                                //| X86_CPUID_STEXT_FEATURE_ECX_PREFETCHWT1 - we do not do vector functions yet.
+                               //| X86_CPUID_STEXT_FEATURE_ECX_WAITPKG - requires IA32_UMWAIT_CONTROL which we don't implement.
+                               | PASSTHRU_FEATURE_NOT_IEM(pConfig->enmGfni, pHstFeat->fGfni, X86_CPUID_STEXT_FEATURE_ECX_GFNI)
+                               | PASSTHRU_FEATURE_EX(pConfig->enmVaes, pHstFeat->fVaes,
+                                                     !VM_IS_EXEC_ENGINE_IEM(pVM) && fGstAvx && fGstAesNi,
+                                                     X86_CPUID_STEXT_FEATURE_ECX_VAES)
+                               | PASSTHRU_FEATURE_EX(pConfig->enmVpclmulqdq, pHstFeat->fVpclmulqdq,
+                                                     !VM_IS_EXEC_ENGINE_IEM(pVM) && fGstAvx && fGstPclMul,
+                                                     X86_CPUID_STEXT_FEATURE_ECX_VPCLMULQDQ)
                                ;
                 pCurLeaf->uEdx &= 0
+                               | PASSTHRU_FEATURE(pConfig->enmFastStrings, pHstFeat->fFsrm, X86_CPUID_STEXT_FEATURE_EDX_FSRM)
                                //| X86_CPUID_STEXT_FEATURE_EDX_SRBDS_CTRL        RT_BIT(9)
                                | PASSTHRU_FEATURE(pConfig->enmMdsClear,   pHstFeat->fMdsClear, X86_CPUID_STEXT_FEATURE_EDX_MD_CLEAR)
                                //| X86_CPUID_STEXT_FEATURE_EDX_TSX_FORCE_ABORT   RT_BIT_32(11)
+                               //| X86_CPUID_STEXT_FEATURE_EDX_HYBRID - vCPUs float between core types, so never expose this.
                                //| X86_CPUID_STEXT_FEATURE_EDX_CET_IBT           RT_BIT(20)
                                //| X86_CPUID_STEXT_FEATURE_EDX_IBRS_IBPB         RT_BIT(26)
                                //| X86_CPUID_STEXT_FEATURE_EDX_STIBP             RT_BIT(27)
@@ -1908,13 +1942,18 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
                     PORTABLE_DISABLE_FEATURE_BIT(    1, pCurLeaf->uEbx, AVX512F,    X86_CPUID_STEXT_FEATURE_EBX_AVX512F);
                     PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEbx, RDSEED,     X86_CPUID_STEXT_FEATURE_EBX_RDSEED, pConfig->enmRdSeed);
                     PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEbx, ADX,        X86_CPUID_STEXT_FEATURE_EBX_ADX, pConfig->enmAdx);
-                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEbx, CLFLUSHOPT, X86_CPUID_STEXT_FEATURE_EBX_RDSEED, pConfig->enmCLFlushOpt);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEbx, CLFLUSHOPT, X86_CPUID_STEXT_FEATURE_EBX_CLFLUSHOPT, pConfig->enmCLFlushOpt);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEbx, ERMS,       X86_CPUID_STEXT_FEATURE_EBX_ERMS, pConfig->enmFastStrings);
                     PORTABLE_DISABLE_FEATURE_BIT(    1, pCurLeaf->uEbx, AVX512PF,   X86_CPUID_STEXT_FEATURE_EBX_AVX512PF);
                     PORTABLE_DISABLE_FEATURE_BIT(    1, pCurLeaf->uEbx, AVX512ER,   X86_CPUID_STEXT_FEATURE_EBX_AVX512ER);
                     PORTABLE_DISABLE_FEATURE_BIT(    1, pCurLeaf->uEbx, AVX512CD,   X86_CPUID_STEXT_FEATURE_EBX_AVX512CD);
                     PORTABLE_DISABLE_FEATURE_BIT(    1, pCurLeaf->uEbx, SMAP,       X86_CPUID_STEXT_FEATURE_EBX_SMAP);
                     PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEbx, SHA,        X86_CPUID_STEXT_FEATURE_EBX_SHA, pConfig->enmSha);
                     PORTABLE_DISABLE_FEATURE_BIT(    1, pCurLeaf->uEcx, PREFETCHWT1, X86_CPUID_STEXT_FEATURE_ECX_PREFETCHWT1);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEcx, GFNI,       X86_CPUID_STEXT_FEATURE_ECX_GFNI, pConfig->enmGfni);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEcx, VAES,       X86_CPUID_STEXT_FEATURE_ECX_VAES, pConfig->enmVaes);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEcx, VPCLMULQDQ, X86_CPUID_STEXT_FEATURE_ECX_VPCLMULQDQ, pConfig->enmVpclmulqdq);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEdx, FSRM,       X86_CPUID_STEXT_FEATURE_EDX_FSRM, pConfig->enmFastStrings);
                     PORTABLE_DISABLE_FEATURE_BIT_CFG(3, pCurLeaf->uEdx, FLUSH_CMD,  X86_CPUID_STEXT_FEATURE_EDX_FLUSH_CMD, pConfig->enmFlushCmdMsr);
                     PORTABLE_DISABLE_FEATURE_BIT_CFG(3, pCurLeaf->uEdx, MD_CLEAR,   X86_CPUID_STEXT_FEATURE_EDX_MD_CLEAR, pConfig->enmMdsClear);
                     PORTABLE_DISABLE_FEATURE_BIT_CFG(3, pCurLeaf->uEdx, ARCHCAP,    X86_CPUID_STEXT_FEATURE_EDX_ARCHCAP, pConfig->enmArchCapMsr);
@@ -1945,6 +1984,49 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
                     pCurLeaf->uEdx |= X86_CPUID_STEXT_FEATURE_EDX_MD_CLEAR;
                 if (pConfig->enmArchCapMsr == CPUMISAEXTCFG_ENABLED_ALWAYS)
                     pCurLeaf->uEdx |= X86_CPUID_STEXT_FEATURE_EDX_ARCHCAP;
+                if (pConfig->enmFastStrings == CPUMISAEXTCFG_ENABLED_ALWAYS)
+                {
+                    pCurLeaf->uEbx |= X86_CPUID_STEXT_FEATURE_EBX_ERMS;
+                    pCurLeaf->uEdx |= X86_CPUID_STEXT_FEATURE_EDX_FSRM;
+                }
+                break;
+            }
+
+            case 1:
+            {
+                /* Feature dependencies on the already sanitized leaf 1 and 7/0 values. */
+                PCCPUMCPUIDLEAF const pGstStd1  = cpumR3CpuIdGetExactLeaf(pCpum, 1, 0);
+                PCCPUMCPUIDLEAF const pGstSxf0  = cpumR3CpuIdGetExactLeaf(pCpum, 7, 0);
+                bool const fGstAvx   = pGstStd1 && (pGstStd1->uEcx & X86_CPUID_FEATURE_ECX_AVX);
+                bool const fGstAvx2  = fGstAvx && pGstSxf0 && (pGstSxf0->uEbx & X86_CPUID_STEXT_FEATURE_EBX_AVX2);
+                bool const fNotIem   = !VM_IS_EXEC_ENGINE_IEM(pVM);
+
+                pCurLeaf->uEax &= 0
+                               | PASSTHRU_FEATURE_EX(pConfig->enmAvxVnni, pHstFeat->fAvxVnni, fNotIem && fGstAvx2,
+                                                     X86_CPUID_STEXT_FEATURE_1_EAX_AVX_VNNI)
+                               //| X86_CPUID_STEXT_FEATURE_1_EAX_AVX512_BF16 - no AVX-512 support.
+                               //| RT_BIT_32(8) - ArchPerfmonExt - requires leaf 0x23 and PMU virtualization.
+                               //| X86_CPUID_STEXT_FEATURE_1_EAX_HRESET - requires leaf 0x20 and IA32_HRESET_ENABLE.
+                               | PASSTHRU_FEATURE_EX(pConfig->enmAvxIfma, pHstFeat->fAvxIfma, fNotIem && fGstAvx2,
+                                                     X86_CPUID_STEXT_FEATURE_1_EAX_AVX_IFMA)
+                               //| X86_CPUID_STEXT_FEATURE_1_EAX_LAM - requires paging changes.
+                               ;
+                pCurLeaf->uEbx  = 0;
+                pCurLeaf->uEcx  = 0;
+                pCurLeaf->uEdx &= 0
+                               | PASSTHRU_FEATURE_EX(pConfig->enmAvxVnni, pHstFeat->fAvxVnniInt8, fNotIem && fGstAvx2,
+                                                     X86_CPUID_STEXT_FEATURE_1_EDX_AVX_VNNI_INT8)
+                               | PASSTHRU_FEATURE_EX(pConfig->enmAvxNeConvert, pHstFeat->fAvxNeConvert, fNotIem && fGstAvx,
+                                                     X86_CPUID_STEXT_FEATURE_1_EDX_AVX_NE_CONVERT)
+                               ;
+
+                if (pCpum->u8PortableCpuIdLevel > 0)
+                {
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEax, AVX_VNNI,       X86_CPUID_STEXT_FEATURE_1_EAX_AVX_VNNI, pConfig->enmAvxVnni);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEax, AVX_IFMA,       X86_CPUID_STEXT_FEATURE_1_EAX_AVX_IFMA, pConfig->enmAvxIfma);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEdx, AVX_VNNI_INT8,  X86_CPUID_STEXT_FEATURE_1_EDX_AVX_VNNI_INT8, pConfig->enmAvxVnni);
+                    PORTABLE_DISABLE_FEATURE_BIT_CFG(1, pCurLeaf->uEdx, AVX_NE_CONVERT, X86_CPUID_STEXT_FEATURE_1_EDX_AVX_NE_CONVERT, pConfig->enmAvxNeConvert);
+                }
                 break;
             }
 
@@ -2100,9 +2182,18 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
     pStdFeatureLeaf = NULL;
     pCpum->fXStateGuestMask = fGuestXcr0Mask;
 
+    /* XSAVE extensions (sub-leaf 1).  XSAVES and IA32_XSS are not supported, and
+       IEM implements none of these. */
+    uint32_t const fXSave1Eax = !fGuestXcr0Mask ? 0
+                              :   PASSTHRU_FEATURE_NOT_IEM(pConfig->enmXSaveOpt, pHstFeat->fXSaveOpt, X86_CPUID_XSAVE_1_EAX_XSAVEOPT)
+                                | PASSTHRU_FEATURE_NOT_IEM(pConfig->enmXSaveC, pHstFeat->fXSaveC, X86_CPUID_XSAVE_1_EAX_XSAVEC)
+                                | PASSTHRU_FEATURE_NOT_IEM(pConfig->enmXSaveC, pHstFeat->fXGetBv1, X86_CPUID_XSAVE_1_EAX_XGETBV1);
+    bool const     fGstXSaveC = RT_BOOL(fXSave1Eax & X86_CPUID_XSAVE_1_EAX_XSAVEC);
+
     /* Work the sub-leaves. */
     uint32_t cbXSaveMaxActual = CPUM_MIN_XSAVE_AREA_SIZE;
     uint32_t cbXSaveMaxReport = CPUM_MIN_XSAVE_AREA_SIZE;
+    uint32_t cbXSaveCompacted = CPUM_MIN_XSAVE_AREA_SIZE;
     for (uSubLeaf = 0; uSubLeaf < 63; uSubLeaf++)
     {
         pCurLeaf = cpumR3CpuIdGetExactLeaf(pCpum, 13, uSubLeaf);
@@ -2126,10 +2217,10 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
                                               VERR_CPUM_IPE_2);
                         continue;
                     case 1:
-                        pCurLeaf->uEax &= 0;
+                        pCurLeaf->uEax &= fXSave1Eax;
                         pCurLeaf->uEcx &= 0;
                         pCurLeaf->uEdx &= 0;
-                        /** @todo what about checking ebx? */
+                        /* EBX is set to the compacted size after the loop. */
                         continue;
                     default:
                         if (fGuestXcr0Mask & RT_BIT_64(uSubLeaf))
@@ -2143,10 +2234,15 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
                                                    uSubLeaf, pCurLeaf->uEax, pCurLeaf->uEbx, cbXSaveMaxActual),
                                                   VERR_CPUM_IPE_2);
                             AssertLogRel(!(pCurLeaf->uEcx & 1));
-                            pCurLeaf->uEcx = 0; /* Bit 0 should be zero (XCR0), the reset are reserved... */
+                            /* Bit 0 should be zero (XCR0), bit 1 is the 64-byte alignment indicator for the
+                               compacted format (only relevant with XSAVEC), the reset are reserved... */
+                            pCurLeaf->uEcx &= fGstXSaveC ? RT_BIT_32(1) : 0;
                             pCurLeaf->uEdx = 0; /* it's reserved... */
                             if (pCurLeaf->uEbx + pCurLeaf->uEax > cbXSaveMaxReport)
                                 cbXSaveMaxReport = pCurLeaf->uEbx + pCurLeaf->uEax;
+                            if (pCurLeaf->uEcx & RT_BIT_32(1))
+                                cbXSaveCompacted = RT_ALIGN_32(cbXSaveCompacted, 64);
+                            cbXSaveCompacted += pCurLeaf->uEax;
                             continue;
                         }
                         break;
@@ -2160,6 +2256,16 @@ static int cpumR3CpuIdSanitize(PVM pVM, PCPUM pCpum, PCPUMCPUIDCONFIG pConfig)
             pCurLeaf->uEdx = 0;
         }
     }
+
+    /* Sub-leaf 1 EBX: The size of the (compacted) XSAVE area containing all the
+       states enabled by XCR0 | IA32_XSS.  Since IA32_XSS is always zero for the
+       guest this is the compacted size of all the guest XCR0 components.
+       Note! Deliberately static like sub-leaf 0 EBX: real CPUs report the size
+             for the current XCR0 value, so this may overstate it, which is
+             harmless (it is only used for sizing buffers). */
+    pCurLeaf = cpumR3CpuIdGetExactLeaf(pCpum, 13, 1);
+    if (pCurLeaf)
+        pCurLeaf->uEbx = fGuestXcr0Mask ? cbXSaveCompacted : 0;
 
     /* Update the max and current feature sizes to shut up annoying Linux kernels. */
     if (cbXSaveMaxReport != cbXSaveMaxActual && fGuestXcr0Mask)
@@ -2711,7 +2817,7 @@ static int cpumR3CpuIdReadIsaExtCfg(PVM pVM, PCFGMNODE pIsaExts, const char *psz
             {
                 RTStrToLower(szValue);
                 size_t cchValue = strlen(szValue);
-#define EQ(a_str) (cchValue == sizeof(a_str) - 1U && memcmp(szValue, a_str, sizeof(a_str) - 1))
+#define EQ(a_str) (cchValue == sizeof(a_str) - 1U && memcmp(szValue, a_str, sizeof(a_str) - 1) == 0)
                 if (     EQ("disabled") || EQ("disable") || EQ("off") || EQ("no"))
                     *penmValue = CPUMISAEXTCFG_DISABLED;
                 else if (EQ("enabled")  || EQ("enable")  || EQ("on")  || EQ("yes"))
@@ -2725,7 +2831,7 @@ static int cpumR3CpuIdReadIsaExtCfg(PVM pVM, PCFGMNODE pIsaExts, const char *psz
                 else
                     return VMSetError(pVM, VERR_CPUM_INVALID_CONFIG_VALUE, RT_SRC_POS,
                                       "Invalid config value for '/CPUM/IsaExts/%s': '%s' (expected 0/'disabled', 1/'enabled', 2/'portable', or 9/'forced')",
-                                      pszValueName, uValue);
+                                      pszValueName, szValue);
 #undef EQ
             }
         }
@@ -2863,6 +2969,13 @@ static int cpumR3CpuIdReadConfig(PVM pVM, PCPUMCPUIDCONFIG pConfig, PCFGMNODE pC
     rc = CFGMR3QueryU32Def(pCpumCfg, "MaxIntelFamilyModelStep", &pConfig->uMaxIntelFamilyModelStep, UINT32_MAX);
     AssertLogRelRCReturn(rc, rc);
 
+    /** @cfgm{/CPUM/ForceIntelFamilyModelStep, boolean, false}
+     * Report the /CPUM/MaxIntelFamilyModelStep family+model+stepping even when
+     * the CPU reports a lower one.  Main uses this for macOS guests on hosts with
+     * a CPU model the macOS kernel doesn't know (it panics on those). */
+    rc = CFGMR3QueryBoolDef(pCpumCfg, "ForceIntelFamilyModelStep", &pConfig->fForceIntelFamilyModelStep, false);
+    AssertLogRelRCReturn(rc, rc);
+
     /** @cfgm{/CPUM/MaxStdLeaf, uint32_t, 0x00000016}
      * The last standard leaf to keep.  The actual last value that is stored in EAX
      * is RT_MAX(CPUID[0].EAX,/CPUM/MaxStdLeaf).  Leaves beyond the max leaf are
@@ -2973,6 +3086,15 @@ static int cpumR3CpuIdReadConfig(PVM pVM, PCPUMCPUIDCONFIG pConfig, PCFGMNODE pC
                                   "|3DNOWPRF"
                                   "|AXMMX"
                                   "|TSC"
+                                  "|FastStrings"
+                                  "|XSAVEOPT"
+                                  "|XSAVEC"
+                                  "|GFNI"
+                                  "|VAES"
+                                  "|VPCLMULQDQ"
+                                  "|AVXVNNI"
+                                  "|AVXIFMA"
+                                  "|AVXNECONVERT"
                                   , "" /*pszValidNodes*/, "CPUM" /*pszWho*/, 0 /*uInstance*/);
         if (RT_FAILURE(rc))
             return rc;
@@ -3195,6 +3317,77 @@ static int cpumR3CpuIdReadConfig(PVM pVM, PCPUMCPUIDCONFIG pConfig, PCFGMNODE pC
      * Whether to expose the TSC instructions to the guest.
      */
     rc = cpumR3CpuIdReadIsaExtCfg(pVM, pIsaExts, "TSC", &pConfig->enmTsc, CPUMISAEXTCFG_ENABLED_SUPPORTED);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/FastStrings, isaextcfg, true}
+     * Whether to advertise the fast string operation hints (ERMS and FSRM) to
+     * the guest.  These are pure performance hints for REP MOVSB/STOSB, no new
+     * instructions or state are involved.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfg(pVM, pIsaExts, "FastStrings", &pConfig->enmFastStrings, CPUMISAEXTCFG_ENABLED_SUPPORTED);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/XSAVEOPT, isaextcfg, depends}
+     * Whether to expose the XSAVEOPT instruction to the guest.  Requires XSAVE.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfgEx(pVM, pIsaExts, "XSAVEOPT", &pConfig->enmXSaveOpt, fNestedPagingAndFullGuestExec,
+                                    fMayHaveXSave && pConfig->enmXSave /*fAllowed*/);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/XSAVEC, isaextcfg, depends}
+     * Whether to expose the XSAVEC instruction and XGETBV with ECX=1 to the
+     * guest.  Requires XSAVE.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfgEx(pVM, pIsaExts, "XSAVEC", &pConfig->enmXSaveC, fNestedPagingAndFullGuestExec,
+                                    fMayHaveXSave && pConfig->enmXSave /*fAllowed*/);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/GFNI, isaextcfg, depends}
+     * Whether to expose the Galois Field New Instructions to the guest.  For the
+     * time being the default is to only do this for VMs with nested paging and
+     * AMD-V or unrestricted guest mode.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfg(pVM, pIsaExts, "GFNI", &pConfig->enmGfni, fNestedPagingAndFullGuestExec);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/VAES, isaextcfg, depends}
+     * Whether to expose the 256-bit VEX encoded AES instructions to the guest.
+     * Requires AVX and AESNI to be exposed.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfgEx(pVM, pIsaExts, "VAES", &pConfig->enmVaes, fNestedPagingAndFullGuestExec,
+                                    pConfig->enmAvx && pConfig->enmAesNi /*fAllowed*/);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/VPCLMULQDQ, isaextcfg, depends}
+     * Whether to expose the 256-bit VEX encoded VPCLMULQDQ instruction to the
+     * guest.  Requires AVX and PCLMUL to be exposed.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfgEx(pVM, pIsaExts, "VPCLMULQDQ", &pConfig->enmVpclmulqdq, fNestedPagingAndFullGuestExec,
+                                    pConfig->enmAvx && pConfig->enmPClMul /*fAllowed*/);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/AVXVNNI, isaextcfg, depends}
+     * Whether to expose the VEX encoded AVX-VNNI and AVX-VNNI-INT8 instructions
+     * to the guest.  Requires AVX2 to be exposed.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfgEx(pVM, pIsaExts, "AVXVNNI", &pConfig->enmAvxVnni, fNestedPagingAndFullGuestExec,
+                                    pConfig->enmAvx && pConfig->enmAvx2 /*fAllowed*/);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/AVXIFMA, isaextcfg, depends}
+     * Whether to expose the VEX encoded AVX-IFMA instructions to the guest.
+     * Requires AVX2 to be exposed.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfgEx(pVM, pIsaExts, "AVXIFMA", &pConfig->enmAvxIfma, fNestedPagingAndFullGuestExec,
+                                    pConfig->enmAvx && pConfig->enmAvx2 /*fAllowed*/);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/IsaExts/AVXNECONVERT, isaextcfg, depends}
+     * Whether to expose the AVX-NE-CONVERT instructions to the guest.  Requires
+     * AVX to be exposed.
+     */
+    rc = cpumR3CpuIdReadIsaExtCfgEx(pVM, pIsaExts, "AVXNECONVERT", &pConfig->enmAvxNeConvert, fNestedPagingAndFullGuestExec,
+                                    RT_BOOL(pConfig->enmAvx) /*fAllowed*/);
     AssertLogRelRCReturn(rc, rc);
 
 
@@ -5012,7 +5205,7 @@ static int cpumR3LoadCpuIdInner(PVM pVM, PSSMHANDLE pSSM, uint32_t uVersion, PCP
         CPUID_GST_AMD_FEATURE_RET(Ext, uEdx, X86_CPUID_AMD_FEATURE_EDX_3DNOW);
     }
 
-    /** @todo check leaf 7   */
+    /* Leaf 7 is checked further down (s_aChecks). */
 
     /* CPUID(d) - XCR0 stuff - takes ECX as input.
      * ECX=0:   EAX - Valid bits in XCR0[31:0].
@@ -5048,11 +5241,15 @@ static int cpumR3LoadCpuIdInner(PVM pVM, PSSMHANDLE pSSM, uint32_t uVersion, PCP
             return SSMR3SetLoadError(pSSM, VERR_SSM_LOAD_CPUID_MISMATCH, RT_SRC_POS,
                                      N_("CPUID(0xd/0).EDX:EAX missing mandatory X87 or SSE bits: %#RX64"), fGuestXcr0Mask);
 
-        /* We don't support any additional features yet. */
+        /* XSAVEOPT, XSAVEC and XGETBV1 may be exposed (checked against the host further
+           down, see s_aChecks), anything else (e.g. XSAVES) isn't supported. */
         pCurLeaf = cpumCpuIdGetLeafInt(paLeaves, cLeaves, UINT32_C(0x0000000d), 1);
-        if (pCurLeaf && pCurLeaf->uEax)
+        uint32_t const fXSave1EaxSupported = X86_CPUID_XSAVE_1_EAX_XSAVEOPT | X86_CPUID_XSAVE_1_EAX_XSAVEC
+                                           | X86_CPUID_XSAVE_1_EAX_XGETBV1;
+        if (pCurLeaf && (pCurLeaf->uEax & ~fXSave1EaxSupported))
             return SSMR3SetLoadError(pSSM, VERR_SSM_LOAD_CPUID_MISMATCH, RT_SRC_POS,
-                                     N_("CPUID(0xd/1).EAX=%#x, expected zero"), pCurLeaf->uEax);
+                                     N_("CPUID(0xd/1).EAX=%#x, only XSAVEOPT, XSAVEC and XGETBV1 are supported"),
+                                     pCurLeaf->uEax);
         if (pCurLeaf && (pCurLeaf->uEcx || pCurLeaf->uEdx))
             return SSMR3SetLoadError(pSSM, VERR_SSM_LOAD_CPUID_MISMATCH, RT_SRC_POS,
                                      N_("CPUID(0xd/1).EDX:ECX=%#llx, expected zero"),
@@ -5130,6 +5327,74 @@ static int cpumR3LoadCpuIdInner(PVM pVM, PSSMHANDLE pSSM, uint32_t uVersion, PCP
 #undef CPUID_GST_AMD_FEATURE_WRN
 #undef CPUID_GST_AMD_FEATURE_EMU
 #undef CPUID_GST_AMD_FEATURE_IGN
+
+    /*
+     * Structured extended features (leaf 7, sub-leaves 0 and 1) and the XSAVE
+     * extensions (leaf 0xd, sub-leaf 1).  These are mostly instruction set
+     * extensions which the guest will execute directly, so a guest that has
+     * already seen them cannot be resumed on a host lacking them.  This doesn't
+     * apply when IEM executes the guest.
+     *
+     * Older VirtualBox versions didn't check this leaf, so saved states which have
+     * the features they already exposed keep loading as before (with a warning);
+     * only the features exposed since (fNew) fail the load with strict checks.
+     */
+    if (!VM_IS_EXEC_ENGINE_IEM(pVM))
+    {
+        static struct
+        {
+            uint32_t    uLeaf;
+            uint32_t    uSubLeaf;
+            uint8_t     iReg;       /**< 0=eax, 1=ebx, 2=ecx, 3=edx */
+            uint32_t    fBit;
+            const char *pszName;
+            bool        fNew;       /**< Not exposed by older VirtualBox versions. */
+        } const s_aChecks[] =
+        {
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_FSGSBASE,        "FSGSBASE",        false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_BMI1,            "BMI1",            false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_AVX2,            "AVX2",            false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_BMI2,            "BMI2",            false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_INVPCID,         "INVPCID",         false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_RDSEED,          "RDSEED",          false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_ADX,             "ADX",             false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_CLFLUSHOPT,      "CLFLUSHOPT",      false },
+            { 7, 0, 1, X86_CPUID_STEXT_FEATURE_EBX_SHA,             "SHA",             false },
+            { 7, 0, 2, X86_CPUID_STEXT_FEATURE_ECX_GFNI,            "GFNI",            true  },
+            { 7, 0, 2, X86_CPUID_STEXT_FEATURE_ECX_VAES,            "VAES",            true  },
+            { 7, 0, 2, X86_CPUID_STEXT_FEATURE_ECX_VPCLMULQDQ,      "VPCLMULQDQ",      true  },
+            { 7, 1, 0, X86_CPUID_STEXT_FEATURE_1_EAX_AVX_VNNI,      "AVX_VNNI",        true  },
+            { 7, 1, 0, X86_CPUID_STEXT_FEATURE_1_EAX_AVX_IFMA,      "AVX_IFMA",        true  },
+            { 7, 1, 3, X86_CPUID_STEXT_FEATURE_1_EDX_AVX_VNNI_INT8, "AVX_VNNI_INT8",   true  },
+            { 7, 1, 3, X86_CPUID_STEXT_FEATURE_1_EDX_AVX_NE_CONVERT,"AVX_NE_CONVERT",  true  },
+            { 13, 1, 0, X86_CPUID_XSAVE_1_EAX_XSAVEOPT,             "XSAVEOPT",        true  },
+            { 13, 1, 0, X86_CPUID_XSAVE_1_EAX_XSAVEC,               "XSAVEC",          true  },
+            { 13, 1, 0, X86_CPUID_XSAVE_1_EAX_XGETBV1,              "XGETBV1",         true  },
+        };
+        for (size_t i = 0; i < RT_ELEMENTS(s_aChecks); i++)
+        {
+            CPUMCPUID GstLeaf;
+            RT_ZERO(GstLeaf);
+            cpumR3CpuIdGetLeafLegacy(paLeaves, cLeaves, s_aChecks[i].uLeaf, s_aChecks[i].uSubLeaf, &GstLeaf);
+            uint32_t const auGst[4] = { GstLeaf.uEax, GstLeaf.uEbx, GstLeaf.uEcx, GstLeaf.uEdx };
+            if (!(auGst[s_aChecks[i].iReg] & s_aChecks[i].fBit))
+                continue;
+
+            uint32_t auHst[4] = { 0, 0, 0, 0 };
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
+            if (aHostRawStd[0].uEax >= s_aChecks[i].uLeaf)
+                ASMCpuIdExSlow(s_aChecks[i].uLeaf, 0, s_aChecks[i].uSubLeaf, 0, &auHst[0], &auHst[1], &auHst[2], &auHst[3]);
+#endif
+            if (!(auHst[s_aChecks[i].iReg] & s_aChecks[i].fBit))
+            {
+                if (fStrictCpuIdChecks && s_aChecks[i].fNew)
+                    return SSMR3SetLoadError(pSSM, VERR_SSM_LOAD_CPUID_MISMATCH, RT_SRC_POS,
+                                             N_("%s is not supported by the host but has already exposed to the guest"),
+                                             s_aChecks[i].pszName);
+                LogRel(("CPUM: %s is not supported by the host but has already exposed to the guest\n", s_aChecks[i].pszName));
+            }
+        }
+    }
 
     /*
      * We're good, commit the CPU ID leaves.

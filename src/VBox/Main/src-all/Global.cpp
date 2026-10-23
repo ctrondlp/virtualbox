@@ -685,6 +685,56 @@ const Global::OSType Global::sOSTypes[] =
       1, 2048,  16, 30 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
       StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
 
+    /* NOTE: The macOS 10.14 and later types get an Apple Mac model in the DMI tables instead of the host one, a known
+     *       Intel CPU model and extra Apple firmware feature bits, see Console::i_configConstructorX86. */
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS1014"),      "macOS 10.14 Mojave (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS1014_x64,   VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      2, 4096, 128, 64 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS1015"),      "macOS 10.15 Catalina (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS1015_x64,   VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      2, 4096, 128, 64 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS11"),        "macOS 11 Big Sur (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS11_x64,     VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      2, 4096, 128, 80 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS12"),        "macOS 12 Monterey (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS12_x64,     VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      2, 4096, 128, 80 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS13"),        "macOS 13 Ventura (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS13_x64,     VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      4, 8192, 128, 100 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS14"),        "macOS 14 Sonoma (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS14_x64,     VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      4, 8192, 128, 100 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS15"),        "macOS 15 Sequoia (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS15_x64,     VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      4, 8192, 128, 100 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
+    { "MacOS",   "Mac OS X",         "",         GUEST_OS_ID_STR_X64("MacOS26"),        "macOS 26 Tahoe (64-bit)", VBOX_GUEST_ADDITIONS_NAME_DARWIN,
+      VBOXOSTYPE_MacOS26_x64,     VBOXOSHINT_X86_HWVIRTEX | VBOXOSHINT_X86_IOAPIC | VBOXOSHINT_EFI | VBOXOSHINT_X86_PAE |  VBOXOSHINT_64BIT
+                                | VBOXOSHINT_USBHID | VBOXOSHINT_X86_HPET | VBOXOSHINT_RTCUTC | VBOXOSHINT_USBTABLET | VBOXOSHINT_USB3,
+      4, 8192, 128, 100 * _1G64, GraphicsControllerType_VBoxVGA, NetworkAdapterType_I82545EM, 0, StorageControllerType_IntelAhci, StorageBus_SATA,
+      StorageControllerType_IntelAhci, StorageBus_SATA, ChipsetType_ICH9, IommuType_None, AudioControllerType_HDA, AudioCodecType_STAC9221  },
+
     { "Other",   "Other",             "",        GUEST_OS_ID_STR_X86("DOS"),            "DOS", VBOX_GUEST_ADDITIONS_NAME_NONE,
       VBOXOSTYPE_DOS,             VBOXOSHINT_FLOPPY | VBOXOSHINT_NOUSB,
       1,   32,   4,  500 * _1M, GraphicsControllerType_VBoxVGA, NetworkAdapterType_Am79C973, 1, StorageControllerType_PIIX4, StorageBus_IDE,

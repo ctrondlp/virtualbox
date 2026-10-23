@@ -1025,7 +1025,21 @@
   MdeModulePkg/Bus/Pci/NvmExpressDxe/NvmExpressDxe.inf
   MdeModulePkg/Universal/HiiDatabaseDxe/HiiDatabaseDxe.inf
   MdeModulePkg/Universal/SetupBrowserDxe/SetupBrowserDxe.inf
+!ifdef $(VBOX)
+!if $(TOOL_CHAIN_TAG) == "VS2017" || $(TOOL_CHAIN_TAG) == "VS2019" || $(TOOL_CHAIN_TAG) == "VS2022"
+  #
+  # Newer MSVC versions emit memcpy calls for large structure copies, provide them.
+  #
+  MdeModulePkg/Universal/DisplayEngineDxe/DisplayEngineDxe.inf {
+    <LibraryClasses>
+      NULL|MdePkg/Library/CompilerIntrinsicsLib/CompilerIntrinsicsLib.inf
+  }
+!else
   MdeModulePkg/Universal/DisplayEngineDxe/DisplayEngineDxe.inf
+!endif
+!else
+  MdeModulePkg/Universal/DisplayEngineDxe/DisplayEngineDxe.inf
+!endif
 
 !ifndef $(VBOX)
   OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf

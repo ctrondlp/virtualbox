@@ -36,5 +36,38 @@
           <p>It is currently not possible to start a macOS guest in safe mode by specifying the <codeph>-x</codeph> option in <codeph>VBoxInternal2/EfiBootArgs</codeph> extradata.</p>
         </li>
       </ul></p>
+    <section id="macosxguests-modern">
+      <title>macOS 10.14 and Later Guests</title>
+      <p>There are separate guest OS types for macOS 10.14 Mojave, 10.15 Catalina, 11 Big Sur, 12 Monterey, 13 Ventura, 14 Sonoma, 15 Sequoia and 26 Tahoe (Intel versions only). Select the type matching the macOS release you install. In addition to the recommended hardware settings (EFI firmware, ICH9 chipset, I/O APIC, HPET, AHCI storage, Intel PRO/1000 MT Server network adapter, HD Audio, USB 3.0 controller with USB tablet and keyboard), VMs of these types differ from the older Mac OS X types as follows:</p>
+      <ul>
+        <li>
+          <p>The DMI (SMBIOS) tables describe a Mac model supported by the selected release instead of the host system: iMac18,3 for macOS 10.14, iMac19,1 for macOS 10.15 up to 15 and iMac20,1 for macOS 26. The serial numbers are not changed. To use the host information like the older types do, set the <codeph>VBoxInternal/Devices/efi/0/Config/DmiUseHostInfo</codeph> extra data value to <codeph>1</codeph>, or to <codeph>0</codeph> for the generic <ph conkeyref="vbox-conkeyref-phrases/product-name"/> values. The individual values can be overridden as described in <xref href="changedmi.dita">Configuring the BIOS DMI Information</xref>.</p>
+        </li>
+        <li>
+          <p>On Intel hosts with a CPU model which the macOS kernel does not know, for example Tiger Lake, Alder Lake and later CPUs, the CPU is presented to the guest as an Intel Coffee Lake CPU (family 6, model 0x9e), because the macOS kernel otherwise panics with <uicontrol>Unsupported CPU</uicontrol>. This is not done if a CPU profile other than <codeph>host</codeph> is selected. The presented family, model and stepping can be changed with the <codeph>VBoxInternal/CPUM/MaxIntelFamilyModelStep</codeph> extra data value, for example <codeph>0x00069E0D</codeph> (stepping in the lowest byte, then model and family).</p>
+        </li>
+        <li>
+          <p>The EFI firmware reports APFS and large BaseSystem support to the guest.</p>
+        </li>
+      </ul>
+      <p>macOS requires a device key which is stored in the System Management Controller (SMC) of Apple hardware. On Apple hosts <ph conkeyref="vbox-conkeyref-phrases/product-name"/> reads it from the host. In all other cases it must be configured for the VM, otherwise macOS fails to decrypt protected system components and does not start its user interface. <ph conkeyref="vbox-conkeyref-phrases/product-name"/> does not include this key. A warning is shown when a macOS VM is started without a key. Use the following command to set the 64 character key of the Apple hardware the guest is licensed to run on:</p>
+      <pre xml:space="preserve">$ VBoxManage setextradata <varname>VM-name</varname> "VBoxInternal2/SmcDeviceKey" "<varname>key</varname>"</pre>
+      <p>macOS 13 Ventura and later only run on CPUs with the instruction set extensions of the Intel Haswell generation (AVX2, BMI1, BMI2, FMA, MOVBE, LZCNT and others). If the virtual CPU lacks any of them, the guest fails to start with the message <uicontrol>Library not loaded: /usr/lib/libSystem.B.dylib</uicontrol>. <ph conkeyref="vbox-conkeyref-phrases/product-name"/> warns about this when the VM is started. Make sure hardware virtualization is used, keep the CPU profile at <codeph>host</codeph> and the CPUID portability level at 0.</p>
+      <p>Recommendations for these guests:</p>
+      <ul>
+        <li>
+          <p>Assign at least 4 GB of memory and 2 CPUs, for macOS 13 and later at least 8 GB and 4 CPUs.</p>
+        </li>
+        <li>
+          <p>Use a virtual hard disk of at least 80 GB (macOS 11 and later), with the AHCI (SATA) controller.</p>
+        </li>
+        <li>
+          <p>Keep the paravirtualization interface at <codeph>Default</codeph>, which selects the <codeph>Minimal</codeph> interface for macOS guests. macOS uses it to determine the TSC and bus frequencies.</p>
+        </li>
+        <li>
+          <p>Use the most recent installer of the respective macOS release.</p>
+        </li>
+      </ul>
+    </section>
   </body>
 </topic>

@@ -85,6 +85,12 @@ typedef enum
     EFI_INFO_INDEX_CPU_COUNT_CURRENT,
     EFI_INFO_INDEX_CPU_COUNT_MAX,
     EFI_INFO_INDEX_TPM_PPI_BASE,
+    /** The value of the Apple FirmwareFeatures (low 32 bits) and
+     * ExtendedFirmwareFeatures (all 64 bits) NVRAM variables, 8 bytes. */
+    EFI_INFO_INDEX_APPLE_FW_FEATURES,
+    /** The value of the Apple FirmwareFeaturesMask (low 32 bits) and
+     * ExtendedFirmwareFeaturesMask (all 64 bits) NVRAM variables, 8 bytes. */
+    EFI_INFO_INDEX_APPLE_FW_FEATURES_MASK,
     EFI_INFO_INDEX_END
 } EfiInfoIndex;
 

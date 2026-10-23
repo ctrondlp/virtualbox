@@ -32,6 +32,7 @@
 # pragma once
 #endif
 
+#include <iprt/critsect.h>
 #include <iprt/semaphore.h>
 #include <VBox/vmm/pdm.h>
 
@@ -67,6 +68,7 @@ public:
     void i_handleDisplayUpdate (int x, int y, int w, int h);
 
     void i_invalidateAndUpdateScreen(uint32_t aScreenId);
+    void i_freeRetiredShadows(void *pvInUse);
 
 
 private:
@@ -87,16 +89,58 @@ private:
     static DECLCALLBACK(void)  i_displayProcessDisplayDataCallback(PPDMIDISPLAYCONNECTOR pInterface, void *pvVRAM, unsigned uScreenId);
     static DECLCALLBACK(int)   i_displayVBVAEnable(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId,
                                                    VBVAHOSTFLAGS RT_UNTRUSTED_VOLATILE_GUEST *pHostFlags);
+    static DECLCALLBACK(void)  i_displayVBVADisable(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId);
+    static DECLCALLBACK(void)  i_displayVBVAUpdateBegin(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId);
+    static DECLCALLBACK(void)  i_displayVBVAUpdateProcess(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId,
+                                                          struct VBVACMDHDR const RT_UNTRUSTED_VOLATILE_GUEST *pCmd, size_t cbCmd);
+    static DECLCALLBACK(void)  i_displayVBVAUpdateEnd(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId, int32_t x, int32_t y,
+                                                      uint32_t cx, uint32_t cy);
+    static DECLCALLBACK(int)   i_displayVBVAResize(PPDMIDISPLAYCONNECTOR pInterface, PCVBVAINFOVIEW pView,
+                                                   PCVBVAINFOSCREEN pScreen, void *pvVRAM, bool fResetInputMapping);
+    static DECLCALLBACK(int)   i_displayVBVAMousePointerShape(PPDMIDISPLAYCONNECTOR pInterface, bool fVisible, bool fAlpha,
+                                                              uint32_t xHot, uint32_t yHot, uint32_t cx, uint32_t cy,
+                                                              const void *pvShape);
+    static DECLCALLBACK(void)  i_displayVBVAGuestCapabilityUpdate(PPDMIDISPLAYCONNECTOR pInterface, uint32_t fCapabilities);
+    static DECLCALLBACK(void)  i_displayVBVAInputMappingUpdate(PPDMIDISPLAYCONNECTOR pInterface, int32_t xOrigin, int32_t yOrigin,
+                                                               uint32_t cx, uint32_t cy);
+    static DECLCALLBACK(void)  i_displayVBVAReportCursorPosition(PPDMIDISPLAYCONNECTOR pInterface, uint32_t fFlags,
+                                                                 uint32_t uScreen, uint32_t x, uint32_t y);
 
     static DECLCALLBACK(void) i_doInvalidateAndUpdate(struct DRVMAINDISPLAY  *mpDrv);
+    uint8_t *i_allocShadow(uint32_t cx, uint32_t cy);
+
     /** Pointer to the associated display driver. */
     struct DRVMAINDISPLAY  *mpDrv;
+
+    /** The 32bpp buffer the VGA device currently renders the primary screen into
+     * (see i_handleDisplayResize), NULL if none. */
+    struct DISPLAYSHADOWBUF *mpShadow;
+    /** Buffers replaced by a newer one, freed by the SDL thread once it no
+     * longer shows them (i_freeRetiredShadows). */
+    struct DISPLAYSHADOWBUF *mpRetiredShadows;
+    /** Protects mpShadow and mpRetiredShadows. */
+    RTCRITSECT              mShadowLock;
 
     Framebuffer *m_pFramebuffer;
     bool mFramebufferOpened;
 
     bool        mfMachineRunning;
     volatile bool fVGAResizing;
+
+    /** Origin of the primary screen as last set by the guest via VBVA.  VBVA
+     * reports dirty rectangles in coordinates relative to this. */
+    int32_t     mxVBVAOrigin;
+    int32_t     myVBVAOrigin;
+
+    /** The primary screen layout last applied via VBVA (valid if mfVBVAScreenValid).
+     * Linux guests repeat the same layout with every display update. */
+    bool        mfVBVAScreenValid;
+    void       *mpvVBVAScreen;
+    uint32_t    mcxVBVAScreen;
+    uint32_t    mcyVBVAScreen;
+    uint32_t    mcbVBVAScreenLine;
+    uint16_t    mcBitsVBVAScreen;
+    uint16_t    mfVBVAScreenFlags;
 
     void handleResizeCompletedEMT (void);
     volatile uint32_t mu32ResizeStatus;

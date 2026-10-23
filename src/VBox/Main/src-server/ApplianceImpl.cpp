@@ -142,6 +142,14 @@ static struct
     { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS1011_x64 },
     { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS1012_x64 },
     { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS1013_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS1014_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS1015_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS11_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS12_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS13_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS14_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS15_x64 },
+    { ovf::CIMOSType_CIMOS_MACOS,                                VBOXOSTYPE_MacOS26_x64 },
 
     // Linuxes
     { ovf::CIMOSType_CIMOS_RedHatEnterpriseLinux,                VBOXOSTYPE_RedHat },

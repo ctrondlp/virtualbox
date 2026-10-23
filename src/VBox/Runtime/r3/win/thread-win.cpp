@@ -97,6 +97,13 @@ static PFNCOUNINITIALIZE volatile   g_pfnCoUninitialize  = NULL;
 /** Pointer to OleUninitialize (OLE32.DLL / combase.dll) if available. */
 static PFNOLEUNINITIALIZE volatile  g_pfnOleUninitialize = NULL;
 
+/** Set when short timed waits should use high resolution timers, see
+ * rtThreadWinHiResWait and rtThreadWinEnableHiResWaits. */
+DECL_HIDDEN_DATA(bool volatile)     g_fRtThreadWinHiResWaits = false;
+/** Pointer to SetWaitableTimer (KERNEL32.DLL, NT4+), set before
+ * g_fRtThreadWinHiResWaits. */
+static decltype(SetWaitableTimer) *g_pfnSetWaitableTimer = NULL;
+
 
 /*********************************************************************************************************************************
 *   Internal Functions                                                                                                           *
@@ -147,6 +154,105 @@ DECLHIDDEN(void) rtThreadNativeDestroy(PRTTHREADINT pThread)
         CloseHandle((HANDLE)pThread->hThread);
         pThread->hThread = (uintptr_t)INVALID_HANDLE_VALUE;
     }
+
+    /* The thread is done using it by now (we only get here when the last reference is released). */
+    if (pThread->hHiResWaitTimer)
+    {
+        CloseHandle((HANDLE)pThread->hHiResWaitTimer);
+        pThread->hHiResWaitTimer = 0;
+    }
+}
+
+
+/**
+ * Does a timed wait on @a hObject using a high resolution timer.
+ *
+ * Plain NT waits only time out on the first clock interrupt following the
+ * deadline, so their granularity is the timer resolution in effect for the
+ * process: up to 15.6 ms (and Windows 11 ignores timer resolution requests from
+ * throttled processes).  High resolution waitable timers (W10 1803+) expire close
+ * to the deadline regardless of that.  So, when enabled for the process (VM
+ * processes only), short timed waits on IPRT threads wait on both the object and
+ * a per thread high resolution timer.  This costs one extra system call per
+ * wait (arming the timer) and no busy waiting.
+ *
+ * @returns true if the wait was done and @a *prcNt set, false if the caller must
+ *          do a normal wait instead (not enabled, timeout out of range, alien
+ *          thread or failure to create or arm the timer).
+ * @param   hObject     The object to wait on (alertable wait).
+ * @param   cNsTimeout  The relative timeout in nanoseconds.
+ * @param   prcNt       Where to return the NtWaitForSingleObject style status:
+ *                      STATUS_SUCCESS or STATUS_ABANDONED_WAIT_0 if the object
+ *                      was signalled, STATUS_TIMEOUT, STATUS_USER_APC,
+ *                      STATUS_ALERTED or a failure status.
+ */
+DECLHIDDEN(bool) rtThreadWinHiResWait(HANDLE hObject, uint64_t cNsTimeout, NTSTATUS *prcNt)
+{
+    /* Atomic read: pairs with the write in rtThreadWinEnableHiResWaits so that
+       g_pfnSetWaitableTimer is visible once the flag is (weakly ordered hosts). */
+    if (   !ASMAtomicReadBool(&g_fRtThreadWinHiResWaits)
+        || cNsTimeout < RTTHREADWIN_HIRES_WAIT_MIN_NS
+        || cNsTimeout > RTTHREADWIN_HIRES_WAIT_MAX_NS)
+        return false;
+
+    /* Only threads we created, as rtThreadNativeDestroy must close the timer. */
+    PRTTHREADINT pThread = (PRTTHREADINT)TlsGetValue(g_dwSelfTLS);
+    if (!pThread || (pThread->fIntFlags & RTTHREADINT_FLAGS_ALIEN))
+        return false;
+
+    HANDLE hTimer = (HANDLE)pThread->hHiResWaitTimer;
+    if (!hTimer)
+    {
+        /* (rtThreadWinEnableHiResWaits checked that this works.) */
+        hTimer = g_pfnCreateWaitableTimerExW(NULL /*pSecAttr*/, NULL /*pwszName*/, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                             TIMER_MODIFY_STATE | SYNCHRONIZE);
+        if (!hTimer)
+            return false;
+        pThread->hHiResWaitTimer = (uintptr_t)hTimer;
+    }
+
+    /* Arm the (synchronization) timer.  This also resets its state should it
+       have expired after the object satisfied a previous wait. */
+    LARGE_INTEGER DueTime;
+    DueTime.QuadPart = -(int64_t)(cNsTimeout / 100);
+    if (!g_pfnSetWaitableTimer(hTimer, &DueTime, 0 /*lPeriod*/, NULL /*pfnCompletionRoutine*/, NULL /*pvArg*/, FALSE /*fResume*/))
+        return false;
+
+    /* Wait for either.  The object comes first and thus wins if both are
+       signalled.  We don't cancel the timer when the object is signalled first,
+       as that would cost another system call on the wakeup path. */
+    HANDLE   ahHandles[2] = { hObject, hTimer };
+    NTSTATUS rcNt = NtWaitForMultipleObjects(RT_ELEMENTS(ahHandles), ahHandles, WaitAnyObject, TRUE /*Alertable*/,
+                                             NULL /*pTimeout*/);
+    if (rcNt == STATUS_WAIT_1)
+        rcNt = STATUS_TIMEOUT;
+    *prcNt = rcNt;
+    return true;
+}
+
+
+/**
+ * Enables high resolution timed waits (rtThreadWinHiResWait) for the process.
+ *
+ * @returns true if enabled, false if the system lacks high resolution waitable
+ *          timers (pre W10 1803).
+ */
+DECLHIDDEN(bool) rtThreadWinEnableHiResWaits(void)
+{
+    /* Resolved dynamically, as waitable timers are NT4+ and the high resolution flag W10 1803+. */
+    decltype(SetWaitableTimer) *pfnSetWaitableTimer = (decltype(SetWaitableTimer) *)GetProcAddress(g_hModKernel32,
+                                                                                                  "SetWaitableTimer");
+    if (!pfnSetWaitableTimer || !g_pfnCreateWaitableTimerExW)
+        return false;
+    HANDLE hTimer = g_pfnCreateWaitableTimerExW(NULL /*pSecAttr*/, NULL /*pwszName*/, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                TIMER_MODIFY_STATE | SYNCHRONIZE);
+    if (!hTimer)
+        return false;
+    CloseHandle(hTimer);
+
+    g_pfnSetWaitableTimer = pfnSetWaitableTimer;
+    ASMAtomicWriteBool(&g_fRtThreadWinHiResWaits, true);
+    return true;
 }
 
 

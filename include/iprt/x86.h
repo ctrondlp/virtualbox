@@ -701,17 +701,29 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 #define X86_CPUID_STEXT_FEATURE_ECX_PKU               RT_BIT_32(3)
 /** ECX Bit 4 - OSPKE - Protection keys for user mode pages enabled. */
 #define X86_CPUID_STEXT_FEATURE_ECX_OSPKE             RT_BIT_32(4)
+/** ECX Bit 5 - WAITPKG - Supports TPAUSE, UMONITOR and UMWAIT. */
+#define X86_CPUID_STEXT_FEATURE_ECX_WAITPKG           RT_BIT_32(5)
 /** ECX Bit 7 - CET_SS - Supports CET shadow stack features. */
 #define X86_CPUID_STEXT_FEATURE_ECX_CET_SS            RT_BIT_32(7)
-/** ECX Bit 15 - LA57  - Supports 5-level paging. */
+/** ECX Bit 8 - GFNI - Supports Galois Field New Instructions. */
+#define X86_CPUID_STEXT_FEATURE_ECX_GFNI              RT_BIT_32(8)
+/** ECX Bit 9 - VAES - Supports VEX (and EVEX) encoded 256-bit (and 512-bit) AES instructions. */
+#define X86_CPUID_STEXT_FEATURE_ECX_VAES              RT_BIT_32(9)
+/** ECX Bit 10 - VPCLMULQDQ - Supports VEX (and EVEX) encoded 256-bit (and 512-bit) VPCLMULQDQ. */
+#define X86_CPUID_STEXT_FEATURE_ECX_VPCLMULQDQ        RT_BIT_32(10)
+/** ECX Bit 16 - LA57  - Supports 5-level paging. */
 #define X86_CPUID_STEXT_FEATURE_ECX_LA57              RT_BIT_32(16)
 /** ECX Bits 17-21 - MAWAU - Value used by BNDLDX and BNDSTX. */
 #define X86_CPUID_STEXT_FEATURE_ECX_MAWAU             UINT32_C(0x003e0000)
-/** ECX Bit 22 - RDPID - Support pread process ID. */
-#define X86_CPUID_STEXT_FEATURE_ECX_RDPID             RT_BIT_32(2)
+/** ECX Bit 22 - RDPID - Supports the RDPID (read processor ID) instruction. */
+#define X86_CPUID_STEXT_FEATURE_ECX_RDPID             RT_BIT_32(22)
+/** ECX Bit 25 - CLDEMOTE - Supports the CLDEMOTE instruction. */
+#define X86_CPUID_STEXT_FEATURE_ECX_CLDEMOTE          RT_BIT_32(25)
 /** ECX Bit 30 - SGX_LC - Supports SGX launch configuration. */
 #define X86_CPUID_STEXT_FEATURE_ECX_SGX_LC            RT_BIT_32(30)
 
+/** EDX Bit 4 - FSRM - Fast short REP MOVSB. */
+#define X86_CPUID_STEXT_FEATURE_EDX_FSRM              RT_BIT_32(4)
 /** EDX bit 9 - SRBDS_CTRL - (Special Register Buffer Data Sample Control)
  *  Supports IA32_MCU_OPT_CTRL and IA32_MCU_OPT_CTRL.RNGDS_MITG_DIS. */
 #define X86_CPUID_STEXT_FEATURE_EDX_SRBDS_CTRL        RT_BIT_32(9)
@@ -719,6 +731,8 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 #define X86_CPUID_STEXT_FEATURE_EDX_MD_CLEAR          RT_BIT_32(10)
 /** EDX Bit 11 - TSX_FORCE_ABORT - Supports for IA32_TSX_FORCE_ABORT MSR. */
 #define X86_CPUID_STEXT_FEATURE_EDX_TSX_FORCE_ABORT   RT_BIT_32(11)
+/** EDX Bit 15 - HYBRID - The processor is identified as a hybrid part. */
+#define X86_CPUID_STEXT_FEATURE_EDX_HYBRID            RT_BIT_32(15)
 /** EDX Bit 20 - CET_IBT - Supports CET indirect branch tracking features. */
 #define X86_CPUID_STEXT_FEATURE_EDX_CET_IBT           RT_BIT_32(20)
 /** EDX Bit 26 - IBRS & IBPB - Supports the IBRS flag in IA32_SPEC_CTRL and
@@ -734,6 +748,41 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 #define X86_CPUID_STEXT_FEATURE_EDX_CORECAP           RT_BIT_32(30)
 /** EDX Bit 31 - SSBD - Supports the SSBD flag in IA32_SPEC_CTRL. */
 #define X86_CPUID_STEXT_FEATURE_EDX_SSBD              RT_BIT_32(31)
+/** @} */
+
+/** @name CPUID Structured Extended Feature information, \#1.
+ * CPUID query with EAX=7 and ECX=1.
+ * @{
+ */
+/** EAX Bit 4 - AVX_VNNI - Supports the VEX encoded AVX-VNNI instructions. */
+#define X86_CPUID_STEXT_FEATURE_1_EAX_AVX_VNNI          RT_BIT_32(4)
+/** EAX Bit 5 - AVX512_BF16 - Supports AVX512 BFLOAT16 instructions. */
+#define X86_CPUID_STEXT_FEATURE_1_EAX_AVX512_BF16       RT_BIT_32(5)
+/** EAX Bit 22 - HRESET - Supports history reset (HRESET, IA32_HRESET_ENABLE). */
+#define X86_CPUID_STEXT_FEATURE_1_EAX_HRESET            RT_BIT_32(22)
+/** EAX Bit 23 - AVX_IFMA - Supports the VEX encoded AVX-IFMA instructions. */
+#define X86_CPUID_STEXT_FEATURE_1_EAX_AVX_IFMA          RT_BIT_32(23)
+/** EAX Bit 26 - LAM - Supports linear address masking. */
+#define X86_CPUID_STEXT_FEATURE_1_EAX_LAM               RT_BIT_32(26)
+
+/** EDX Bit 4 - AVX_VNNI_INT8 - Supports the AVX-VNNI-INT8 instructions. */
+#define X86_CPUID_STEXT_FEATURE_1_EDX_AVX_VNNI_INT8     RT_BIT_32(4)
+/** EDX Bit 5 - AVX_NE_CONVERT - Supports the AVX-NE-CONVERT instructions. */
+#define X86_CPUID_STEXT_FEATURE_1_EDX_AVX_NE_CONVERT    RT_BIT_32(5)
+/** @} */
+
+/** @name CPUID Processor Extended State Enumeration, sub-leaf \#1.
+ * CPUID query with EAX=0xd and ECX=1.
+ * @{
+ */
+/** EAX Bit 0 - XSAVEOPT - Supports the XSAVEOPT instruction. */
+#define X86_CPUID_XSAVE_1_EAX_XSAVEOPT                  RT_BIT_32(0)
+/** EAX Bit 1 - XSAVEC - Supports the XSAVEC instruction and compacted XRSTOR. */
+#define X86_CPUID_XSAVE_1_EAX_XSAVEC                    RT_BIT_32(1)
+/** EAX Bit 2 - XGETBV1 - Supports XGETBV with ECX=1. */
+#define X86_CPUID_XSAVE_1_EAX_XGETBV1                   RT_BIT_32(2)
+/** EAX Bit 3 - XSAVES - Supports XSAVES/XRSTORS and IA32_XSS. */
+#define X86_CPUID_XSAVE_1_EAX_XSAVES                    RT_BIT_32(3)
 /** @} */
 
 /** @name CPUID Structured Extended Feature information, \#2.

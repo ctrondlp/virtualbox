@@ -48,6 +48,12 @@
       HandleParsingLib|ShellPkg/Library/UefiHandleParsingLib/UefiHandleParsingLib.inf
       PrintLib|MdePkg/Library/BasePrintLib/BasePrintLib.inf
       BcfgCommandLib|ShellPkg/Library/UefiShellBcfgCommandLib/UefiShellBcfgCommandLib.inf
+!ifdef $(VBOX)
+!if $(TOOL_CHAIN_TAG) == "VS2017" || $(TOOL_CHAIN_TAG) == "VS2019" || $(TOOL_CHAIN_TAG) == "VS2022"
+      # Newer MSVC versions emit memcpy calls for large structure copies, provide them.
+      NULL|MdePkg/Library/CompilerIntrinsicsLib/CompilerIntrinsicsLib.inf
+!endif
+!endif
 
     <PcdsFixedAtBuild>
       gEfiMdePkgTokenSpaceGuid.PcdDebugPropertyMask|0xFF

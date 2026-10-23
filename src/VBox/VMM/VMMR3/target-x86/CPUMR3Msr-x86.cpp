@@ -508,6 +508,26 @@ int cpumR3MsrApplyFudge(PVM pVM)
     }
 
     /*
+     * Intel Core7 (Nehalem and later): MSR_CORE_THREAD_COUNT is read
+     * unconditionally by some guests (e.g. the macOS kernel for anything newer
+     * than Penryn) and is missing from some database entries which newer hosts
+     * may end up matching.  The read handler derives the core and thread counts
+     * from the VM configuration, so it is consistent with CPUID.  Older CPUs
+     * (P6, Core2, Atom) don't have it and must keep raising #GP.
+     */
+    if (   pVM->cpum.s.GuestFeatures.enmCpuVendor == CPUMCPUVENDOR_INTEL
+        && pVM->cpum.s.GuestFeatures.uFamily == 6
+        && CPUMMICROARCH_IS_INTEL_CORE7(pVM->cpum.s.GuestFeatures.enmMicroarch))
+    {
+        static CPUMMSRRANGE const s_aIntelFam06FudgeMsrs[] =
+        {
+            MFO(0x00000035, "MSR_CORE_THREAD_COUNT", IntelI7CoreThreadCount),
+        };
+        rc = cpumR3MsrApplyFudgeTable(pVM, &s_aIntelFam06FudgeMsrs[0], RT_ELEMENTS(s_aIntelFam06FudgeMsrs));
+        AssertLogRelRCReturn(rc, rc);
+    }
+
+    /*
      * Windows 10 incorrectly writes to MSR_IA32_TSX_CTRL without checking
      * CPUID.ARCH_CAP(EAX=7h,ECX=0):EDX[bit 29] or the MSR feature bits in
      * MSR_IA32_ARCH_CAPABILITIES[bit 7], see @bugref{9630}.

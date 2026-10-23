@@ -193,6 +193,7 @@ ifdef VBOX_WITH_TESTCASES # The whole file
   	tstRTProcWait \
   	tstFileAppendWin-1 \
   	tstRTNtPath-1 \
+  	tstRTWinThreadQoS \
   	ntGetTimerResolution \
   	tstRTDarwinMachKernel
 
@@ -471,6 +472,9 @@ ifdef VBOX_WITH_TESTCASES # The whole file
 
  tstFileAppendWin-1_TEMPLATE = VBoxR3TstExe
  tstFileAppendWin-1_SOURCES = tstFileAppendWin-1.cpp
+
+ tstRTWinThreadQoS_TEMPLATE = VBoxR3TstExe
+ tstRTWinThreadQoS_SOURCES = tstRTWinThreadQoS.cpp
 
  tstFileLock_TEMPLATE = VBoxR3TstExe
  tstFileLock_SOURCES = tstFileLock.cpp

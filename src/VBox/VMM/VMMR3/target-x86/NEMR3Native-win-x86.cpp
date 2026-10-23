@@ -61,6 +61,7 @@
 #include <VBox/vmm/pdm.h>
 #include <VBox/vmm/dbgf.h>
 #include <VBox/vmm/dbgftrace.h>
+#include <VBox/vmm/gim.h>
 #include "NEMInternal.h"
 #include <VBox/vmm/vmcc.h>
 
@@ -68,6 +69,7 @@
 #include <iprt/path.h>
 #include <iprt/string.h>
 #include <iprt/system.h>
+#include <iprt/thread.h>
 #include <iprt/utf16.h>
 
 #ifndef NTDDI_WIN10_VB /* Present in W10 2004 SDK, quite possibly earlier. */
@@ -140,6 +142,17 @@ HRESULT WINAPI WHvQueryGpaRangeDirtyBitmap(WHV_PARTITION_HANDLE, WHV_GUEST_PHYSI
 #define MY_NTDDI_WIN11_22000    NTDDI_WIN10_CO
 #define MY_NTDDI_WIN11_22621    NTDDI_WIN10_NI
 #define MY_NTDDI_WIN11_26100    NTDDI_WIN10_GE
+
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION /* Since 17134. */
+# define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION  UINT32_C(0x00000002)
+#endif
+
+/** Deadlines further away than this aren't worth kicking the EMT for, the TM
+ * watchdog will deal with them (TM also returns 500 ms for the non-timer EMTs). */
+#define NEM_WIN_TIMER_KICK_MAX_NS       (RT_NS_1MS * 250)
+/** Re-arming slack for the timer kick. */
+#define NEM_WIN_TIMER_KICK_SLACK_NS     (RT_NS_1US * 25)
 
 
 /** Copy back a segment from hyper-V. */
@@ -396,6 +409,9 @@ DECLINLINE(int) nemR3NativeGCPhys2R3PtrReadOnly(PVM pVM, RTGCPHYS GCPhys, const 
 DECLINLINE(int) nemR3NativeGCPhys2R3PtrWriteable(PVM pVM, RTGCPHYS GCPhys, void **ppv);
 static int      nemHCNativeSetPhysPage(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhysSrc, RTGCPHYS GCPhysDst,
                                        uint32_t fPageProt, uint8_t *pu2State, bool fBackingChanged);
+static void     nemR3WinTimerKickInit(PVM pVM);
+static void     nemR3WinTimerKickTerm(PVM pVM);
+static int      nemR3WinSetXcptExitBitmap(PVM pVM, uint64_t fBitmap);
 
 
 #ifdef NEM_WIN_INTERCEPT_NT_IO_CTLS
@@ -1889,9 +1905,19 @@ static int nemR3WinInitCreatePartition(PVM pVM, PRTERRINFO pErrInfo)
              * for best performance.
              */
             PCFGMNODE pCfgmApic = CFGMR3GetChild(CFGMR3GetRoot(pVM), "/Devices/apic");
+
+            /** @cfgm{/NEM/HyperVApic, bool, false}
+             * Whether to use Hyper-V's local APIC emulation instead of VirtualBox's.
+             * Guest APIC accesses (EOIs, IPIs, timer) then no longer cause VM exits,
+             * which are expensive with many vCPUs.  Off by default since the Hyper-V
+             * APIC backend is not considered ready yet. */
+            bool fHyperVApic = false;
+            int rc2 = CFGMR3QueryBoolDef(CFGMR3GetChild(CFGMR3GetRoot(pVM), "NEM"), "HyperVApic", &fHyperVApic, false);
+            if (RT_FAILURE(rc2))
+                fHyperVApic = false;
             if (   pCfgmApic
                 && pVM->nem.s.fLocalApicEmulation
-                && 0) /** @todo Fix issues in Hyper-V APIC backend before activating. */
+                && fHyperVApic) /** @todo Fix issues in Hyper-V APIC backend before enabling it by default. */
             {
                 /* If setting this fails log an error but continue. */
                 RT_ZERO(Property);
@@ -2151,7 +2177,60 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                      */
                     VM_SET_MAIN_EXECUTION_ENGINE(pVM, VM_EXEC_ENGINE_NATIVE_API);
                     Log(("NEM: Marked active!\n"));
-                    nemR3WinDisableX2Apic(pVM);
+
+                    /** @cfgm{/NEM/AllowX2Apic, bool, true}
+                     * Whether to keep the X2APIC mode when VirtualBox emulates the APIC.
+                     * Guest x2APIC accesses then exit as MSR accesses, which are much
+                     * cheaper to handle than the MMIO accesses of the xAPIC mode (those
+                     * go through IEM and PGM).  The Hyper-V APIC emulation doesn't do
+                     * x2APIC, so it's disabled with that regardless. */
+                    bool fAllowX2Apic = true;
+                    int rc2 = CFGMR3QueryBoolDef(CFGMR3GetChild(CFGMR3GetRoot(pVM), "NEM"), "AllowX2Apic", &fAllowX2Apic, true);
+                    /* Hyper-V handles APIC base MSR writes itself by default, so our APIC
+                       would miss the guest switching to x2APIC mode.  That needs the APIC
+                       base MSR write exit, which older Windows versions don't offer. */
+                    WHV_CAPABILITY MsrExitCaps;
+                    RT_ZERO(MsrExitCaps);
+                    HRESULT hrcCap = WHvGetCapabilityWrapper(WHvCapabilityCodeX64MsrExitBitmap, &MsrExitCaps, sizeof(MsrExitCaps));
+                    if (RT_FAILURE(rc2) || !fAllowX2Apic || pVM->nem.s.fLocalApicEmulation)
+                        nemR3WinDisableX2Apic(pVM);
+                    else if (   FAILED(hrcCap)
+                             || !MsrExitCaps.X64MsrExitBitmap.UnhandledMsrs
+                             || !MsrExitCaps.X64MsrExitBitmap.ApicBaseMsrWrite)
+                    {
+                        LogRel(("NEM: No APIC base MSR write exits (%Rhrc, %#RX64), disabling X2APIC\n",
+                                hrcCap, MsrExitCaps.X64MsrExitBitmap.AsUINT64));
+                        nemR3WinDisableX2Apic(pVM);
+                    }
+                    else
+                    {
+                        WHV_PARTITION_PROPERTY Property;
+                        RT_ZERO(Property);
+                        Property.X64MsrExitBitmap.UnhandledMsrs    = 1;
+                        Property.X64MsrExitBitmap.ApicBaseMsrWrite = 1;
+                        HRESULT hrc = WHvSetPartitionProperty(pVM->nem.s.hPartition, WHvPartitionPropertyCodeX64MsrExitBitmap,
+                                                              &Property, sizeof(Property));
+                        if (SUCCEEDED(hrc))
+                            LogRel(("NEM: Keeping the X2APIC mode (/NEM/AllowX2Apic)\n"));
+                        else
+                        {
+                            LogRel(("NEM: Failed to enable APIC base MSR write exits: %Rhrc (Last=%#x/%u)\n",
+                                    hrc, RTNtLastStatusValue(), RTNtLastErrorValue()));
+                            nemR3WinDisableX2Apic(pVM);
+                        }
+                    }
+
+                    /** @cfgm{/NEM/InjectIntViaHv, bool, true}
+                     * Whether to let Hyper-V deliver APIC and PIC interrupts (as pending
+                     * interruptions) instead of emulating the delivery with IEM, which
+                     * needs most of the guest state and goes through PGM.  Only applies
+                     * when VirtualBox emulates the APIC. */
+                    bool fInjectIntViaHv = true;
+                    rc2 = CFGMR3QueryBoolDef(CFGMR3GetChild(CFGMR3GetRoot(pVM), "NEM"), "InjectIntViaHv", &fInjectIntViaHv, true);
+                    pVM->nem.s.fInjectIntViaHv = RT_SUCCESS(rc2) && fInjectIntViaHv && !pVM->nem.s.fLocalApicEmulation;
+                    if (pVM->nem.s.fInjectIntViaHv)
+                        LogRel(("NEM: Hyper-V delivers the interrupts (/NEM/InjectIntViaHv)\n"));
+
                     nemR3DisableCpuIsaExt(pVM, "MONITOR"); /* MONITOR is not supported by Hyper-V (MWAIT is sometimes). */
                     PGMR3EnableNemMode(pVM);
                     rc = DBGFR3InfoRegisterInternalEx(pVM, "nem", "Dumps NEM info.", nemR3WinInfo, DBGFINFO_FLAGS_ALL_EMTS);
@@ -2215,6 +2294,17 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                         STAMR3RegisterF(pVM, &pNemCpu->StatImportOnReturn,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of state imports on loop return", "/NEM/CPU%u/ImportOnReturn", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatImportOnReturnSkipped, STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of skipped state imports on loop return", "/NEM/CPU%u/ImportOnReturnSkipped", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatQueryCpuTick,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of TSC queries",                  "/NEM/CPU%u/QueryCpuTick", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatImportOnReturnHalt,  STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of minimal state imports on HLT",  "/NEM/CPU%u/ImportOnReturnHalt", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatImportCalls,         STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "WHvGetVirtualProcessorRegisters calls",  "/NEM/CPU%u/ImportCalls", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatImportRegs,          STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Registers imported",                     "/NEM/CPU%u/ImportRegs", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatImportXState,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "XSAVE state imports",                    "/NEM/CPU%u/ImportXState", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatExportCalls,         STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "WHvSetVirtualProcessorRegisters calls",  "/NEM/CPU%u/ExportCalls", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatExportRegs,          STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Registers exported",                     "/NEM/CPU%u/ExportRegs", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatExportRegsSkipped,   STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Registers not exported because Hyper-V has the value", "/NEM/CPU%u/ExportRegsSkipped", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatExportXState,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "XSAVE state exports",                    "/NEM/CPU%u/ExportXState", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatApicTprSync,         STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "APIC TPR updates from CR8",              "/NEM/CPU%u/ApicTprSync", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatTimerKickArm,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Timer kick arming",                      "/NEM/CPU%u/TimerKickArm", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatTimerKickFired,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Timer kicks fired",                      "/NEM/CPU%u/TimerKickFired", idCpu);
                     }
 
 #if defined(VBOX_WITH_R0_MODULES) && !defined(VBOX_WITH_MINIMAL_R0)
@@ -2295,7 +2385,8 @@ DECLHIDDEN(int) nemR3NativeInitAfterCPUM(PVM pVM)
                           "Failed to set WHvPartitionPropertyCodeProcessorClFlushSize to %u: %Rhrc (Last=%#x/%u)",
                           pVM->nem.s.cCacheLineFlushShift, hrc, RTNtLastStatusValue(), RTNtLastErrorValue());
 
-    /* Intercept #DB, #BP and #UD exceptions. */
+    /* Intercept #DB, #BP and #UD exceptions.  This is narrowed down in
+       nemR3NativeInitCompletedRing3 once GIM has been configured. */
     RT_ZERO(Property);
     Property.ExceptionExitBitmap = RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault)
                                  | RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap)
@@ -2311,6 +2402,7 @@ DECLHIDDEN(int) nemR3NativeInitAfterCPUM(PVM pVM)
         return VMSetError(pVM, VERR_NEM_VM_CREATE_FAILED, RT_SRC_POS,
                           "Failed to set WHvPartitionPropertyCodeExceptionExitBitmap to %#RX64: %Rhrc (Last=%#x/%u)",
                           Property.ExceptionExitBitmap, hrc, RTNtLastStatusValue(), RTNtLastErrorValue());
+    pVM->nem.s.fXcptExitBitmap = Property.ExceptionExitBitmap;
 
 
     /*
@@ -2383,6 +2475,12 @@ DECLHIDDEN(int) nemR3NativeInitAfterCPUM(PVM pVM)
     {
         pVCpu = pVM->apCpusR3[idCpu];
 
+        /* Nothing is known about the Hyper-V register state yet. */
+        pVCpu->nem.s.uShadowGen     = 1;
+        pVCpu->nem.s.uHvCr8         = UINT8_MAX;
+        pVCpu->nem.s.uCr8ApicSynced = UINT8_MAX;
+        RT_ZERO(pVCpu->nem.s.auShadowGen);
+
         hrc = WHvCreateVirtualProcessor(hPartition, idCpu, 0 /*fFlags*/);
         if (FAILED(hrc))
         {
@@ -2452,13 +2550,46 @@ DECLHIDDEN(int) nemR3NativeInitCompletedRing3(PVM pVM)
     //BOOL fRet = SetThreadPriority(GetCurrentThread(), 0);
     //AssertLogRel(fRet);
 
-    RT_NOREF_PV(pVM);
+    /*
+     * Narrow down the exception intercepts now that GIM is configured:
+     *  - #DB and #BP are only needed while debugging (nemR3WinEnsureDebugXcptExits).
+     *  - #UD is only needed when the GIM provider offers hypercalls (VMCALL and
+     *    VMMCALL raise #UD in the partition, see nemR3WinHandleExitException).
+     *  - #GP is only needed for the mesa driver workaround.
+     */
+    GIMPROVIDERID const enmGimProvider = GIMGetProvider(pVM);
+    uint64_t fXcptExitBitmap = 0;
+    if (   enmGimProvider == GIMPROVIDERID_HYPERV
+        || enmGimProvider == GIMPROVIDERID_KVM
+        || pVM->apCpusR3[0]->nem.s.fGIMTrapXcptUD)
+        fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeInvalidOpcodeFault);
+    if (pVM->apCpusR3[0]->nem.s.fTrapXcptGpForLovelyMesaDrv)
+        fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeGeneralProtectionFault);
+    if (   pVM->nem.s.fUseDebugLoop
+        || pVM->dbgf.ro.cEnabledSwBreakpoints
+        || pVM->dbgf.ro.cEnabledHwBreakpoints)
+        fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault) | RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap);
+    if (fXcptExitBitmap != pVM->nem.s.fXcptExitBitmap)
+    {
+        int rc = nemR3WinSetXcptExitBitmap(pVM, fXcptExitBitmap);
+        LogRel(("NEM: Exception exit bitmap: %#RX64 (%Rrc)\n", pVM->nem.s.fXcptExitBitmap, rc)); RT_NOREF(rc);
+    }
+
+    /*
+     * Timer kicking.
+     */
+    nemR3WinTimerKickInit(pVM);
     return VINF_SUCCESS;
 }
 
 
 DECLHIDDEN(int) nemR3NativeTerm(PVM pVM)
 {
+    /*
+     * Stop the timer kicker thread (it uses the partition handle).
+     */
+    nemR3WinTimerKickTerm(pVM);
+
     /*
      * Delete the partition.
      */
@@ -2498,6 +2629,22 @@ DECLHIDDEN(void) nemR3NativeReset(PVM pVM)
 
 DECLHIDDEN(void) nemR3NativeResetCpu(PVMCPU pVCpu, bool fInitIpi)
 {
+    /* Forget any interrupt handed to Hyper-V for delivery (NEM::fInjectIntViaHv), also
+       in Hyper-V: a stale pending interruption makes Hyper-V reject the reset state
+       (RFLAGS.IF=0) we load next with ERROR_HV_INVALID_VP_STATE. */
+    pVCpu->nem.s.fIntInjectPending   = false;
+    pVCpu->nem.s.fLastExitIntPending = false;
+    PVM const pVMReset = pVCpu->CTX_SUFF(pVM);
+    if (pVMReset->nem.s.fInjectIntViaHv && pVMReset->nem.s.hPartition)
+    {
+        static const WHV_REGISTER_NAME s_enmName = WHvRegisterPendingInterruption;
+        WHV_REGISTER_VALUE Value;
+        RT_ZERO(Value);
+        HRESULT hrc = WHvSetVirtualProcessorRegisters(pVMReset->nem.s.hPartition, pVCpu->idCpu, &s_enmName, 1, &Value);
+        AssertLogRelMsg(SUCCEEDED(hrc), ("NEM/%u: Clearing WHvRegisterPendingInterruption failed: %Rhrc\n", pVCpu->idCpu, hrc));
+        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT;
+    }
+
 #ifdef NEM_WIN_WITH_A20
     /* Lock the A20 gate if INIT IPI, make sure it's enabled.  */
     if (fInitIpi && pVCpu->idCpu > 0)
@@ -2514,10 +2661,165 @@ DECLHIDDEN(void) nemR3NativeResetCpu(PVMCPU pVCpu, bool fInitIpi)
 }
 
 
+/**
+ * Maps a register name to a shadow slot index.
+ *
+ * @returns Slot index, UINT32_MAX if the register isn't shadowed.
+ * @param   enmName     The register name.
+ *
+ * @note    This is typically called with constant arguments, allowing the
+ *          compiler to fold it.
+ */
+DECL_FORCE_INLINE(uint32_t) nemR3WinShadowSlot(WHV_REGISTER_NAME enmName)
+{
+    uint32_t const uName = (uint32_t)enmName;
+    if (uName <= (uint32_t)WHvX64RegisterXCr0)                                         /* 0x00..0x27 -> 0..39 */
+        return uName;
+    if (uName - (uint32_t)WHvX64RegisterEfer <= (uint32_t)(WHvX64RegisterSfmask - WHvX64RegisterEfer)) /* 0x2001..0x200b -> 40..50 */
+        return 40 + uName - (uint32_t)WHvX64RegisterEfer;
+    if (uName == (uint32_t)WHvX64RegisterMsrMtrrDefType)
+        return 51;
+    if (uName - (uint32_t)WHvX64RegisterMsrMtrrFix64k00000 <= (uint32_t)(WHvX64RegisterMsrMtrrFix4kF8000 - WHvX64RegisterMsrMtrrFix64k00000))
+        return 52 + uName - (uint32_t)WHvX64RegisterMsrMtrrFix64k00000;                 /* 0x2070..0x207a -> 52..62 */
+    if (uName == (uint32_t)WHvX64RegisterTscAux)
+        return 63;
+    if (uName == (uint32_t)WHvX64RegisterSpecCtrl)
+        return 64;
+    if (uName == (uint32_t)WHvRegisterInterruptState)
+        return 65;
+    return UINT32_MAX;
+}
+AssertCompile(WHvX64RegisterXCr0 == 0x27);
+AssertCompile(WHvX64RegisterSfmask - WHvX64RegisterEfer == 10);
+AssertCompile(WHvX64RegisterMsrMtrrFix4kF8000 - WHvX64RegisterMsrMtrrFix64k00000 == 10);
+AssertCompile(NEM_WIN_SHADOW_SLOTS == 66);
+
+
+/**
+ * Invalidates all register shadows, called whenever the virtual processor may
+ * have modified its registers (i.e. before running it).
+ *
+ * @param   pVCpu       The cross context per CPU structure.
+ */
+DECLINLINE(void) nemR3WinShadowInvalidateAll(PVMCPUCC pVCpu)
+{
+    if (RT_LIKELY(++pVCpu->nem.s.uShadowGen != 0))
+    { /* likely */ }
+    else
+    {
+        RT_ZERO(pVCpu->nem.s.auShadowGen);
+        pVCpu->nem.s.uShadowGen = 1;
+    }
+}
+
+
+/**
+ * Records the value of a register as currently loaded in Hyper-V.
+ *
+ * @param   pVCpu       The cross context per CPU structure.
+ * @param   enmName     The register name.
+ * @param   pValue      The register value.
+ */
+DECLINLINE(void) nemR3WinShadowUpdate(PVMCPUCC pVCpu, WHV_REGISTER_NAME enmName, WHV_REGISTER_VALUE const *pValue)
+{
+    uint32_t const idxSlot = nemR3WinShadowSlot(enmName);
+    if (idxSlot < NEM_WIN_SHADOW_SLOTS)
+    {
+        pVCpu->nem.s.aShadowValues[idxSlot].s.Lo = pValue->Reg128.Low64;
+        pVCpu->nem.s.aShadowValues[idxSlot].s.Hi = pValue->Reg128.High64;
+        pVCpu->nem.s.auShadowGen[idxSlot]        = pVCpu->nem.s.uShadowGen;
+    }
+}
+
+
+/**
+ * Records the value of a segment register as currently loaded in Hyper-V.
+ *
+ * @param   pVCpu       The cross context per CPU structure.
+ * @param   enmName     The register name.
+ * @param   pSeg        The segment register value.
+ */
+DECLINLINE(void) nemR3WinShadowUpdateSeg(PVMCPUCC pVCpu, WHV_REGISTER_NAME enmName, WHV_X64_SEGMENT_REGISTER const *pSeg)
+{
+    WHV_REGISTER_VALUE Value;
+    Value.Segment = *pSeg;
+    nemR3WinShadowUpdate(pVCpu, enmName, &Value);
+}
+
+
+/**
+ * Checks whether Hyper-V is known to hold the given 64-bit register value.
+ *
+ * @returns true if it does and the register doesn't need writing.
+ * @param   pVCpu       The cross context per CPU structure.
+ * @param   enmName     The register name.
+ * @param   uValue      The value we want to load.
+ */
+DECL_FORCE_INLINE(bool) nemR3WinShadowIsSame64(PVMCPUCC pVCpu, WHV_REGISTER_NAME enmName, uint64_t uValue)
+{
+    uint32_t const idxSlot = nemR3WinShadowSlot(enmName);
+    return idxSlot < NEM_WIN_SHADOW_SLOTS
+        && pVCpu->nem.s.auShadowGen[idxSlot]        == pVCpu->nem.s.uShadowGen
+        && pVCpu->nem.s.aShadowValues[idxSlot].s.Lo == uValue
+        && pVCpu->nem.s.aShadowValues[idxSlot].s.Hi == 0;
+}
+
+
+/**
+ * Checks whether Hyper-V is known to hold the given segment register value.
+ *
+ * @returns true if it does and the register doesn't need writing.
+ * @param   pVCpu       The cross context per CPU structure.
+ * @param   enmName     The register name.
+ * @param   pSReg       The segment register value we want to load.
+ */
+DECL_FORCE_INLINE(bool) nemR3WinShadowIsSameSeg(PVMCPUCC pVCpu, WHV_REGISTER_NAME enmName, CPUMSELREG const *pSReg)
+{
+    uint32_t const idxSlot = nemR3WinShadowSlot(enmName);
+    if (   idxSlot < NEM_WIN_SHADOW_SLOTS
+        && pVCpu->nem.s.auShadowGen[idxSlot] == pVCpu->nem.s.uShadowGen)
+    {
+        WHV_X64_SEGMENT_REGISTER const *pShadow = (WHV_X64_SEGMENT_REGISTER const *)&pVCpu->nem.s.aShadowValues[idxSlot];
+        return pShadow->Base       == pSReg->u64Base
+            && pShadow->Limit      == pSReg->u32Limit
+            && pShadow->Selector   == pSReg->Sel
+            && pShadow->Attributes == (uint16_t)pSReg->Attr.u;
+    }
+    return false;
+}
+
+
+/**
+ * Checks whether Hyper-V is known to hold the given descriptor table register
+ * value.
+ *
+ * @returns true if it does and the register doesn't need writing.
+ * @param   pVCpu       The cross context per CPU structure.
+ * @param   enmName     The register name.
+ * @param   uBase       The table base address.
+ * @param   cbLimit     The table limit.
+ */
+DECL_FORCE_INLINE(bool) nemR3WinShadowIsSameTable(PVMCPUCC pVCpu, WHV_REGISTER_NAME enmName, uint64_t uBase, uint16_t cbLimit)
+{
+    uint32_t const idxSlot = nemR3WinShadowSlot(enmName);
+    if (   idxSlot < NEM_WIN_SHADOW_SLOTS
+        && pVCpu->nem.s.auShadowGen[idxSlot] == pVCpu->nem.s.uShadowGen)
+    {
+        WHV_X64_TABLE_REGISTER const *pShadow = (WHV_X64_TABLE_REGISTER const *)&pVCpu->nem.s.aShadowValues[idxSlot];
+        return pShadow->Base  == uBase
+            && pShadow->Limit == cbLimit;
+    }
+    return false;
+}
+
+
 static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
 {
     /*
      * The following is very similar to what nemR0WinExportState() does.
+     *
+     * Registers which Hyper-V is known to already hold (see the shadowing
+     * helpers above) are left out of the batch.
      */
     WHV_REGISTER_NAME  aenmNames[128];
     WHV_REGISTER_VALUE aValues[128];
@@ -2527,9 +2829,23 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         && pVCpu->nem.s.fCurrentInterruptWindows == pVCpu->nem.s.fDesiredInterruptWindows)
         return VINF_SUCCESS;
     uintptr_t iReg = 0;
-    uintptr_t iRegRFlags = UINTPTR_MAX;
+    uint32_t  cSkipped = 0;
 
+    /* Adds a register unless Hyper-V is known to hold the value already. */
 #define ADD_REG64(a_enmName, a_uValue) do { \
+            uint64_t const uRegValueTmp = (a_uValue); \
+            if (!nemR3WinShadowIsSame64(pVCpu, (a_enmName), uRegValueTmp)) \
+            { \
+                aenmNames[iReg]      = (a_enmName); \
+                aValues[iReg].Reg128.High64 = 0; \
+                aValues[iReg].Reg64  = uRegValueTmp; \
+                iReg++; \
+            } \
+            else \
+                cSkipped++; \
+        } while (0)
+    /* Adds a register unconditionally (aValues[iReg - 1] can be adjusted afterwards). */
+#define ADD_REG64_ALWAYS(a_enmName, a_uValue) do { \
             aenmNames[iReg]      = (a_enmName); \
             aValues[iReg].Reg128.High64 = 0; \
             aValues[iReg].Reg64  = (a_uValue); \
@@ -2577,23 +2893,40 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
     /* RIP & Flags */
     if (fWhat & CPUMCTX_EXTRN_RIP)
         ADD_REG64(WHvX64RegisterRip, pVCpu->cpum.GstCtx.rip);
-    if (fWhat & CPUMCTX_EXTRN_RFLAGS)
+    if (   (fWhat & CPUMCTX_EXTRN_RFLAGS)
+        || (pVCpu->nem.s.fGuestDebug && pVCpu->nem.s.fSingleInstruction))
     {
-        iRegRFlags = iReg;
+        /*
+         * The Microsoft Hyper-V API does not support monitor-trap flag or similar functionality.
+         * We are thus forced to use the guests EFLAGS.TF (trap flag) for single-stepping over
+         * guest instructions using the hypervisor debugger. This approach is limited and imperfect
+         * (e.g. inaccurate when stepping over instructions that modify EFLAGS, when a debugger in
+         * the guest is using EFLAGS.TF itself and so on).
+         */
+        if (pVCpu->nem.s.fGuestDebug && pVCpu->nem.s.fSingleInstruction)
+        {
+            pVCpu->cpum.GstCtx.eflags.u |= X86_EFL_TF;
+            pVCpu->nem.s.fClearTrapFlag = true;
+        }
         ADD_REG64(WHvX64RegisterRflags, pVCpu->cpum.GstCtx.rflags.u);
     }
-    else
-        Assert(iRegRFlags == UINTPTR_MAX);
 
     /* Segments */
 #define ADD_SEG(a_enmName, a_SReg) \
         do { \
-            aenmNames[iReg]                  = a_enmName; \
-            aValues[iReg].Segment.Base       = (a_SReg).u64Base; \
-            aValues[iReg].Segment.Limit      = (a_SReg).u32Limit; \
-            aValues[iReg].Segment.Selector   = (a_SReg).Sel; \
-            aValues[iReg].Segment.Attributes = (a_SReg).Attr.u; \
-            iReg++; \
+            if (!nemR3WinShadowIsSameSeg(pVCpu, (a_enmName), &(a_SReg))) \
+            { \
+                aenmNames[iReg]                  = a_enmName; \
+                aValues[iReg].Reg128.Low64       = 0; \
+                aValues[iReg].Reg128.High64      = 0; \
+                aValues[iReg].Segment.Base       = (a_SReg).u64Base; \
+                aValues[iReg].Segment.Limit      = (a_SReg).u32Limit; \
+                aValues[iReg].Segment.Selector   = (a_SReg).Sel; \
+                aValues[iReg].Segment.Attributes = (a_SReg).Attr.u; \
+                iReg++; \
+            } \
+            else \
+                cSkipped++; \
         } while (0)
     if (fWhat & CPUMCTX_EXTRN_SREG_MASK)
     {
@@ -2620,17 +2953,31 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
             ADD_SEG(WHvX64RegisterTr,   pVCpu->cpum.GstCtx.tr);
         if (fWhat & CPUMCTX_EXTRN_IDTR)
         {
-            aenmNames[iReg] = WHvX64RegisterIdtr;
-            aValues[iReg].Table.Limit = pVCpu->cpum.GstCtx.idtr.cbIdt;
-            aValues[iReg].Table.Base  = pVCpu->cpum.GstCtx.idtr.pIdt;
-            iReg++;
+            if (!nemR3WinShadowIsSameTable(pVCpu, WHvX64RegisterIdtr, pVCpu->cpum.GstCtx.idtr.pIdt, pVCpu->cpum.GstCtx.idtr.cbIdt))
+            {
+                aenmNames[iReg] = WHvX64RegisterIdtr;
+                aValues[iReg].Reg128.Low64  = 0;
+                aValues[iReg].Reg128.High64 = 0;
+                aValues[iReg].Table.Limit   = pVCpu->cpum.GstCtx.idtr.cbIdt;
+                aValues[iReg].Table.Base    = pVCpu->cpum.GstCtx.idtr.pIdt;
+                iReg++;
+            }
+            else
+                cSkipped++;
         }
         if (fWhat & CPUMCTX_EXTRN_GDTR)
         {
-            aenmNames[iReg] = WHvX64RegisterGdtr;
-            aValues[iReg].Table.Limit = pVCpu->cpum.GstCtx.gdtr.cbGdt;
-            aValues[iReg].Table.Base  = pVCpu->cpum.GstCtx.gdtr.pGdt;
-            iReg++;
+            if (!nemR3WinShadowIsSameTable(pVCpu, WHvX64RegisterGdtr, pVCpu->cpum.GstCtx.gdtr.pGdt, pVCpu->cpum.GstCtx.gdtr.cbGdt))
+            {
+                aenmNames[iReg] = WHvX64RegisterGdtr;
+                aValues[iReg].Reg128.Low64  = 0;
+                aValues[iReg].Reg128.High64 = 0;
+                aValues[iReg].Table.Limit   = pVCpu->cpum.GstCtx.gdtr.cbGdt;
+                aValues[iReg].Table.Base    = pVCpu->cpum.GstCtx.gdtr.pGdt;
+                iReg++;
+            }
+            else
+                cSkipped++;
         }
     }
 
@@ -2646,8 +2993,19 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         if (fWhat & CPUMCTX_EXTRN_CR4)
             ADD_REG64(WHvX64RegisterCr4, pVCpu->cpum.GstCtx.cr4);
     }
+    uint8_t uNewHvCr8 = UINT8_MAX;
     if (fWhat & CPUMCTX_EXTRN_APIC_TPR)
-        ADD_REG64(WHvX64RegisterCr8, CPUMGetGuestCR8(pVCpu));
+    {
+        /* CR8 is reported by every exit, so we can track it across runs (uHvCr8). */
+        uint8_t const uCr8 = (uint8_t)CPUMGetGuestCR8(pVCpu);
+        if (uCr8 != pVCpu->nem.s.uHvCr8)
+        {
+            ADD_REG64_ALWAYS(WHvX64RegisterCr8, uCr8);
+            uNewHvCr8 = uCr8;
+        }
+        else
+            cSkipped++;
+    }
 
     /* Debug registers. */
     if (!pVCpu->nem.s.fGuestDebug)
@@ -2672,23 +3030,7 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         ADD_REG64(WHvX64RegisterDr3, CPUMGetHyperDR3(pVCpu));
         ADD_REG64(WHvX64RegisterDr6, CPUMGetHyperDR6(pVCpu));
         ADD_REG64(WHvX64RegisterDr7, CPUMGetHyperDR7(pVCpu));
-
-        /*
-         * The Microsoft Hyper-V API does not support monitor-trap flag or similar functionality.
-         * We are thus forced to use the guests EFLAGS.TF (trap flag) for single-stepping over
-         * guest instructions using the hypervisor debugger. This approach is limited and imperfect
-         * (e.g. inaccurate when stepping over instructions that modify EFLAGS, when a debugger in
-         * the guest is using EFLAGS.TF itself and so on).
-         */
-        if (pVCpu->nem.s.fSingleInstruction)
-        {
-            pVCpu->cpum.GstCtx.eflags.u |= X86_EFL_TF;
-            pVCpu->nem.s.fClearTrapFlag = true;
-            if (iRegRFlags != UINTPTR_MAX)
-                aValues[iRegRFlags].Reg64 = pVCpu->cpum.GstCtx.rflags.u;
-            else
-                ADD_REG64(WHvX64RegisterRflags, pVCpu->cpum.GstCtx.rflags.u);
-        }
+        /* Note! The EFLAGS.TF single stepping hack is applied above with RFLAGS. */
     }
 
     if (!pVM->nem.s.fXsaveSupported)
@@ -2806,9 +3148,17 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         }
     }
 
-    /* event injection (clear it). */
+    /* event injection (clear it, unless it's an interrupt Hyper-V hasn't delivered yet). */
     if (fWhat & CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT)
-        ADD_REG64(WHvRegisterPendingInterruption, 0);
+    {
+        ADD_REG64_ALWAYS(WHvRegisterPendingInterruption, 0);
+        if (pVCpu->nem.s.fIntInjectPending)
+        {
+            aValues[iReg - 1].PendingInterruption.InterruptionPending = 1;
+            aValues[iReg - 1].PendingInterruption.InterruptionType    = WHvX64PendingInterrupt;
+            aValues[iReg - 1].PendingInterruption.InterruptionVector  = pVCpu->nem.s.uIntInjectVector;
+        }
+    }
 
     if (!pVM->nem.s.fLocalApicEmulation)
     {
@@ -2817,17 +3167,21 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         if (   (fWhat & (CPUMCTX_EXTRN_INHIBIT_INT | CPUMCTX_EXTRN_INHIBIT_NMI))
             ==          (CPUMCTX_EXTRN_INHIBIT_INT | CPUMCTX_EXTRN_INHIBIT_NMI) )
         {
-            ADD_REG64(WHvRegisterInterruptState, 0);
+            WHV_REGISTER_VALUE IntState;
+            IntState.Reg128.Low64  = 0;
+            IntState.Reg128.High64 = 0;
             if (CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx))
-                aValues[iReg - 1].InterruptState.InterruptShadow = 1;
-            aValues[iReg - 1].InterruptState.NmiMasked = CPUMAreInterruptsInhibitedByNmi(&pVCpu->cpum.GstCtx);
+                IntState.InterruptState.InterruptShadow = 1;
+            IntState.InterruptState.NmiMasked = CPUMAreInterruptsInhibitedByNmi(&pVCpu->cpum.GstCtx);
+            ADD_REG64(WHvRegisterInterruptState, IntState.Reg64);
         }
         else if (fWhat & CPUMCTX_EXTRN_INHIBIT_INT)
         {
             if (   pVCpu->nem.s.fLastInterruptShadow
                 || CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx))
             {
-                ADD_REG64(WHvRegisterInterruptState, 0);
+                /* Note! Not using the shadow here as NmiMasked isn't known. */
+                ADD_REG64_ALWAYS(WHvRegisterInterruptState, 0);
                 if (CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx))
                     aValues[iReg - 1].InterruptState.InterruptShadow = 1;
                 /** @todo Retrieve NMI state, currently assuming it's zero. (yes this may happen on I/O) */
@@ -2845,7 +3199,7 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         {
             pVCpu->nem.s.fCurrentInterruptWindows = pVCpu->nem.s.fDesiredInterruptWindows;
             Log8(("Setting WHvX64RegisterDeliverabilityNotifications, fDesiredIntWin=%X\n", fDesiredIntWin));
-            ADD_REG64(WHvX64RegisterDeliverabilityNotifications, fDesiredIntWin);
+            ADD_REG64_ALWAYS(WHvX64RegisterDeliverabilityNotifications, fDesiredIntWin);
             Assert(aValues[iReg - 1].DeliverabilityNotifications.NmiNotification == RT_BOOL(fDesiredIntWin & NEM_WIN_INTW_F_NMI));
             Assert(aValues[iReg - 1].DeliverabilityNotifications.InterruptNotification == RT_BOOL(fDesiredIntWin & NEM_WIN_INTW_F_REGULAR));
             Assert(aValues[iReg - 1].DeliverabilityNotifications.InterruptPriority == (unsigned)((fDesiredIntWin & NEM_WIN_INTW_F_PRIO_MASK) >> NEM_WIN_INTW_F_PRIO_SHIFT));
@@ -2884,13 +3238,13 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
             /* Inject the interrupt. */
             if (fInjectingInterrupt)
             {
-                ADD_REG64(WHvRegisterPendingEvent, 0);
+                ADD_REG64_ALWAYS(WHvRegisterPendingEvent, 0);
                 aValues[iReg - 1].ExtIntEvent.EventPending = 1;
                 aValues[iReg - 1].ExtIntEvent.EventType    = WHvX64PendingEventExtInt;
                 aValues[iReg - 1].ExtIntEvent.Vector       = bInterrupt;
 
                 /* Clear interrupt window while injecting an interrupt. */
-                ADD_REG64(WHvX64RegisterDeliverabilityNotifications, 0);
+                ADD_REG64_ALWAYS(WHvX64RegisterDeliverabilityNotifications, 0);
                 pVCpu->nem.s.fIrqWindowRegistered     = false;
                 pVCpu->nem.s.fCurrentInterruptWindows = 0;
             }
@@ -2898,7 +3252,7 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         else if (!pVCpu->nem.s.fIrqWindowRegistered)
         {
             /* When interrupts are disabled or when in an interrupt shadow, enable interrupt window. */
-            ADD_REG64(WHvX64RegisterDeliverabilityNotifications, 0);
+            ADD_REG64_ALWAYS(WHvX64RegisterDeliverabilityNotifications, 0);
             aValues[iReg - 1].DeliverabilityNotifications.InterruptNotification = 1;
             pVCpu->nem.s.fIrqWindowRegistered     = true;
             pVCpu->nem.s.fCurrentInterruptWindows = NEM_WIN_INTW_F_REGULAR;
@@ -2924,13 +3278,14 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
             if (ActReg.InternalActivity.HaltSuspend)
             {
                 ActReg.InternalActivity.HaltSuspend = 0;
-                ADD_REG64(WHvRegisterInternalActivityState, ActReg.Reg64);
+                ADD_REG64_ALWAYS(WHvRegisterInternalActivityState, ActReg.Reg64);
             }
             pVCpu->nem.s.fClearHaltSuspend = false;
         }
     }
 
 #undef ADD_REG64
+#undef ADD_REG64_ALWAYS
 #undef ADD_REG128
 #undef ADD_SEG
 
@@ -2943,16 +3298,31 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
     Log12(("Calling WHvSetVirtualProcessorRegisters(%p, %u, %p, %u, %p)\n",
            pVM->nem.s.hPartition, pVCpu->idCpu, aenmNames, iReg, aValues));
 #endif
+    STAM_REL_COUNTER_ADD(&pVCpu->nem.s.StatExportRegsSkipped, cSkipped);
 
-    if (!iReg)
-        return VINF_SUCCESS;
-
-    HRESULT hrc = WHvSetVirtualProcessorRegisters(pVM->nem.s.hPartition, pVCpu->idCpu, aenmNames, iReg, aValues);
+    /* Note! iReg can be zero here when Hyper-V already has all the register
+             values, the XSAVE state may still need exporting though. */
+    HRESULT hrc = S_OK;
+    if (iReg)
+    {
+        STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatExportCalls);
+        STAM_REL_COUNTER_ADD(&pVCpu->nem.s.StatExportRegs, iReg);
+        hrc = WHvSetVirtualProcessorRegisters(pVM->nem.s.hPartition, pVCpu->idCpu, aenmNames, (uint32_t)iReg, aValues);
+    }
     if (SUCCEEDED(hrc))
     {
+        /* Hyper-V now holds the values we just wrote. */
+        for (uintptr_t i = 0; i < iReg; i++)
+            nemR3WinShadowUpdate(pVCpu, aenmNames[i], &aValues[i]);
+        if (uNewHvCr8 != UINT8_MAX)
+            pVCpu->nem.s.uHvCr8 = uNewHvCr8;
+        if (fWhat & CPUMCTX_EXTRN_APIC_TPR)
+            pVCpu->nem.s.uCr8ApicSynced = pVCpu->nem.s.uHvCr8;
+
         if (   (fWhat & (CPUMCTX_EXTRN_X87 | CPUMCTX_EXTRN_SSE_AVX | CPUMCTX_EXTRN_OTHER_XSAVE))
             && pVM->nem.s.fXsaveSupported)
         {
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatExportXState);
             /** @todo r=aeichner Hyper-V might expect the compacted form and fails with the standard layout then.
              *                   This isn't an issue right now as we don't support anything beyond AVX/AVX2.
              */
@@ -3238,6 +3608,12 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
                           ("WHvGetVirtualProcessorRegisters(%p, %u,,%u,) -> %Rhrc (Last=%#x/%u)\n",
                            pVM->nem.s.hPartition, pVCpu->idCpu, cRegs, hrc, RTNtLastStatusValue(), RTNtLastErrorValue())
                           , VERR_NEM_GET_REGISTERS_FAILED);
+    STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatImportCalls);
+    STAM_REL_COUNTER_ADD(&pVCpu->nem.s.StatImportRegs, cRegs);
+
+    /* Remember what Hyper-V holds so the export can skip unchanged registers. */
+    for (size_t i = 0; i < cRegs; i++)
+        nemR3WinShadowUpdate(pVCpu, aenmNames[i], &aValues[i]);
 
     iReg = 0;
 #define GET_REG64(a_DstVar, a_enmName) do { \
@@ -3398,8 +3774,15 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
     if (fWhat & CPUMCTX_EXTRN_APIC_TPR)
     {
         Assert(aenmNames[iReg] == WHvX64RegisterCr8);
-        if (!pVCpu->CTX_SUFF(pVM)->nem.s.fLocalApicEmulation)
-            PDMApicSetTpr(pVCpu, (uint8_t)aValues[iReg].Reg64 << 4);
+        uint8_t const uCr8 = (uint8_t)aValues[iReg].Reg64;
+        pVCpu->nem.s.uHvCr8 = uCr8;
+        if (   uCr8 != pVCpu->nem.s.uCr8ApicSynced
+            && !pVCpu->CTX_SUFF(pVM)->nem.s.fLocalApicEmulation)
+        {
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatApicTprSync);
+            PDMApicSetTpr(pVCpu, uCr8 << 4);
+            pVCpu->nem.s.uCr8ApicSynced = uCr8;
+        }
         iReg++;
     }
 
@@ -3527,6 +3910,7 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
 
         if (fWhat & (CPUMCTX_EXTRN_X87 | CPUMCTX_EXTRN_SSE_AVX | CPUMCTX_EXTRN_OTHER_XSAVE))
         {
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatImportXState);
             if (WHvGetVirtualProcessorState)
                 hrc = WHvGetVirtualProcessorState(pVM->nem.s.hPartition, pVCpu->idCpu, WHvVirtualProcessorStateTypeXsaveState, &pVCpu->cpum.GstCtx.XState, pVM->nem.s.cbXSaveArea, NULL);
             else
@@ -3648,6 +4032,13 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
         AssertMsg((aValues[iReg].PendingInterruption.AsUINT64 & UINT64_C(0xfc00)) == 0,
                   ("%#RX64\n", aValues[iReg].PendingInterruption.AsUINT64));
     }
+    /* Is the interrupt we handed to Hyper-V still waiting to be delivered?  (Only if we
+       already gave it to Hyper-V, i.e. the event injection state lives there.) */
+    if (   pVCpu->nem.s.fIntInjectPending
+        && (pVCpu->cpum.GstCtx.fExtrn & CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT))
+        pVCpu->nem.s.fIntInjectPending = aValues[iReg].PendingInterruption.InterruptionPending
+                                      && aValues[iReg].PendingInterruption.InterruptionType   == WHvX64PendingInterrupt
+                                      && aValues[iReg].PendingInterruption.InterruptionVector == pVCpu->nem.s.uIntInjectVector;
     iReg++;
 
     Assert(aenmNames[iReg] == WHvRegisterPendingEvent);
@@ -4138,8 +4529,29 @@ DECLINLINE(void) nemR3WinCopyStateFromX64Header(PVMCPUCC pVCpu, WHV_VP_EXIT_CONT
     pVCpu->nem.s.fLastInterruptShadow = CPUMUpdateInterruptShadowEx(&pVCpu->cpum.GstCtx,
                                                                     pExitCtx->ExecutionState.InterruptShadow,
                                                                     pExitCtx->Rip);
+
+    /* These are the values Hyper-V currently holds. */
+    nemR3WinShadowUpdateSeg(pVCpu, WHvX64RegisterCs, &pExitCtx->Cs);
+    WHV_REGISTER_VALUE Value;
+    Value.Reg128.High64 = 0;
+    Value.Reg64 = pExitCtx->Rip;
+    nemR3WinShadowUpdate(pVCpu, WHvX64RegisterRip, &Value);
+    Value.Reg64 = pExitCtx->Rflags;
+    nemR3WinShadowUpdate(pVCpu, WHvX64RegisterRflags, &Value);
+
+    /* Only update the APIC TPR when the guest changed CR8, as setting the TPR
+       involves updating the PPR and re-evaluating pending interrupts. */
+    uint8_t const uCr8 = (uint8_t)pExitCtx->Cr8;
+    pVCpu->nem.s.uHvCr8 = uCr8;
     if (!pVCpu->CTX_SUFF(pVM)->nem.s.fLocalApicEmulation)
-        PDMApicSetTpr(pVCpu, pExitCtx->Cr8 << 4);
+    {
+        if (uCr8 != pVCpu->nem.s.uCr8ApicSynced)
+        {
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatApicTprSync);
+            PDMApicSetTpr(pVCpu, (uint8_t)(uCr8 << 4));
+            pVCpu->nem.s.uCr8ApicSynced = uCr8;
+        }
+    }
     else
         PDMApicImportState(pVCpu);
 
@@ -4515,6 +4927,36 @@ nemR3WinHandleExitCpuId(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const
 
 
 /**
+ * Determins what state needs importing for CPUMQueryGuestMsr /
+ * CPUMSetGuestMsr to correctly handle an MSR access exit.
+ *
+ * Hyper-V only lets us see MSRs it doesn't handle itself, and most of those
+ * are implemented by CPUM without touching the guest context.  However, the
+ * MSRs backed by the guest context (CPUMCTX_EXTRN_ALL_MSRS, FS/GS base) and the
+ * ones which may involve CR0, CR3 and CR4 (EFER, the P6 CRx aliases) need the
+ * state imported so it's consistent and gets written back afterwards.
+ *
+ * @returns CPUMCTX_EXTRN_XXX mask.
+ * @param   idMsr           The MSR being accessed.
+ */
+DECLINLINE(uint64_t) nemR3WinMsrExitImportMask(uint32_t idMsr)
+{
+    if (   idMsr == MSR_IA32_APICBASE
+        || idMsr == MSR_IA32_SPEC_CTRL
+        || idMsr == MSR_IA32_MTRR_CAP
+        || idMsr - MSR_IA32_SYSENTER_CS <= MSR_IA32_SYSENTER_EIP - MSR_IA32_SYSENTER_CS /* 0x174..0x176 */
+        || idMsr - UINT32_C(0x00000200) <= UINT32_C(0xff)                                /* MTRRs, PAT */
+        || idMsr - UINT32_C(0x00002000) <= UINT32_C(0x04)                                /* P6_CR0..P6_CR4 */
+        || idMsr - MSR_K6_EFER          <= MSR_K8_TSC_AUX - MSR_K6_EFER)                 /* EFER..TSC_AUX */
+        return CPUMCTX_EXTRN_ALL_MSRS | CPUMCTX_EXTRN_CR0 | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4
+             | CPUMCTX_EXTRN_FS | CPUMCTX_EXTRN_GS;
+    return 0;
+}
+AssertCompile(MSR_IA32_SYSENTER_CS == 0x174 && MSR_IA32_SYSENTER_EIP == 0x176);
+AssertCompile(MSR_K6_EFER == UINT32_C(0xc0000080) && MSR_K8_TSC_AUX == UINT32_C(0xc0000103));
+
+
+/**
  * Deals with MSR access exits (WHvRunVpExitReasonX64MsrAccess).
  *
  * @returns Strict VBox status code.
@@ -4542,9 +4984,11 @@ static VBOXSTRICTRC nemR3WinHandleExitMsr(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_
                                                 pExit->VpContext.Rip + pExit->VpContext.Cs.Base, ASMReadTSC());
         nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
         rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu,
-                                                     (!pExitRec ? 0 : IEM_CPUMCTX_EXTRN_MUST_MASK)
-                                                     | CPUMCTX_EXTRN_ALL_MSRS | CPUMCTX_EXTRN_CR0
-                                                     | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4,
+                                                       !pExitRec
+                                                     ? nemR3WinMsrExitImportMask(pExit->MsrAccess.MsrNumber)
+                                                     :   IEM_CPUMCTX_EXTRN_MUST_MASK
+                                                       | CPUMCTX_EXTRN_ALL_MSRS | CPUMCTX_EXTRN_CR0
+                                                       | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4,
                                                      "MSRs");
         if (rcStrict == VINF_SUCCESS)
         {
@@ -5123,6 +5567,60 @@ static VBOXSTRICTRC nemR3WinHandleExit(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXI
 
 
 /**
+ * Hands a hardware interrupt pending in TRPM to Hyper-V for delivery
+ * (NEM::fInjectIntViaHv).
+ *
+ * @param   pVCpu   The cross context per CPU structure.
+ */
+static void nemR3WinTrpmToIntInject(PVMCPUCC pVCpu)
+{
+    uint8_t   bVector  = 0;
+    TRPMEVENT enmEvent = TRPM_TRAP;
+    int rc = TRPMQueryTrapAll(pVCpu, &bVector, &enmEvent, NULL /*puErrCode*/, NULL /*puCR2*/, NULL /*pcbInstr*/,
+                              NULL /*pfIcebp*/);
+    if (RT_SUCCESS(rc) && enmEvent == TRPM_HARDWARE_INT)
+    {
+        TRPMResetTrap(pVCpu);
+        pVCpu->nem.s.fIntInjectPending = true;
+        pVCpu->nem.s.uIntInjectVector  = bVector;
+        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT; /* (makes the export write it) */
+    }
+}
+
+
+/**
+ * Checks whether Hyper-V has delivered the interrupt we handed it after an exit
+ * (NEM::fInjectIntViaHv).
+ *
+ * @param   pVM     The cross context VM structure.
+ * @param   pVCpu   The cross context per CPU structure.
+ * @param   pExit   The exit context.
+ */
+static void nemR3WinCheckIntInjectDelivered(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const *pExit)
+{
+    if (   !pExit->VpContext.ExecutionState.InterruptionPending
+        && pExit->ExitReason != WHvRunVpExitReasonCanceled)
+        pVCpu->nem.s.fIntInjectPending = false;
+    else
+    {
+        /* Something is pending (or the run was canceled): check whether it's still ours,
+           i.e. the run was canceled before entry or the delivery caused the exit. */
+        WHV_REGISTER_NAME  enmName = WHvRegisterPendingInterruption;
+        WHV_REGISTER_VALUE Value;
+        RT_ZERO(Value);
+        HRESULT hrc = WHvGetVirtualProcessorRegisters(pVM->nem.s.hPartition, pVCpu->idCpu, &enmName, 1, &Value);
+        if (SUCCEEDED(hrc))
+            pVCpu->nem.s.fIntInjectPending = Value.PendingInterruption.InterruptionPending
+                                          && Value.PendingInterruption.InterruptionType   == WHvX64PendingInterrupt
+                                          && Value.PendingInterruption.InterruptionVector == pVCpu->nem.s.uIntInjectVector;
+        else
+            AssertLogRelMsgFailed(("NEM/%u: WHvGetVirtualProcessorRegisters/PendingInterruption failed: %Rhrc\n",
+                                   pVCpu->idCpu, hrc)); /* Keep it pending, Hyper-V should still have it. */
+    }
+}
+
+
+/**
  * Deals with pending interrupt related force flags, may inject interrupt.
  *
  * @returns VBox strict status code.
@@ -5161,7 +5659,10 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
                            | (fPendingNmi ? CPUMCTX_EXTRN_INHIBIT_NMI : 0);
     if (pVCpu->cpum.GstCtx.fExtrn & fNeedExtrn)
     {
-        VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT, "IntFF");
+        VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu,
+                                                                    pVM->nem.s.fInjectIntViaHv
+                                                                  ? fNeedExtrn : NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT,
+                                                                  "IntFF");
         if (rcStrict != VINF_SUCCESS)
             return rcStrict;
     }
@@ -5172,7 +5673,8 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
     if (fPendingNmi)
     {
         if (   !CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx)
-            && !CPUMAreInterruptsInhibitedByNmi(&pVCpu->cpum.GstCtx))
+            && !CPUMAreInterruptsInhibitedByNmi(&pVCpu->cpum.GstCtx)
+            && !pVCpu->nem.s.fIntInjectPending /* Hyper-V would deliver that on top of the NMI frame. */)
         {
             VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT, "NMI");
             if (rcStrict == VINF_SUCCESS)
@@ -5193,9 +5695,41 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
      */
     if (VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_INTERRUPT_APIC | VMCPU_FF_INTERRUPT_PIC))
     {
-        /** @todo check NMI inhibiting here too! */
-        if (   !CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx)
+        /*
+         * Let Hyper-V deliver it (WHvRegisterPendingInterruption) if configured.
+         * This needs no further guest state and no IEM.  One interrupt at a time,
+         * and not while Hyper-V still has another event pending; if more are
+         * pending we request an interrupt window below to come back for them.
+         */
+        if (   pVM->nem.s.fInjectIntViaHv
+            && !CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx)
             && pVCpu->cpum.GstCtx.rflags.Bits.u1IF)
+        {
+            if (   !pVCpu->nem.s.fIntInjectPending
+                && !(   pVCpu->nem.s.fLastExitIntPending
+                     && (pVCpu->cpum.GstCtx.fExtrn & CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT)))
+            {
+                uint8_t bInterrupt;
+                int rc = PDMGetInterrupt(pVCpu, &bInterrupt);
+                if (RT_SUCCESS(rc))
+                {
+                    Log8(("Injecting interrupt %#x on %u via Hyper-V\n", bInterrupt, pVCpu->idCpu));
+                    pVCpu->nem.s.fIntInjectPending = true;
+                    pVCpu->nem.s.uIntInjectVector  = bInterrupt;
+                    pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT; /* (makes the export write it) */
+                }
+                else if (rc == VERR_APIC_INTR_MASKED_BY_TPR)
+                {
+                    *pfInterruptWindows |= ((bInterrupt >> 4) << NEM_WIN_INTW_F_PRIO_SHIFT) | NEM_WIN_INTW_F_REGULAR;
+                    return VINF_SUCCESS;
+                }
+            }
+            if (!VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_INTERRUPT_APIC | VMCPU_FF_INTERRUPT_PIC))
+                return VINF_SUCCESS;
+        }
+        /** @todo check NMI inhibiting here too! */
+        else if (   !CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx)
+                 && pVCpu->cpum.GstCtx.rflags.Bits.u1IF)
         {
             AssertCompile(NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT & CPUMCTX_EXTRN_APIC_TPR);
             VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT, "NMI");
@@ -5248,6 +5782,215 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
 
 
 /**
+ * Arms the timer kick for the given deadline, unless it's already armed for
+ * (about) the same deadline.
+ *
+ * The TM timers are only run on the timer EMT and nothing else gets it out of
+ * WHvRunVirtualProcessor in time when the guest doesn't cause any exits (the
+ * TM watchdog timer only fires every 10 ms), so we use a high resolution
+ * waitable timer and a helper thread (nemR3WinTimerKickThread) to cancel the
+ * run when the next timer is due.
+ *
+ * @param   pVCpu           The cross context per CPU structure of the calling EMT.
+ * @param   nsDeadline      The GIP timestamp of the next timer event
+ *                          (TMTimerPollGIP).
+ * @param   cNsDelta        Nanoseconds until then.
+ */
+static void nemR3WinTimerKickArm(PVMCPUCC pVCpu, uint64_t nsDeadline, uint64_t cNsDelta)
+{
+    /* TM returns 500 ms for EMTs other than the timer one, skip those (and other
+       far away deadlines, the TM watchdog will catch them with little relative delay). */
+    if (cNsDelta >= NEM_WIN_TIMER_KICK_MAX_NS)
+        return;
+
+    /* Skip if armed for about the same deadline and it's still pending (the
+       kicker thread clears nsTimerKickArmed when the timer fires). */
+    uint64_t const nsArmed = ASMAtomicReadU64(&pVCpu->nem.s.nsTimerKickArmed);
+    if (   nsArmed + NEM_WIN_TIMER_KICK_SLACK_NS >= nsDeadline
+        && nsArmed <= nsDeadline + NEM_WIN_TIMER_KICK_SLACK_NS
+        && nsArmed > nsDeadline - cNsDelta /* now */)
+        return;
+
+    LARGE_INTEGER DueTime;
+    DueTime.QuadPart = -(int64_t)RT_MAX(cNsDelta / 100, 1); /* relative, 100ns units */
+    if (SetWaitableTimer((HANDLE)pVCpu->nem.s.hTimerKick, &DueTime, 0 /*lPeriod*/, NULL, NULL, FALSE /*fResume*/))
+    {
+        ASMAtomicWriteU64(&pVCpu->nem.s.nsTimerKickArmed, nsDeadline);
+        STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatTimerKickArm);
+    }
+    else
+        AssertMsgFailed(("SetWaitableTimer failed: %u\n", GetLastError()));
+}
+
+
+/**
+ * The timer kicker thread, see nemR3WinTimerKickArm.
+ *
+ * @returns VINF_SUCCESS.
+ * @param   hThreadSelf     The thread handle.
+ * @param   pvUser          The cross context VM structure.
+ */
+static DECLCALLBACK(int) nemR3WinTimerKickThread(RTTHREAD hThreadSelf, void *pvUser)
+{
+    PVM const pVM = (PVM)pvUser;
+    RT_NOREF(hThreadSelf);
+
+    HANDLE  ahHandles[1 + NEM_WIN_TIMER_KICK_MAX_CPUS];
+    DWORD   cHandles = 0;
+    ahHandles[cHandles++] = (HANDLE)pVM->nem.s.hTimerKickTermEvt;
+    VMCPUID const cCpus = RT_MIN(pVM->cCpus, NEM_WIN_TIMER_KICK_MAX_CPUS);
+    for (VMCPUID idCpu = 0; idCpu < cCpus; idCpu++)
+        ahHandles[cHandles++] = (HANDLE)pVM->apCpusR3[idCpu]->nem.s.hTimerKick;
+
+    while (!ASMAtomicReadBool(&pVM->nem.s.fTimerKickTerminate))
+    {
+        DWORD const dwRc = WaitForMultipleObjectsEx(cHandles, ahHandles, FALSE /*fWaitAll*/, INFINITE, FALSE /*fAlertable*/);
+        if (dwRc == WAIT_OBJECT_0)
+            break;
+        if (dwRc > WAIT_OBJECT_0 && dwRc < WAIT_OBJECT_0 + cHandles)
+        {
+            VMCPUID const idCpu = dwRc - WAIT_OBJECT_0 - 1;
+            PVMCPU  const pVCpu = pVM->apCpusR3[idCpu];
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatTimerKickFired);
+            /* The timer is consumed, so the EMT must re-arm it even for the same deadline. */
+            ASMAtomicWriteU64(&pVCpu->nem.s.nsTimerKickArmed, 0);
+            HRESULT hrc = WHvCancelRunVirtualProcessor(pVM->nem.s.hPartition, idCpu, 0);
+            AssertMsg(SUCCEEDED(hrc), ("WHvCancelRunVirtualProcessor -> hrc=%Rhrc\n", hrc)); RT_NOREF(hrc);
+        }
+        else
+        {
+            AssertLogRelMsgFailed(("NEM: Timer kicker wait failed: dwRc=%#x err=%u\n", dwRc, GetLastError()));
+            break;
+        }
+    }
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Sets up the timer kicking (nemR3WinTimerKickArm), if possible.
+ *
+ * Failure isn't fatal, we'll just rely on the TM watchdog then.
+ *
+ * @param   pVM             The cross context VM structure.
+ */
+static void nemR3WinTimerKickInit(PVM pVM)
+{
+    pVM->nem.s.hTimerKickThread = NIL_RTTHREAD;
+
+    /* High resolution timers were added in Windows 10 1803 (17134). */
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus && idCpu < NEM_WIN_TIMER_KICK_MAX_CPUS; idCpu++)
+    {
+        HANDLE hTimer = CreateWaitableTimerExW(NULL /*pSecAttr*/, NULL /*pwszName*/, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                               TIMER_ALL_ACCESS);
+        if (hTimer == NULL)
+        {
+            LogRel(("NEM: High resolution timers not available (%u), not kicking EMTs for timers.\n", GetLastError()));
+            nemR3WinTimerKickTerm(pVM);
+            return;
+        }
+        pVM->apCpusR3[idCpu]->nem.s.hTimerKick = hTimer;
+    }
+
+    HANDLE hEvt = CreateEventW(NULL /*pSecAttr*/, TRUE /*fManualReset*/, FALSE /*fInitialState*/, NULL /*pwszName*/);
+    if (hEvt != NULL)
+    {
+        pVM->nem.s.hTimerKickTermEvt   = hEvt;
+        pVM->nem.s.fTimerKickTerminate = false;
+        int rc = RTThreadCreate(&pVM->nem.s.hTimerKickThread, nemR3WinTimerKickThread, pVM, 0 /*cbStack*/,
+                                RTTHREADTYPE_TIMER, RTTHREADFLAGS_WAITABLE, "NEMTmrKick");
+        if (RT_SUCCESS(rc))
+        {
+            LogRel(("NEM: Using high resolution timer to kick EMTs for timers.\n"));
+            return;
+        }
+        LogRel(("NEM: Failed to create timer kicker thread: %Rrc\n", rc));
+        pVM->nem.s.hTimerKickThread = NIL_RTTHREAD;
+    }
+    else
+        LogRel(("NEM: CreateEventW failed: %u\n", GetLastError()));
+    nemR3WinTimerKickTerm(pVM);
+}
+
+
+/**
+ * Terminates the timer kicking, freeing the resources.
+ *
+ * @param   pVM             The cross context VM structure.
+ */
+static void nemR3WinTimerKickTerm(PVM pVM)
+{
+    if (pVM->nem.s.hTimerKickThread != NIL_RTTHREAD)
+    {
+        ASMAtomicWriteBool(&pVM->nem.s.fTimerKickTerminate, true);
+        SetEvent((HANDLE)pVM->nem.s.hTimerKickTermEvt);
+        int rc = RTThreadWait(pVM->nem.s.hTimerKickThread, RT_MS_30SEC, NULL);
+        AssertLogRelRC(rc);
+        pVM->nem.s.hTimerKickThread = NIL_RTTHREAD;
+    }
+    if (pVM->nem.s.hTimerKickTermEvt)
+    {
+        CloseHandle((HANDLE)pVM->nem.s.hTimerKickTermEvt);
+        pVM->nem.s.hTimerKickTermEvt = NULL;
+    }
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+    {
+        PVMCPU pVCpu = pVM->apCpusR3[idCpu];
+        if (pVCpu->nem.s.hTimerKick)
+        {
+            CloseHandle((HANDLE)pVCpu->nem.s.hTimerKick);
+            pVCpu->nem.s.hTimerKick = NULL;
+        }
+    }
+}
+
+
+/**
+ * Updates the exception exit bitmap of the partition.
+ *
+ * @returns VBox status code.
+ * @param   pVM             The cross context VM structure.
+ * @param   fBitmap         The new exception exit bitmap.
+ */
+static int nemR3WinSetXcptExitBitmap(PVM pVM, uint64_t fBitmap)
+{
+    WHV_PARTITION_PROPERTY Property;
+    RT_ZERO(Property);
+    Property.ExceptionExitBitmap = fBitmap;
+    HRESULT hrc = WHvSetPartitionProperty(pVM->nem.s.hPartition, WHvPartitionPropertyCodeExceptionExitBitmap,
+                                          &Property, sizeof(Property));
+    if (SUCCEEDED(hrc))
+    {
+        ASMAtomicWriteU64(&pVM->nem.s.fXcptExitBitmap, fBitmap);
+        return VINF_SUCCESS;
+    }
+    LogRel(("NEM: Failed to set WHvPartitionPropertyCodeExceptionExitBitmap to %#RX64: %Rhrc (Last=%#x/%u)\n",
+            fBitmap, hrc, RTNtLastStatusValue(), RTNtLastErrorValue()));
+    return VERR_NEM_IPE_5;
+}
+
+
+/**
+ * Makes sure \#DB and \#BP are intercepted when the debugger needs them.
+ *
+ * We don't intercept these when no debugging is going on, as the guest can
+ * handle them perfectly fine by itself.  Once enabled, they stay enabled.
+ *
+ * @param   pVM             The cross context VM structure.
+ */
+DECLINLINE(void) nemR3WinEnsureDebugXcptExits(PVM pVM)
+{
+    uint64_t const fDbgXcpts = RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault) | RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap);
+    uint64_t const fCur      = ASMAtomicReadU64(&pVM->nem.s.fXcptExitBitmap);
+    if ((fCur & fDbgXcpts) != fDbgXcpts)
+    {
+        LogRel(("NEM: Enabling #DB and #BP exits for debugging.\n"));
+        nemR3WinSetXcptExitBitmap(pVM, fCur | fDbgXcpts);
+    }
+}
+
+
+/**
  * Inner NEM runloop for windows.
  *
  * @returns Strict VBox status code.
@@ -5291,6 +6034,8 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                                         || fSingleStepping
                                         || pVM->dbgf.ro.cEnabledSwBreakpoints
                                         || pVM->dbgf.ro.cEnabledHwBreakpoints;
+    if (pVCpu->nem.s.fGuestDebug)
+        nemR3WinEnsureDebugXcptExits(pVM);
 
     /* Make sure the hypervisor debug register values are up to date. */
     if (   pVCpu->nem.s.fGuestDebug
@@ -5327,6 +6072,10 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
          * to the state syncing.
          */
         pVCpu->nem.s.fDesiredInterruptWindows = 0;
+        if (   pVM->nem.s.fInjectIntViaHv
+            && !pVCpu->nem.s.fIntInjectPending
+            && TRPMHasTrap(pVCpu))
+            nemR3WinTrpmToIntInject(pVCpu); /* An interrupt we gave to TRPM when leaving the loop. */
         if (!pVM->nem.s.fLocalApicEmulation)
         {
             if (VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_INTERRUPT_APIC | VMCPU_FF_UPDATE_APIC | VMCPU_FF_INTERRUPT_PIC
@@ -5390,8 +6139,8 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
          */
         /** @todo See if we cannot optimize this TMTimerPollGIP by only redoing
          *        the whole polling job when timers have changed... */
-        uint64_t       offDeltaIgnored;
-        uint64_t const nsNextTimerEvt = TMTimerPollGIP(pVM, pVCpu, &offDeltaIgnored); NOREF(nsNextTimerEvt);
+        uint64_t       offDeltaTimer;
+        uint64_t const nsNextTimerEvt = TMTimerPollGIP(pVM, pVCpu, &offDeltaTimer);
         if (   !VM_FF_IS_ANY_SET(pVM, VM_FF_EMT_RENDEZVOUS | VM_FF_TM_VIRTUAL_SYNC)
             && !VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_HM_TO_R3_MASK))
         {
@@ -5412,9 +6161,15 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                 if (pVCpu->CTX_SUFF(pVM)->nem.s.fLocalApicEmulation)
                     PDMApicExportState(pVCpu);
 
+                /* Make sure we get out of WHvRunVirtualProcessor when the next timer is due. */
+                if (pVCpu->nem.s.hTimerKick)
+                    nemR3WinTimerKickArm(pVCpu, nsNextTimerEvt, offDeltaTimer);
+
                 WHV_RUN_VP_EXIT_CONTEXT ExitReason = {0};
                 TMNotifyStartOfExecution(pVM, pVCpu);
 
+                /* Running the VP may change any register, so the shadows become stale. */
+                nemR3WinShadowInvalidateAll(pVCpu);
                 HRESULT hrc = WHvRunVirtualProcessor(pVM->nem.s.hPartition, pVCpu->idCpu, &ExitReason, sizeof(ExitReason));
 
                 VMCPU_CMPXCHG_STATE(pVCpu, VMCPUSTATE_STARTED_EXEC_NEM, VMCPUSTATE_STARTED_EXEC_NEM_WAIT);
@@ -5427,6 +6182,11 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                 pVCpu->nem.s.enmExitReason = ExitReason.ExitReason;
                 if (SUCCEEDED(hrc))
                 {
+                    /* Track event delivery by Hyper-V (NEM::fInjectIntViaHv). */
+                    pVCpu->nem.s.fLastExitIntPending = ExitReason.VpContext.ExecutionState.InterruptionPending;
+                    if (pVCpu->nem.s.fIntInjectPending)
+                        nemR3WinCheckIntInjectDelivered(pVM, pVCpu, &ExitReason);
+
                     /*
                      * Deal with the message.
                      */
@@ -5483,8 +6243,23 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     {
         /* Try anticipate what we might need. */
         uint64_t fImport = IEM_CPUMCTX_EXTRN_MUST_MASK | CPUMCTX_EXTRN_INHIBIT_INT | CPUMCTX_EXTRN_INHIBIT_NMI;
-        if (   (rcStrict >= VINF_EM_FIRST && rcStrict <= VINF_EM_LAST)
-            || RT_FAILURE(rcStrict))
+        if (rcStrict == VINF_EM_HALT && !pVCpu->nem.s.fGuestDebug)
+        {
+            /*
+             * Idle guests halt a lot, so keep this cheap.  EM only needs RIP,
+             * RFLAGS and the interrupt inhibition state for the halted state and
+             * for deciding whether an interrupt can be delivered (EMR3Nem.cpp
+             * skips the full import for VINF_EM_HALT).  Everything else stays in
+             * Hyper-V (fExtrn) and gets imported on demand by whoever needs it
+             * (e.g. IEM when injecting the wake-up interrupt), which also means
+             * we don't need to write it all back again when resuming.
+             */
+            fImport = CPUMCTX_EXTRN_RIP | CPUMCTX_EXTRN_RFLAGS | CPUMCTX_EXTRN_CS
+                    | CPUMCTX_EXTRN_INHIBIT_INT | CPUMCTX_EXTRN_INHIBIT_NMI;
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatImportOnReturnHalt);
+        }
+        else if (   (rcStrict >= VINF_EM_FIRST && rcStrict <= VINF_EM_LAST)
+                 || RT_FAILURE(rcStrict))
             fImport = CPUMCTX_EXTRN_ALL | (CPUMCTX_EXTRN_NEM_WIN_MASK & ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT);
         else if (VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_INTERRUPT_PIC | VMCPU_FF_INTERRUPT_APIC
                                           | VMCPU_FF_INTERRUPT_NMI | VMCPU_FF_INTERRUPT_SMI))
@@ -5511,6 +6286,20 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     {
         STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatImportOnReturnSkipped);
         pVCpu->cpum.GstCtx.fExtrn = 0;
+    }
+
+    /*
+     * An interrupt Hyper-V hasn't delivered yet goes to TRPM, so that EM, IEM and
+     * saved states know about it.  The pending interruption in Hyper-V gets cleared
+     * on the next export (the event injection state isn't in Hyper-V any more), and
+     * we take the interrupt back from TRPM when we get here again.
+     */
+    if (pVCpu->nem.s.fIntInjectPending)
+    {
+        pVCpu->nem.s.fIntInjectPending = false;
+        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT;
+        int rc2 = TRPMAssertTrap(pVCpu, pVCpu->nem.s.uIntInjectVector, TRPM_HARDWARE_INT);
+        AssertLogRelRC(rc2);
     }
 
     /*

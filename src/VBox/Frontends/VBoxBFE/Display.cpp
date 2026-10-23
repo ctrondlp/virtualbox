@@ -34,10 +34,13 @@
 #include <iprt/time.h>
 #include <iprt/cpp/utils.h>
 #include <iprt/alloca.h>
+#include <iprt/mem.h>
 #include <iprt/uuid.h>
 
 #include <VBox/vmm/vmmr3vtable.h>
 #include <VBox/vmm/pdmdrv.h>
+
+#include <VBoxVideo.h>
 
 /**
  * Display driver instance data.
@@ -56,12 +59,37 @@ typedef struct DRVMAINDISPLAY
     PDMIDISPLAYCONNECTOR        IConnector;
 } DRVMAINDISPLAY, *PDRVMAINDISPLAY;
 
+/**
+ * A 32bpp buffer the VGA device renders the primary screen into, see
+ * Display::i_handleDisplayResize.
+ */
+typedef struct DISPLAYSHADOWBUF
+{
+    /** Next retired buffer. */
+    struct DISPLAYSHADOWBUF    *pNext;
+    /** The pixels (in the same allocation). */
+    uint8_t                    *pbPixels;
+} DISPLAYSHADOWBUF;
+
 // constructor / destructor
 /////////////////////////////////////////////////////////////////////////////
 
 Display::Display()
 {
+    mpShadow         = NULL;
+    mpRetiredShadows = NULL;
+    int vrc = RTCritSectInit(&mShadowLock);
+    AssertRC(vrc);
     fVGAResizing = false;
+    mxVBVAOrigin = 0;
+    myVBVAOrigin = 0;
+    mfVBVAScreenValid = false;
+    mpvVBVAScreen     = NULL;
+    mcxVBVAScreen     = 0;
+    mcyVBVAScreen     = 0;
+    mcbVBVAScreenLine = 0;
+    mcBitsVBVAScreen  = 0;
+    mfVBVAScreenFlags = 0;
 }
 
 Display::~Display()
@@ -122,10 +150,108 @@ int Display::i_handleDisplayResize(unsigned uScreenId, uint32_t bpp, void *pvVRA
     LogRel(("Display::i_handleDisplayResize: uScreenId=%d pvVRAM=%p w=%d h=%d bpp=%d cbLine=0x%X flags=0x%X origin=%d,%d\n",
             uScreenId, pvVRAM, w, h, bpp, cbLine, flags, xOrigin, yOrigin));
 
-    int vrc = m_pFramebuffer->notifyChange(uScreenId, 0, 0, w, h);
+    /* VBVA and VMSVGA screens in the 32bpp layout of the SDL surface are shown straight
+       from VRAM (like the GUI does).  Everything else the VGA device renders into a
+       32bpp buffer of ours.  That buffer is set up right here, on the EMT and while the
+       VGA device holds its lock, so it always matches the mode the device renders:
+       the SDL thread only gets to the new mode later, when the guest may have
+       changed it again (the device would then draw the new mode into a buffer made
+       for the old one). */
+    void    *pvScreen     = NULL;
+    uint32_t cbScreenLine = 0;
+    if (!fVGAResize && pvVRAM && bpp == 32 && cbLine >= w * 4)
+    {
+        pvScreen     = pvVRAM;
+        cbScreenLine = cbLine;
+    }
+    else if (uScreenId == 0 && mpDrv && w && h)
+    {
+        uint8_t *pbShadow = i_allocShadow(w, h);
+        if (pbShadow)
+        {
+            mpDrv->IConnector.pbData     = pbShadow;
+            mpDrv->IConnector.cbScanline = w * 4;
+            mpDrv->IConnector.cBits      = 32;
+            mpDrv->IConnector.cx         = w;
+            mpDrv->IConnector.cy         = h;
+            mpDrv->pUpPort->pfnSetRenderVRAM(mpDrv->pUpPort, true);
+            pvScreen     = pbShadow;
+            cbScreenLine = w * 4;
+        }
+    }
+
+    int vrc = m_pFramebuffer->notifyChange(uScreenId, 0, 0, w, h, pvScreen, 32, cbScreenLine);
     LogFunc(("NotifyChange vrc=%Rrc\n", vrc)); RT_NOREF(vrc);
 
+    /* The VGA device redraws its own modes completely after a resize, but with VBVA
+       the guest only reports what changes from now on: fill the new buffer. */
+    if (!fVGAResize && pvScreen && pvScreen != pvVRAM)
+        mpDrv->pUpPort->pfnUpdateDisplayRect(mpDrv->pUpPort, 0, 0, w, h);
+
     return VINF_SUCCESS;
+}
+
+
+/**
+ * Allocates a new buffer for the VGA device to render the primary screen into,
+ * retiring the current one (the SDL thread may still be showing it).
+ *
+ * @returns Pointer to the pixels (32bpp, @a cx * 4 bytes per line), NULL on failure.
+ * @param   cx      The width.
+ * @param   cy      The height.
+ * @thread  EMT
+ */
+uint8_t *Display::i_allocShadow(uint32_t cx, uint32_t cy)
+{
+    /* The VGA device has checked the mode against the VRAM size, this is just sanity. */
+    size_t const cbPixels = (size_t)cx * cy * 4;
+    AssertReturn(cx <= _16K && cy <= _16K, NULL);
+
+    size_t const      cbHdr = RT_ALIGN_Z(sizeof(DISPLAYSHADOWBUF), 64);
+    DISPLAYSHADOWBUF *pBuf  = (DISPLAYSHADOWBUF *)RTMemAllocZ(cbHdr + cbPixels);
+    if (!pBuf)
+    {
+        LogRel(("Display: Failed to allocate a %ux%u framebuffer\n", cx, cy));
+        return NULL;
+    }
+    pBuf->pbPixels = (uint8_t *)pBuf + cbHdr;
+
+    RTCritSectEnter(&mShadowLock);
+    if (mpShadow)
+    {
+        mpShadow->pNext  = mpRetiredShadows;
+        mpRetiredShadows = mpShadow;
+    }
+    mpShadow = pBuf;
+    RTCritSectLeave(&mShadowLock);
+
+    return pBuf->pbPixels;
+}
+
+
+/**
+ * Frees the retired buffers the SDL thread no longer shows.
+ *
+ * @param   pvInUse     The pixels the framebuffer shows now (can be a retired
+ *                      buffer when the guest changed the mode again meanwhile).
+ * @thread  SDL
+ */
+void Display::i_freeRetiredShadows(void *pvInUse)
+{
+    RTCritSectEnter(&mShadowLock);
+    DISPLAYSHADOWBUF **ppBuf = &mpRetiredShadows;
+    while (*ppBuf)
+    {
+        DISPLAYSHADOWBUF *pBuf = *ppBuf;
+        if (pBuf->pbPixels != pvInUse)
+        {
+            *ppBuf = pBuf->pNext;
+            RTMemFree(pBuf);
+        }
+        else
+            ppBuf = &pBuf->pNext;
+    }
+    RTCritSectLeave(&mShadowLock);
 }
 
 
@@ -151,6 +277,11 @@ void Display::i_handleDisplayUpdate (int x, int y, int w, int h)
 void Display::i_invalidateAndUpdateScreen(uint32_t aScreenId)
 {
     RT_NOREF(aScreenId);
+
+    /* If the framebuffer shows the guest VRAM directly there is nothing for the VGA
+       device to render (and it must not write into the guest VRAM). */
+    if (m_pFramebuffer->usesGuestVRAM())
+        return;
 
     mpDrv->IConnector.pbData     = m_pFramebuffer->getPixelData();
     mpDrv->IConnector.cbScanline = m_pFramebuffer->getBytesPerLine();
@@ -191,6 +322,9 @@ DECLCALLBACK(int) Display::i_displayResizeCallback(PPDMIDISPLAYCONNECTOR pInterf
         LogRel(("displayResizeCallback: already processing\n"));
         return VINF_VGA_RESIZE_IN_PROGRESS;
     }
+
+    /* The VGA device owns the screen layout now. */
+    pThis->mfVBVAScreenValid = false;
 
     int vrc = pThis->i_handleDisplayResize(0, bpp, pvVRAM, cbLine, cx, cy, 0, 0, 0, true);
 
@@ -275,11 +409,190 @@ DECLCALLBACK(void) Display::i_displayProcessDisplayDataCallback(PPDMIDISPLAYCONN
 }
 
 
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAEnable}
+ */
 DECLCALLBACK(int) Display::i_displayVBVAEnable(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId,
                                                VBVAHOSTFLAGS RT_UNTRUSTED_VOLATILE_GUEST *pHostFlags)
 {
-    RT_NOREF(pInterface, uScreenId, pHostFlags);
+    RT_NOREF(pInterface);
+    LogRelFlowFunc(("uScreenId=%u\n", uScreenId));
+
+    /* Tell the guest that VBVA is active so that it reports what it draws.  Once VBVA is
+       enabled the VGA device stops refreshing the screen by itself.  (VMSVGA passes no
+       host flags.) */
+    if (pHostFlags)
+    {
+        ASMAtomicWriteU32(&pHostFlags->u32HostEvents, VBVA_F_MODE_ENABLED);
+        ASMAtomicWriteU32(&pHostFlags->u32SupportedOrders, 0);
+    }
     return VINF_SUCCESS;
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVADisable}
+ */
+DECLCALLBACK(void) Display::i_displayVBVADisable(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId)
+{
+    PDRVMAINDISPLAY pDrv = RT_FROM_MEMBER(pInterface, DRVMAINDISPLAY, IConnector);
+    LogRelFlowFunc(("uScreenId=%u\n", uScreenId));
+
+    if (uScreenId == 0)
+    {
+        /* The VGA device takes over the primary screen again, so redraw all of it. */
+        pDrv->pDisplay->mxVBVAOrigin = 0;
+        pDrv->pDisplay->myVBVAOrigin = 0;
+        pDrv->pDisplay->mfVBVAScreenValid = false;
+        pDrv->pUpPort->pfnUpdateDisplayAll(pDrv->pUpPort, false /*fFailOnResize*/);
+    }
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAUpdateBegin}
+ */
+DECLCALLBACK(void) Display::i_displayVBVAUpdateBegin(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId)
+{
+    RT_NOREF(pInterface, uScreenId);
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAUpdateProcess}
+ */
+DECLCALLBACK(void) Display::i_displayVBVAUpdateProcess(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId,
+                                                       struct VBVACMDHDR const RT_UNTRUSTED_VOLATILE_GUEST *pCmd, size_t cbCmd)
+{
+    PDRVMAINDISPLAY pDrv = RT_FROM_MEMBER(pInterface, DRVMAINDISPLAY, IConnector);
+    AssertReturnVoid(cbCmd >= sizeof(VBVACMDHDR));
+
+    if (uScreenId != 0)
+        return;
+
+    VBVACMDHDR Hdr;
+    RT_COPY_VOLATILE(Hdr, *pCmd);
+    RT_UNTRUSTED_NONVOLATILE_COPY_FENCE();
+
+    /* Copy the area the guest drew to from VRAM to our framebuffer.  The VGA device
+       clips the rectangle to the screen. */
+    pDrv->pUpPort->pfnUpdateDisplayRect(pDrv->pUpPort, Hdr.x, Hdr.y, Hdr.w, Hdr.h);
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAUpdateEnd}
+ */
+DECLCALLBACK(void) Display::i_displayVBVAUpdateEnd(PPDMIDISPLAYCONNECTOR pInterface, unsigned uScreenId, int32_t x, int32_t y,
+                                                   uint32_t cx, uint32_t cy)
+{
+    PDRVMAINDISPLAY pDrv = RT_FROM_MEMBER(pInterface, DRVMAINDISPLAY, IConnector);
+    Display *pThis = pDrv->pDisplay;
+
+    if (uScreenId == 0 && cx && cy)
+        pThis->i_handleDisplayUpdate(x - pThis->mxVBVAOrigin, y - pThis->myVBVAOrigin, (int)cx, (int)cy);
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAResize}
+ */
+DECLCALLBACK(int) Display::i_displayVBVAResize(PPDMIDISPLAYCONNECTOR pInterface, PCVBVAINFOVIEW pView,
+                                               PCVBVAINFOSCREEN pScreen, void *pvVRAM, bool fResetInputMapping)
+{
+    PDRVMAINDISPLAY pDrv = RT_FROM_MEMBER(pInterface, DRVMAINDISPLAY, IConnector);
+    Display *pThis = pDrv->pDisplay;
+    RT_NOREF(pView, fResetInputMapping);
+    LogRelFlowFunc(("uScreenId=%u %ux%u bpp=%u flags=%#x\n", pScreen->u32ViewIndex, pScreen->u32Width,
+                    pScreen->u32Height, pScreen->u16BitsPerPixel, pScreen->u16Flags));
+
+    /* Only the primary screen is shown.  Keep the current window when the guest
+       disables or blanks the screen. */
+    if (   pScreen->u32ViewIndex != 0
+        || (pScreen->u16Flags & (VBVA_SCREEN_F_DISABLED | VBVA_SCREEN_F_BLANK2)))
+        return VINF_SUCCESS;
+
+    /* Linux guests send the same layout again with every display update.  Only
+       resize the window when something changed. */
+    void * const pvScreen = (uint8_t *)pvVRAM + pScreen->u32StartOffset;
+    if (   pThis->mfVBVAScreenValid
+        && pThis->mcxVBVAScreen     == pScreen->u32Width
+        && pThis->mcyVBVAScreen     == pScreen->u32Height
+        && pThis->mcbVBVAScreenLine == pScreen->u32LineSize
+        && pThis->mcBitsVBVAScreen  == pScreen->u16BitsPerPixel
+        && pThis->mfVBVAScreenFlags == pScreen->u16Flags
+        && pThis->mxVBVAOrigin      == pScreen->i32OriginX
+        && pThis->myVBVAOrigin      == pScreen->i32OriginY)
+    {
+        if (pThis->mpvVBVAScreen != pvScreen)
+        {
+            /* Page flip (e.g. GNOME): same layout, the screen now starts elsewhere in
+               VRAM.  The guest only reports changes relative to the previous frame,
+               so copy the whole new frame (unless shown straight from VRAM). */
+            pThis->mpvVBVAScreen = pvScreen;
+            if (pScreen->u16BitsPerPixel == 32 && pScreen->u32LineSize >= pScreen->u32Width * 4)
+                pThis->m_pFramebuffer->setVRAMPointer(pvScreen);
+            pDrv->pUpPort->pfnUpdateDisplayRect(pDrv->pUpPort, 0, 0, pScreen->u32Width, pScreen->u32Height);
+            pThis->i_handleDisplayUpdate(0, 0, (int)pScreen->u32Width, (int)pScreen->u32Height);
+        }
+        return VINF_SUCCESS;
+    }
+
+    pThis->mfVBVAScreenValid = true;
+    pThis->mpvVBVAScreen     = pvScreen;
+    pThis->mcxVBVAScreen     = pScreen->u32Width;
+    pThis->mcyVBVAScreen     = pScreen->u32Height;
+    pThis->mcbVBVAScreenLine = pScreen->u32LineSize;
+    pThis->mcBitsVBVAScreen  = pScreen->u16BitsPerPixel;
+    pThis->mfVBVAScreenFlags = pScreen->u16Flags;
+    pThis->mxVBVAOrigin      = pScreen->i32OriginX;
+    pThis->myVBVAOrigin      = pScreen->i32OriginY;
+    return pThis->i_handleDisplayResize(0, pScreen->u16BitsPerPixel, pvScreen,
+                                        pScreen->u32LineSize, pScreen->u32Width, pScreen->u32Height, pScreen->u16Flags,
+                                        pScreen->i32OriginX, pScreen->i32OriginY, false /*fVGAResize*/);
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAMousePointerShape}
+ */
+DECLCALLBACK(int) Display::i_displayVBVAMousePointerShape(PPDMIDISPLAYCONNECTOR pInterface, bool fVisible, bool fAlpha,
+                                                          uint32_t xHot, uint32_t yHot, uint32_t cx, uint32_t cy,
+                                                          const void *pvShape)
+{
+    RT_NOREF(pInterface, fVisible, fAlpha, xHot, yHot, cx, cy, pvShape);
+    /* There is no host mouse pointer, the guest has to draw its own. */
+    return VERR_NOT_SUPPORTED;
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAGuestCapabilityUpdate}
+ */
+DECLCALLBACK(void) Display::i_displayVBVAGuestCapabilityUpdate(PPDMIDISPLAYCONNECTOR pInterface, uint32_t fCapabilities)
+{
+    RT_NOREF(pInterface);
+    LogRelFlowFunc(("fCapabilities=%#x\n", fCapabilities));
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAInputMappingUpdate}
+ */
+DECLCALLBACK(void) Display::i_displayVBVAInputMappingUpdate(PPDMIDISPLAYCONNECTOR pInterface, int32_t xOrigin, int32_t yOrigin,
+                                                            uint32_t cx, uint32_t cy)
+{
+    RT_NOREF(pInterface, xOrigin, yOrigin, cx, cy);
+}
+
+
+/**
+ * @interface_method_impl{PDMIDISPLAYCONNECTOR,pfnVBVAReportCursorPosition}
+ */
+DECLCALLBACK(void) Display::i_displayVBVAReportCursorPosition(PPDMIDISPLAYCONNECTOR pInterface, uint32_t fFlags,
+                                                              uint32_t uScreen, uint32_t x, uint32_t y)
+{
+    RT_NOREF(pInterface, fFlags, uScreen, x, y);
 }
 
 
@@ -385,6 +698,16 @@ DECLCALLBACK(int) Display::i_drvConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, ui
     pThis->IConnector.pfnProcessAdapterData    = Display::i_displayProcessAdapterDataCallback;
     pThis->IConnector.pfnProcessDisplayData    = Display::i_displayProcessDisplayDataCallback;
     pThis->IConnector.pfnVBVAEnable            = Display::i_displayVBVAEnable;
+    /* The VGA device calls these without checking for NULL. */
+    pThis->IConnector.pfnVBVADisable               = Display::i_displayVBVADisable;
+    pThis->IConnector.pfnVBVAUpdateBegin           = Display::i_displayVBVAUpdateBegin;
+    pThis->IConnector.pfnVBVAUpdateProcess         = Display::i_displayVBVAUpdateProcess;
+    pThis->IConnector.pfnVBVAUpdateEnd             = Display::i_displayVBVAUpdateEnd;
+    pThis->IConnector.pfnVBVAResize                = Display::i_displayVBVAResize;
+    pThis->IConnector.pfnVBVAMousePointerShape     = Display::i_displayVBVAMousePointerShape;
+    pThis->IConnector.pfnVBVAGuestCapabilityUpdate = Display::i_displayVBVAGuestCapabilityUpdate;
+    pThis->IConnector.pfnVBVAInputMappingUpdate    = Display::i_displayVBVAInputMappingUpdate;
+    pThis->IConnector.pfnVBVAReportCursorPosition  = Display::i_displayVBVAReportCursorPosition;
 
     /*
      * Get the IDisplayPort interface of the above driver/device.

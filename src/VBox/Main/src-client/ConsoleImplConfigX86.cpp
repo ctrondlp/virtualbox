@@ -93,6 +93,78 @@
 /** The TPM PPI MMIO base default (compatible with qemu). */
 #define TPM_PPI_MMIO_BASE_DEFAULT UINT64_C(0xfed45000)
 
+/** The Intel CPU family/model/stepping presented to macOS 10.14 and later
+ * guests on hosts with a CPU model unknown to macOS
+ * (/CPUM/MaxIntelFamilyModelStep + /CPUM/ForceIntelFamilyModelStep): Coffee Lake (family 6,
+ * model 0x9e, stepping 0xd, e.g. Core i9-9900K).  The macOS kernel panics with
+ * "Unsupported CPU" on models it doesn't know (e.g. Arrow Lake), and this one is
+ * known to all releases from macOS 10.12.6 thru 26. */
+#define MACOS_GUEST_MAX_INTEL_FMS           RT_MAKE_U32_FROM_U8(0x0d, 0x9e, 6, 0)
+
+/** The Apple firmware features for macOS 10.14 and later guests: The legacy
+ * default (FW_FEATURE_SUPPORTS_CSM_LEGACY_MODE, FW_FEATURE_SUPPORTS_TARGET_DISK_MODE,
+ * FW_FEATURE_SUPPORTS_NET_BOOT, FW_FEATURE_DISABLE_BOOTSCRIPT_WORKAROUND) plus
+ * FW_FEATURE_SUPPORTS_APFS (bit 19), FW_FEATURE_SUPPORTS_EXTENDED_FEATURES
+ * (bit 25) and FW_FEATURE_SUPPORTS_LARGE_BASESYSTEM (bit 35, in the 64-bit
+ * ExtendedFirmwareFeatures only, required for installing macOS 12 and later
+ * according to the OpenCore documentation). */
+#define MACOS_GUEST_APPLE_FW_FEATURES       UINT64_C(0x0000000882080015)
+/** The Apple firmware features mask matching MACOS_GUEST_APPLE_FW_FEATURES. */
+#define MACOS_GUEST_APPLE_FW_FEATURES_MASK  UINT64_C(0x00000008820803ff)
+
+
+/*********************************************************************************************************************************
+*   Structures and Typedefs                                                                                                      *
+*********************************************************************************************************************************/
+/**
+ * Apple platform defaults for a macOS guest OS type.
+ *
+ * Starting with macOS 10.14 the guest doesn't get the host DMI information any
+ * longer (which is useless or even harmful on non-Apple hosts), but a Mac model
+ * which is officially supported by the respective release instead.  The model
+ * data (board-id, chassis type, family) matches what Apple uses, see the public
+ * OpenCorePkg AppleModels database.  Serial numbers are deliberately not made
+ * up, as they could collide with real devices.
+ */
+typedef struct MACOSGUESTPLATFORM
+{
+    /** The guest OS type ID. */
+    const char *pszOsTypeId;
+    /** The Mac model identifier (DmiSystemProduct, DmiBoardVersion). */
+    const char *pszModel;
+    /** The board-id (DmiBoardProduct, DmiChassisVersion). */
+    const char *pszBoardId;
+    /** The product family (DmiSystemFamily). */
+    const char *pszFamily;
+    /** The SMBIOS chassis type (DmiChassisType). */
+    uint8_t     bChassisType;
+    /** Whether the release requires a x86_64h (Haswell) capable CPU. */
+    bool        fNeedX86_64h;
+} MACOSGUESTPLATFORM;
+/** Pointer to const Apple platform defaults. */
+typedef MACOSGUESTPLATFORM const *PCMACOSGUESTPLATFORM;
+
+
+/*********************************************************************************************************************************
+*   Global Variables                                                                                                             *
+*********************************************************************************************************************************/
+/** The Apple platform defaults for the macOS guest OS types which have them. */
+static const MACOSGUESTPLATFORM g_aMacOSGuestPlatforms[] =
+{
+    /* iMac (Retina 5K, 27-inch, 2017), supported by macOS 10.12.4 thru 13.  iMac19,1 needs 10.14.4,
+       so this one is used to cover all Mojave builds. */
+    { GUEST_OS_ID_STR_X64("MacOS1014"), "iMac18,3", "Mac-BE088AF8C5EB4FA2", "iMac", 0x0d /* all in one */, false },
+    /* iMac (Retina 5K, 27-inch, 2019), supported by macOS 10.14.4 thru 15. */
+    { GUEST_OS_ID_STR_X64("MacOS1015"), "iMac19,1", "Mac-AA95B1DDAB278B95", "iMac", 0x0d /* all in one */, false },
+    { GUEST_OS_ID_STR_X64("MacOS11"),   "iMac19,1", "Mac-AA95B1DDAB278B95", "iMac", 0x0d /* all in one */, false },
+    { GUEST_OS_ID_STR_X64("MacOS12"),   "iMac19,1", "Mac-AA95B1DDAB278B95", "iMac", 0x0d /* all in one */, false },
+    { GUEST_OS_ID_STR_X64("MacOS13"),   "iMac19,1", "Mac-AA95B1DDAB278B95", "iMac", 0x0d /* all in one */, true  },
+    { GUEST_OS_ID_STR_X64("MacOS14"),   "iMac19,1", "Mac-AA95B1DDAB278B95", "iMac", 0x0d /* all in one */, true  },
+    { GUEST_OS_ID_STR_X64("MacOS15"),   "iMac19,1", "Mac-AA95B1DDAB278B95", "iMac", 0x0d /* all in one */, true  },
+    /* iMac (Retina 5K, 27-inch, 2020), supported by macOS 10.15.6 thru 26 (the iMac19,1 isn't supported by 26). */
+    { GUEST_OS_ID_STR_X64("MacOS26"),   "iMac20,1", "Mac-CFF7D910A743CAAF", "iMac", 0x0d /* all in one */, true  },
+};
+
 
 /*********************************************************************************************************************************
 *   Internal Functions                                                                                                           *
@@ -158,6 +230,51 @@ static int getSmcDeviceKey(IVirtualBox *pVirtualBox, IMachine *pMachine, Utf8Str
 #endif
 
     return vrc;
+}
+
+
+/**
+ * Looks up the Apple platform defaults for the given guest OS type.
+ *
+ * @returns Pointer to the defaults, NULL if the guest OS type has none (all
+ *          non-macOS types and the macOS types older than 10.14).
+ * @param   rOsTypeId           The guest OS type ID.
+ */
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
+/**
+ * Checks whether the macOS 10.14+ kernel knows the given Intel CPU model.
+ *
+ * The kernel panics with "Unsupported CPU" on models it doesn't know.  These are
+ * the family 6 models listed as CPUID_MODEL_XXX in osfmk/i386/cpuid.h of the xnu
+ * sources (macOS 10.14 thru 26).  Keep in sync with smcR3CheckGuestCpu in
+ * DevSmc.cpp.
+ *
+ * @returns true if known, false if not.
+ * @param   uFamily     The CPU family (RTX86GetCpuFamily).
+ * @param   uModel      The CPU model (RTX86GetCpuModelIntel).
+ */
+static bool isIntelCpuModelKnownToMacOS(uint32_t uFamily, uint32_t uModel)
+{
+    static uint8_t const s_abKnownModels[] =
+    {
+        0x17, 0x1a, 0x1e, 0x1f, 0x25, 0x2a, 0x2c, 0x2d, 0x2e, 0x2f, 0x3a, 0x3c, 0x3d, 0x3e, 0x3f,
+        0x45, 0x46, 0x47, 0x4e, 0x55, 0x5e, 0x7d, 0x7e, 0x8e, 0x9e, 0x9f, 0xa5
+    };
+    if (uFamily == 6)
+        for (size_t i = 0; i < RT_ELEMENTS(s_abKnownModels); i++)
+            if (s_abKnownModels[i] == uModel)
+                return true;
+    return false;
+}
+#endif
+
+
+static PCMACOSGUESTPLATFORM getMacOSGuestPlatform(const Bstr &rOsTypeId)
+{
+    for (size_t i = 0; i < RT_ELEMENTS(g_aMacOSGuestPlatforms); i++)
+        if (rOsTypeId.equals(g_aMacOSGuestPlatforms[i].pszOsTypeId))
+            return &g_aMacOSGuestPlatforms[i];
+    return NULL;
 }
 
 
@@ -606,6 +723,9 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
         fDosGuest = osTypeId.equals(GUEST_OS_ID_STR_X86("DOS")) || osTypeId.equals(GUEST_OS_ID_STR_X86("Windows31"));
     }
 
+    /* The Apple platform defaults for macOS 10.14 and later guests, NULL for everything else. */
+    PCMACOSGUESTPLATFORM const pMacOSPlatform = fOsXGuest ? getMacOSGuestPlatform(osTypeId) : NULL;
+
     ComPtr<IPlatformProperties> platformProperties;
     systemProperties->COMGETTER(Platform)(platformProperties.asOutParam());
 
@@ -714,6 +834,27 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                      || osTypeId == GUEST_OS_ID_STR_X64("MacOS109"))
                 uMaxIntelFamilyModelStep = RT_MAKE_U32_FROM_U8(1, 23, 6, 0); /* Penryn / X5482 */ /** @todo figure
                                                                                 out what is required here. */
+            else if (   pMacOSPlatform
+                     && (bstrCpuProfile.isEmpty() || bstrCpuProfile.equals("host")))
+            {
+                /* The macOS kernel panics with "Unsupported CPU" if it doesn't know the CPU model, which is
+                   the case for e.g. Tiger Lake, Alder Lake, Raptor Lake and Arrow Lake.  So, on Intel hosts with
+                   such a CPU, present macOS 10.14 and later with a model all of them know instead, whether the
+                   host model number is higher or lower (ForceIntelFamilyModelStep).  Hosts with a known model
+                   are left alone, as are explicitly selected CPU profiles.  The
+                   VBoxInternal/CPUM/MaxIntelFamilyModelStep extra data value overrides the model (CFGM overlay). */
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
+                if (ASMIsIntelCpu())
+                {
+                    uint32_t const uHostStd1Eax = ASMCpuId_EAX(1);
+                    if (!isIntelCpuModelKnownToMacOS(RTX86GetCpuFamily(uHostStd1Eax), RTX86GetCpuModelIntel(uHostStd1Eax)))
+                    {
+                        uMaxIntelFamilyModelStep = MACOS_GUEST_MAX_INTEL_FMS;
+                        InsertConfigInteger(pCPUM, "ForceIntelFamilyModelStep", 1);
+                    }
+                }
+#endif
+            }
             if (uMaxIntelFamilyModelStep != UINT32_MAX)
                 InsertConfigInteger(pCPUM, "MaxIntelFamilyModelStep", uMaxIntelFamilyModelStep);
         }
@@ -1289,6 +1430,12 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
             if (!fGetKeyFromRealSMC)
                 InsertConfigString(pCfg,   "DeviceKey", strKey);
             InsertConfigInteger(pCfg,  "GetKeyFromRealSMC", fGetKeyFromRealSMC);
+
+            /* Let the SMC device warn about guest CPUs which macOS 13 and later cannot run on. */
+            if (pMacOSPlatform)
+                InsertConfigInteger(pCfg, "CheckCpuModel", 1);
+            if (pMacOSPlatform && pMacOSPlatform->fNeedX86_64h)
+                InsertConfigInteger(pCfg, "CheckX86_64h", 1);
         }
 
         /*
@@ -1646,11 +1793,44 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
             if (!strResolution.isEmpty())
                 InsertConfigString(pCfg,   "GraphicsResolution", strResolution);
 
-            /* For OS X guests we'll force passing host's DMI info to the guest */
+            /* For OS X guests we'll force passing host's DMI info to the guest.  The macOS 10.14 and
+               later types get the DMI information of a Mac model supported by the respective release
+               instead, because the host information is of no use on non-Apple hosts (and leaks the host
+               model into the guest).  Setting VBoxInternal/Devices/efi/0/Config/DmiUseHostInfo explicitly
+               disables this: 1 passes the host information like the older types do, 0 gives the generic
+               VirtualBox values.  The individual VBoxInternal/Devices/efi/0/Config/Dmi* values override what
+               we set here (CFGM overlay).  The serial numbers are left alone. */
             if (fOsXGuest)
             {
-                InsertConfigInteger(pCfg, "DmiUseHostInfo", 1);
+                if (!pMacOSPlatform)
+                    InsertConfigInteger(pCfg, "DmiUseHostInfo", 1);
+                else
+                {
+                    GetExtraDataBoth(virtualBox, pMachine, "VBoxInternal/Devices/efi/0/Config/DmiUseHostInfo", &strTmp);
+                    if (strTmp.isEmpty())
+                    {
+                        LogRel(("EFI: Presenting the guest with a %s (board-id %s) in the DMI tables\n",
+                                pMacOSPlatform->pszModel, pMacOSPlatform->pszBoardId));
+                        InsertConfigString(pCfg,  "DmiSystemVendor",     "Apple Inc.");
+                        InsertConfigString(pCfg,  "DmiSystemProduct",    pMacOSPlatform->pszModel);
+                        InsertConfigString(pCfg,  "DmiSystemVersion",    "1.0");
+                        InsertConfigString(pCfg,  "DmiSystemFamily",     pMacOSPlatform->pszFamily);
+                        InsertConfigString(pCfg,  "DmiBoardVendor",      "Apple Inc.");
+                        InsertConfigString(pCfg,  "DmiBoardProduct",     pMacOSPlatform->pszBoardId);
+                        InsertConfigString(pCfg,  "DmiBoardVersion",     pMacOSPlatform->pszModel);
+                        InsertConfigString(pCfg,  "DmiChassisVendor",    "Apple Inc.");
+                        InsertConfigInteger(pCfg, "DmiChassisType",      pMacOSPlatform->bChassisType);
+                        InsertConfigString(pCfg,  "DmiChassisVersion",   pMacOSPlatform->pszBoardId);
+                    }
+                }
                 InsertConfigInteger(pCfg, "DmiExposeMemoryTable", 1);
+
+                /* Advertise APFS and large BaseSystem support to boot.efi and the installer. */
+                if (pMacOSPlatform)
+                {
+                    InsertConfigInteger(pCfg, "AppleFirmwareFeatures",     MACOS_GUEST_APPLE_FW_FEATURES);
+                    InsertConfigInteger(pCfg, "AppleFirmwareFeaturesMask", MACOS_GUEST_APPLE_FW_FEATURES_MASK);
+                }
             }
 
 #if defined(VBOX_WITH_TPM)

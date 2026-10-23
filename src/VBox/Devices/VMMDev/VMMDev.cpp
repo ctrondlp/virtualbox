@@ -337,6 +337,14 @@ static void vmmdevLogGuestOsInfo(VBoxGuestInfo *pGuestInfo)
             case VBOXOSTYPE_Win2k25_x64:                  pszOs = "Windows Server 2025"; break;
             case VBOXOSTYPE_Win11_x64:                    pszOs = "Windows 11";     break;
             case VBOXOSTYPE_Win11_arm64:                  pszOs = "Windows 11";     break;
+            case VBOXOSTYPE_MacOS1014_x64:                pszOs = "macOS 10.14";    break;
+            case VBOXOSTYPE_MacOS1015_x64:                pszOs = "macOS 10.15";    break;
+            case VBOXOSTYPE_MacOS11_x64:                  pszOs = "macOS 11";       break;
+            case VBOXOSTYPE_MacOS12_x64:                  pszOs = "macOS 12";       break;
+            case VBOXOSTYPE_MacOS13_x64:                  pszOs = "macOS 13";       break;
+            case VBOXOSTYPE_MacOS14_x64:                  pszOs = "macOS 14";       break;
+            case VBOXOSTYPE_MacOS15_x64:                  pszOs = "macOS 15";       break;
+            case VBOXOSTYPE_MacOS26_x64:                  pszOs = "macOS 26";       break;
             default:                                      pszOs = "unknown";        break;
         }
     }

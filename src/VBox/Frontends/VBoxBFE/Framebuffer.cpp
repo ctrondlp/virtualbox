@@ -69,7 +69,6 @@ int PushSDLEventForSure(SDL_Event *event)
     return -1;
 }
 
-#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
 /**
  * Special SDL_PushEvent function for NotifyUpdate events. These events may occur in bursts
  * so make sure they don't flood the SDL event queue.
@@ -84,6 +83,8 @@ void PushNotifyUpdateEvent(SDL_Event *event)
     /* A global counter is faster than SDL_PeepEvents() */
     if (fSuccess)
         ASMAtomicIncS32(&g_cNotifyUpdateEventsPending);
+    else
+        RTMemFree(event->user.data1); /* The update rectangle, the event handler would have freed it. */
     /* In order to not flood the SDL event queue, yield the CPU or (if there are already many
      * events queued) even sleep */
     if (g_cNotifyUpdateEventsPending > 96)
@@ -96,7 +97,6 @@ void PushNotifyUpdateEvent(SDL_Event *event)
     else
         RTThreadYield();
 }
-#endif /* VBOXSDL_WITH_X11 */
 
 
 //
@@ -135,6 +135,8 @@ Framebuffer::Framebuffer(Display *pDisplay, uint32_t uScreenId,
     mPtrVRAM        = NULL;
     mBitsPerPixel   = 0;
     mBytesPerLine   = 0;
+    mPendingPtrVRAM      = NULL;
+    mPendingBytesPerLine = 0;
     mfSameSizeRequested = false;
     mfUpdates = false;
 
@@ -310,12 +312,13 @@ int Framebuffer::notifyUpdate(uint32_t x, uint32_t y,
     LogFlow(("Framebuffer::notifyUpdate: x = %d, y = %d, w = %d, h = %d\n",
              x, y, w, h));
 
-#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
     /*
      * SDL does not allow us to make this call from any other thread than
      * the main SDL thread (which initialized the video mode). So we have
      * to send an event to the main SDL thread and process it there. For
      * sake of simplicity, we encode all information in the event parameters.
+     * This applies to Windows as well: the SDL renderer (Direct3D there) must
+     * only be used on the thread which created it.
      */
     SDL_Event event;
     event.type       = SDL_USEREVENT;
@@ -332,9 +335,6 @@ int Framebuffer::notifyUpdate(uint32_t x, uint32_t y,
 
     event.user.data2 = NULL;
     PushNotifyUpdateEvent(&event);
-#else /* !VBOXSDL_WITH_X11 */
-    update(x, y, w, h, true /* fGuestRelative */);
-#endif /* !VBOXSDL_WITH_X11 */
 
     return VINF_SUCCESS;
 }
@@ -376,14 +376,26 @@ int Framebuffer::NotifyUpdateImage(uint32_t aX,
     return notifyUpdate(aX, aY, aWidth, aHeight);
 }
 
+/**
+ * Notification about a guest screen resize (any thread).
+ *
+ * @param   pvVRAM      Where the guest screen is in VRAM, if the framebuffer should
+ *                      show it directly instead of a copy made by the VGA device
+ *                      (VBVA and VMSVGA screens).  NULL for the copy.
+ * @param   cBits       Bits per pixel of the screen in VRAM.
+ * @param   cbLine      Bytes per line of the screen in VRAM.
+ */
 int Framebuffer::notifyChange(uint32_t aScreenId,
                               uint32_t aXOrigin,
                               uint32_t aYOrigin,
                               uint32_t aWidth,
-                              uint32_t aHeight)
+                              uint32_t aHeight,
+                              void *pvVRAM /*= NULL*/,
+                              uint32_t cBits /*= 0*/,
+                              uint32_t cbLine /*= 0*/)
 {
-    LogRel(("NotifyChange: %d %d,%d %dx%d\n",
-            aScreenId, aXOrigin, aYOrigin, aWidth, aHeight));
+    LogRel(("NotifyChange: %d %d,%d %dx%d%s\n",
+            aScreenId, aXOrigin, aYOrigin, aWidth, aHeight, pvVRAM ? " (VRAM)" : ""));
 
     RTCritSectEnter(&mUpdateLock);
 
@@ -395,6 +407,18 @@ int Framebuffer::notifyChange(uint32_t aScreenId,
     mPtrVRAM     = NULL;
     mBitsPerPixel = 0;
     mBytesPerLine = 0;
+
+    /* Only the 32bpp layout the SDL surface uses can be shown directly. */
+    if (pvVRAM && cBits == 32 && cbLine >= aWidth * 4)
+    {
+        mPendingPtrVRAM      = (uint8_t *)pvVRAM;
+        mPendingBytesPerLine = cbLine;
+    }
+    else
+    {
+        mPendingPtrVRAM      = NULL;
+        mPendingBytesPerLine = 0;
+    }
 
     RTCritSectLeave(&mUpdateLock);
 
@@ -420,15 +444,45 @@ void Framebuffer::notifyChange(uint32_t aScreenId)
     /* Disable screen updates. */
     RTCritSectEnter(&mUpdateLock);
 
-    mPtrVRAM      = NULL;
+    mPtrVRAM      = mPendingPtrVRAM; /* Show the guest VRAM directly if possible, see resizeGuest(). */
     mBitsPerPixel = 32;
-    mBytesPerLine = mGuestXRes * 4;
+    mBytesPerLine = mPendingPtrVRAM ? mPendingBytesPerLine : mGuestXRes * 4;
+
+    /* Still holding the lock, so the surface gets the size that goes with the
+       pointer even if the guest changes the mode again meanwhile. */
+    resizeGuest();
+    void * const pvInUse = mPtrVRAM;
 
     RTCritSectLeave(&mUpdateLock);
 
-    resizeGuest();
+    /* Buffers of earlier modes the surface no longer shows. */
+    m_pDisplay->i_freeRetiredShadows(pvInUse);
 
     m_pDisplay->i_invalidateAndUpdateScreen(aScreenId);
+
+    /* Show the new surface (the guest VRAM, or what i_invalidateAndUpdateScreen copied). */
+    repaint();
+}
+
+
+/**
+ * Points the framebuffer at a new location of the guest screen in VRAM, after the
+ * guest flipped pages with an unchanged layout (any thread).  Only matters if
+ * the framebuffer shows the guest VRAM directly.
+ */
+void Framebuffer::setVRAMPointer(void *pvVRAM)
+{
+    RTCritSectEnter(&mUpdateLock);
+    if (mPendingPtrVRAM)
+        mPendingPtrVRAM = (uint8_t *)pvVRAM;
+    if (mPtrVRAM && mSurfVRAM)
+    {
+        /* The surface was made with SDL_CreateRGBSurfaceFrom (SDL_PREALLOC), so the
+           pixel pointer is ours to change. */
+        mPtrVRAM = (uint8_t *)pvVRAM;
+        mSurfVRAM->pixels = pvVRAM;
+    }
+    RTCritSectLeave(&mUpdateLock);
 }
 
 /**
@@ -615,7 +669,7 @@ void Framebuffer::resizeSDL(void)
  * Update specified framebuffer area. The coordinates can either be
  * relative to the guest framebuffer or relative to the screen.
  *
- * @remarks Must be called from the SDL thread on Linux!
+ * @remarks Must be called from the SDL thread!
  * @param   x              left column
  * @param   y              top row
  * @param   w              width in pixels
@@ -624,9 +678,7 @@ void Framebuffer::resizeSDL(void)
  */
 void Framebuffer::update(int x, int y, int w, int h, bool fGuestRelative)
 {
-#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
     AssertMsg(gSdlNativeThread == RTThreadNativeSelf(), ("Wrong thread! SDL is not threadsafe!\n"));
-#endif
     RTCritSectEnter(&mUpdateLock);
     Log3Func(("mfUpdates=%RTbool %d,%d %dx%d\n", mfUpdates, x, y, w, h));
     if (!mfUpdates)
@@ -658,6 +710,25 @@ void Framebuffer::update(int x, int y, int w, int h, bool fGuestRelative)
         y = 0;
         h = mGuestYRes;
     }
+
+    /* Clip to the surface.  With VBVA the rectangle comes from the guest. */
+    if (x < 0)
+    {
+        w += x;
+        x = 0;
+    }
+    if (y < 0)
+    {
+        h += y;
+        y = 0;
+    }
+    if (x >= mSurfVRAM->w || y >= mSurfVRAM->h || w <= 0 || h <= 0)
+    {
+        RTCritSectLeave(&mUpdateLock);
+        return;
+    }
+    w = RT_MIN(w, mSurfVRAM->w - x);
+    h = RT_MIN(h, mSurfVRAM->h - y);
 
     SDL_Rect srcRect;
     srcRect.x = x;

@@ -53,6 +53,14 @@
 
 #include "DevVGA-SVGA3d-dx-dx11.h"
 
+#if defined(RT_OS_WINDOWS) && !defined(VBOX_WITH_DXVK) && !defined(VBOX_WITH_DXMT)
+/* Native D3D11 on a Windows host: the host GPU is selected explicitly, see dxSelectAdapter. */
+# define DX_WITH_ADAPTER_SELECTION
+# include <iprt/string.h>
+# include <iprt/utf16.h>
+# include <dxgi1_6.h>
+#endif
+
 /* One ID3D11Device object is used for all VMSVGA guest contexts because the VGPU design makes resources
  * independent from rendering contexts. I.e. multiple guest contexts freely access a surface.
  *
@@ -410,6 +418,12 @@ typedef struct VMSVGA3DBACKENDDXCONTEXT
 typedef HRESULT FN_D3D_DISASSEMBLE(LPCVOID pSrcData, SIZE_T SrcDataSize, UINT Flags, LPCSTR szComments, ID3D10Blob **ppDisassembly);
 typedef FN_D3D_DISASSEMBLE *PFN_D3D_DISASSEMBLE;
 
+#ifdef DX_WITH_ADAPTER_SELECTION
+/* CreateDXGIFactory1 from dxgi.dll, used for selecting the host adapter. */
+typedef HRESULT WINAPI FN_DX_CREATE_DXGI_FACTORY1(REFIID riid, void **ppvFactory);
+typedef FN_DX_CREATE_DXGI_FACTORY1 *PFN_DX_CREATE_DXGI_FACTORY1;
+#endif
+
 typedef struct VMSVGA3DBACKEND
 {
     RTLDRMOD                   hD3D11;
@@ -417,6 +431,13 @@ typedef struct VMSVGA3DBACKEND
 
     RTLDRMOD                   hD3DCompiler;
     PFN_D3D_DISASSEMBLE        pfnD3DDisassemble;
+
+#ifdef DX_WITH_ADAPTER_SELECTION
+    RTLDRMOD                   hDXGI;                  /* dxgi.dll, NIL if not loaded. */
+    PFN_DX_CREATE_DXGI_FACTORY1 pfnCreateDXGIFactory1; /* NULL if not available: use the default adapter. */
+    /* Host adapter selection, the "VMSVGA3dAdapter" config value (see dxSelectAdapter). */
+    char                       szAdapterSelection[128];
+#endif
 
     DXDEVICE                   dxDevice;
     UINT                       VendorId;
@@ -1397,11 +1418,143 @@ static void dxLogRelVideoCaps(ID3D11VideoDevice *pVideoDevice)
 }
 
 
+#ifdef DX_WITH_ADAPTER_SELECTION
+/**
+ * Converts a DXGI adapter description to UTF-8.
+ */
+static void dxAdapterDescToUtf8(DXGI_ADAPTER_DESC1 const *pDesc, char *pszDst, size_t cbDst)
+{
+    char *psz = pszDst;
+    int rc = RTUtf16ToUtf8Ex((PCRTUTF16)&pDesc->Description[0], RT_ELEMENTS(pDesc->Description), &psz, cbDst, NULL);
+    if (RT_FAILURE(rc))
+        RTStrCopy(pszDst, cbDst, "<invalid>");
+}
+
+
+/**
+ * Selects the host adapter (GPU) for the D3D11 device.
+ *
+ * Without an explicit adapter D3D11CreateDevice uses the first DXGI adapter, i.e. the GPU
+ * driving the primary display or whatever the per-application Windows graphics preference
+ * says.  On hybrid systems with an integrated and a discrete GPU this is often the
+ * low-power integrated GPU, so the high performance GPU is preferred unless the
+ * "VMSVGA3dAdapter" config value (case insensitive) says otherwise:
+ *   - "" (default) or "HighPerformance": IDXGIFactory6::EnumAdapterByGpuPreference(HIGH_PERFORMANCE);
+ *   - "MinimumPower": EnumAdapterByGpuPreference(MINIMUM_POWER), usually the integrated GPU;
+ *   - "Default": no explicit adapter, i.e. the behaviour of older VirtualBox versions;
+ *   - anything else: the first hardware adapter whose description contains the value,
+ *     e.g. "NVIDIA", "Intel" or "RTX 5070"; the high performance one if nothing matches.
+ * Software adapters (WARP / Microsoft Basic Render Driver) are never selected.
+ *
+ * Set with: VBoxManage setextradata <vm> "VBoxInternal/Devices/vga/0/Config/VMSVGA3dAdapter" <value>
+ *
+ * @returns Referenced adapter which the caller must release, or NULL to let
+ *          D3D11CreateDevice choose the adapter.
+ * @param   pBackend    The backend.
+ */
+static IDXGIAdapter1 *dxSelectAdapter(PVMSVGA3DBACKEND pBackend)
+{
+    char const *pszSel = pBackend->szAdapterSelection;
+    if (!RTStrICmp(pszSel, "Default"))
+    {
+        LogRel(("VMSVGA: Using the system default host adapter (VMSVGA3dAdapter=Default)\n"));
+        return NULL;
+    }
+
+    if (!pBackend->pfnCreateDXGIFactory1)
+        return NULL;
+
+    IDXGIFactory1 *pFactory = NULL;
+    HRESULT hr = pBackend->pfnCreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&pFactory);
+    if (FAILED(hr))
+    {
+        LogRel(("VMSVGA: CreateDXGIFactory1 failed (%#x), using the default host adapter\n", (uint32_t)hr));
+        return NULL;
+    }
+
+    bool const fMinimumPower = !RTStrICmp(pszSel, "MinimumPower");
+    bool const fByName       = *pszSel != '\0' && !fMinimumPower && RTStrICmp(pszSel, "HighPerformance") != 0;
+
+    /* List all host adapters (helps choosing a VMSVGA3dAdapter value) and do the name matching. */
+    IDXGIAdapter1 *pAdapter = NULL;
+    for (UINT i = 0; i < 16; ++i)
+    {
+        IDXGIAdapter1 *pEnum = NULL;
+        hr = pFactory->EnumAdapters1(i, &pEnum);
+        if (FAILED(hr)) /* DXGI_ERROR_NOT_FOUND after the last adapter. */
+            break;
+
+        DXGI_ADAPTER_DESC1 Desc;
+        hr = pEnum->GetDesc1(&Desc);
+        if (SUCCEEDED(hr))
+        {
+            char szDesc[RT_ELEMENTS(Desc.Description) * 3 + 1]; /* Up to 3 UTF-8 bytes per UTF-16 unit plus terminator. */
+            dxAdapterDescToUtf8(&Desc, szDesc, sizeof(szDesc));
+            bool const fSoftware = RT_BOOL(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
+            LogRel(("VMSVGA: Host adapter #%u: %04x:%04x [%s], %RU64 MB dedicated video memory, %RU64 MB shared system memory%s\n",
+                    i, Desc.VendorId, Desc.DeviceId, szDesc, (uint64_t)Desc.DedicatedVideoMemory / _1M,
+                    (uint64_t)Desc.SharedSystemMemory / _1M, fSoftware ? " (software)" : ""));
+            if (fByName && !pAdapter && !fSoftware && RTStrIStr(szDesc, pszSel))
+            {
+                LogRel(("VMSVGA: Selected host adapter #%u (matches VMSVGA3dAdapter=\"%s\")\n", i, pszSel));
+                pAdapter = pEnum;
+                pEnum = NULL;
+            }
+        }
+        D3D_RELEASE(pEnum);
+    }
+
+    if (!pAdapter)
+    {
+        if (fByName)
+            LogRel(("VMSVGA: No host adapter matches VMSVGA3dAdapter=\"%s\", using the high performance GPU preference\n", pszSel));
+
+        /* IDXGIFactory6 requires Windows 10 1803 or later. */
+        IDXGIFactory6 *pFactory6 = NULL;
+        hr = pFactory->QueryInterface(__uuidof(IDXGIFactory6), (void **)&pFactory6);
+        if (SUCCEEDED(hr))
+        {
+            DXGI_GPU_PREFERENCE const enmPref = fMinimumPower ? DXGI_GPU_PREFERENCE_MINIMUM_POWER
+                                                              : DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE;
+            for (UINT i = 0; i < 16 && !pAdapter; ++i)
+            {
+                IDXGIAdapter1 *pEnum = NULL;
+                hr = pFactory6->EnumAdapterByGpuPreference(i, enmPref, __uuidof(IDXGIAdapter1), (void **)&pEnum);
+                if (FAILED(hr))
+                    break;
+
+                DXGI_ADAPTER_DESC1 Desc;
+                hr = pEnum->GetDesc1(&Desc);
+                if (SUCCEEDED(hr) && !(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+                {
+                    LogRel(("VMSVGA: Selected host adapter by %s GPU preference\n",
+                            fMinimumPower ? "minimum power" : "high performance"));
+                    pAdapter = pEnum;
+                    pEnum = NULL;
+                }
+                D3D_RELEASE(pEnum);
+            }
+            D3D_RELEASE(pFactory6);
+        }
+        else
+            LogRel(("VMSVGA: IDXGIFactory6 is not available (%#x), using the default host adapter\n", (uint32_t)hr));
+    }
+
+    D3D_RELEASE(pFactory);
+    return pAdapter;
+}
+#endif /* DX_WITH_ADAPTER_SELECTION */
+
+
 static int dxDeviceCreate(PVMSVGA3DBACKEND pBackend, DXDEVICE *pDXDevice)
 {
     int rc = VINF_SUCCESS;
 
+#ifdef DX_WITH_ADAPTER_SELECTION
+    IDXGIAdapter1 *pAdapter = dxSelectAdapter(pBackend); /* NULL means the default adapter. */
+#else
     IDXGIAdapter *pAdapter = NULL; /* Default adapter. */
+#endif
     static D3D_FEATURE_LEVEL const s_aFeatureLevels[] =
     {
         D3D_FEATURE_LEVEL_11_1,
@@ -1414,8 +1567,9 @@ static int dxDeviceCreate(PVMSVGA3DBACKEND pBackend, DXDEVICE *pDXDevice)
 
     ID3D11Device *pDevice = 0;
     ID3D11DeviceContext *pImmediateContext = 0;
+    /* An explicit adapter requires D3D_DRIVER_TYPE_UNKNOWN. */
     HRESULT hr = pBackend->pfnD3D11CreateDevice(pAdapter,
-                                                D3D_DRIVER_TYPE_HARDWARE,
+                                                pAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
                                                 NULL,
                                                 Flags,
                                                 s_aFeatureLevels,
@@ -1433,6 +1587,25 @@ static int dxDeviceCreate(PVMSVGA3DBACKEND pBackend, DXDEVICE *pDXDevice)
          */
         Flags &= ~D3D11_CREATE_DEVICE_DEBUG;
         hr = pBackend->pfnD3D11CreateDevice(pAdapter,
+                                            pAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+                                            NULL,
+                                            Flags,
+                                            s_aFeatureLevels,
+                                            RT_ELEMENTS(s_aFeatureLevels),
+                                            D3D11_SDK_VERSION,
+                                            &pDevice,
+                                            &pDXDevice->FeatureLevel,
+                                            &pImmediateContext);
+    }
+#endif
+#ifdef DX_WITH_ADAPTER_SELECTION
+    if (FAILED(hr) && pAdapter)
+    {
+        /* E.g. the selected GPU does not support feature level 11.0. Try the default one. */
+        LogRel(("VMSVGA: Failed to create the device on the selected host adapter (%#x), trying the default adapter\n",
+                (uint32_t)hr));
+        D3D_RELEASE(pAdapter);
+        hr = pBackend->pfnD3D11CreateDevice(NULL,
                                             D3D_DRIVER_TYPE_HARDWARE,
                                             NULL,
                                             Flags,
@@ -1444,6 +1617,7 @@ static int dxDeviceCreate(PVMSVGA3DBACKEND pBackend, DXDEVICE *pDXDevice)
                                             &pImmediateContext);
     }
 #endif
+    D3D_RELEASE(pAdapter); /* The device keeps its own reference. */
 
     if (SUCCEEDED(hr))
     {
@@ -3394,6 +3568,33 @@ static DECLCALLBACK(int) vmsvga3dBackInit(PPDMDEVINS pDevIns, PVGASTATE pThis, P
     }
 #endif
 
+#ifdef DX_WITH_ADAPTER_SELECTION
+    if (RT_SUCCESS(rc))
+    {
+        /* Host GPU selection, see dxSelectAdapter. */
+        int rc2 = pDevIns->pHlpR3->pfnCFGMQueryStringDef(pDevIns->pCfg, "VMSVGA3dAdapter", pBackend->szAdapterSelection,
+                                                         sizeof(pBackend->szAdapterSelection), "");
+        if (RT_FAILURE(rc2))
+        {
+            LogRel(("VMSVGA: Invalid VMSVGA3dAdapter value (%Rrc), ignored\n", rc2));
+            pBackend->szAdapterSelection[0] = '\0';
+        }
+        else if (pBackend->szAdapterSelection[0])
+            LogRel(("VMSVGA: VMSVGA3dAdapter=\"%s\"\n", pBackend->szAdapterSelection));
+
+        /* Failure is not fatal, D3D11CreateDevice picks the default adapter then. dxgi.dll is used by d3d11.dll anyway. */
+        pBackend->hDXGI = NIL_RTLDRMOD;
+        rc2 = RTLdrLoadSystem("dxgi", /* fNoUnload = */ true, &pBackend->hDXGI);
+        if (RT_SUCCESS(rc2))
+            rc2 = RTLdrGetSymbol(pBackend->hDXGI, "CreateDXGIFactory1", (void **)&pBackend->pfnCreateDXGIFactory1);
+        if (RT_FAILURE(rc2))
+        {
+            LogRel(("VMSVGA: CreateDXGIFactory1 is not available (%Rrc), using the default host adapter\n", rc2));
+            pBackend->pfnCreateDXGIFactory1 = NULL;
+        }
+    }
+#endif
+
 #ifndef DX_STATE_TRACKER
     vmsvga3dDXInitContextMobData(&pBackend->svgaDXContext);
 #endif
@@ -3417,8 +3618,16 @@ static DECLCALLBACK(int) vmsvga3dBackPowerOn(PPDMDEVINS pDevIns, PVGASTATE pThis
     int rc = dxDeviceCreate(pBackend, &pBackend->dxDevice);
     if (RT_SUCCESS(rc))
     {
+        /* Query the adapter the device was actually created on, which is not necessarily the
+         * first adapter of the factory (see dxSelectAdapter).  The vendor id selects workarounds. */
         IDXGIAdapter *pAdapter = NULL;
-        HRESULT hr = pBackend->dxDevice.pDxgiFactory->EnumAdapters(0, &pAdapter);
+        IDXGIDevice *pDxgiDevice = NULL;
+        HRESULT hr = pBackend->dxDevice.pDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&pDxgiDevice);
+        if (SUCCEEDED(hr))
+        {
+            hr = pDxgiDevice->GetParent(__uuidof(IDXGIAdapter), (void**)&pAdapter);
+            D3D_RELEASE(pDxgiDevice);
+        }
         if (SUCCEEDED(hr))
         {
             DXGI_ADAPTER_DESC desc;
@@ -3431,10 +3640,14 @@ static DECLCALLBACK(int) vmsvga3dBackPowerOn(PPDMDEVINS pDevIns, PVGASTATE pThis
                 char sz[RT_ELEMENTS(desc.Description)];
                 for (unsigned i = 0; i < RT_ELEMENTS(desc.Description); ++i)
                     sz[i] = (char)desc.Description[i];
+                sz[RT_ELEMENTS(sz) - 1] = '\0';
                 LogRelMax(1, ("VMSVGA: Adapter %04x:%04x [%s]\n", pBackend->VendorId, pBackend->DeviceId, sz));
+                LogRelMax(1, ("VMSVGA: Adapter memory: %RU64 MB dedicated video, %RU64 MB dedicated system, %RU64 MB shared system\n",
+                              (uint64_t)desc.DedicatedVideoMemory / _1M, (uint64_t)desc.DedicatedSystemMemory / _1M,
+                              (uint64_t)desc.SharedSystemMemory / _1M));
             }
 
-            pAdapter->Release();
+            D3D_RELEASE(pAdapter);
         }
 
         if (pBackend->dxDevice.pVideoDevice)

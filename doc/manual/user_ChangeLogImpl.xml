@@ -87,6 +87,17 @@ Rules for adding a changelog entry to make them look more uniform:
           will be removed in a future version of VirtualBox.</para>
       </listitem>
 
+      <listitem>
+        <para>macOS guests: Added guest OS types for macOS 10.14 Mojave up to
+          macOS 26 Tahoe (Intel). VMs of these types present a supported Mac
+          model in the DMI tables, a CPU model known to macOS on hosts with a
+          CPU model macOS does not know, and APFS and large BaseSystem support in
+          the firmware. All macOS guest types now warn when the SMC device key is
+          missing or the CPU is not an Intel one; the new types also warn about
+          an unknown CPU model and, for macOS 13 and later, missing instruction
+          set extensions (experimental)</para>
+      </listitem>
+
     </itemizedlist>
 
     <para>In addition, the following items were fixed or added:</para>
@@ -115,6 +126,64 @@ Rules for adding a changelog entry to make them look more uniform:
         <para>Shared Clipboard: Fixed plain-text copy and paste on macOS hosts and improved
           VBoxManage clipboard listen event and payload output, including compact logfmt-style
           human records and a startup warning when Shared Clipboard is disabled</para>
+      </listitem>
+
+      <listitem>
+        <para>Apple SMC: Fixed enumerating keys by index and writing key values,
+          and added the MSSP key</para>
+      </listitem>
+
+      <listitem>
+        <para>VMM: Guests can now use the GFNI, VAES, VPCLMULQDQ, AVX-VNNI,
+          AVX-VNNI-INT8, AVX-IFMA, AVX-NE-CONVERT, XSAVEOPT and XSAVEC
+          instruction set extensions and fast string operations when the host
+          supports them.
+          Saved states of VMs which were offered any of these can only be
+          restored on hosts supporting them</para>
+      </listitem>
+
+      <listitem>
+        <para>VMM: Fixed detecting the host CPU features of CPUID leaf 7
+          sub-leaves 1 and 2, which could offer guests wrong speculation control
+          features</para>
+      </listitem>
+
+      <listitem>
+        <para>Graphics: Fixed stale screen contents with display widths above
+          2048 pixels at 32 bpp (e.g. 4K) by checking all pages touched by a
+          scanline for changes</para>
+      </listitem>
+
+      <listitem>
+        <para>VMSVGA: On Windows hosts with more than one GPU the 3D device is
+          now created on the high performance GPU instead of the system default.
+          The host GPU can be chosen with the VBoxInternal/Devices/vga/0/Config/VMSVGA3dAdapter
+          extra data value (HighPerformance, MinimumPower, Default or part of the
+          adapter name); the available adapters are listed in VBox.log</para>
+      </listitem>
+
+      <listitem>
+        <para>Windows hosts: Improved performance when running VMs with the
+          Hyper-V execution engine by skipping register transfers to Hyper-V
+          for unchanged registers and on HLT, intercepting fewer guest
+          exceptions and using high resolution timers to deliver guest timer
+          events on time</para>
+      </listitem>
+
+      <listitem>
+        <para>Windows hosts: VMs running with the Hyper-V execution engine can now
+          use the x2APIC, and Hyper-V delivers their interrupts instead of
+          VirtualBox emulating that. This makes interrupt heavy workloads in guests
+          with several processors much faster. Both can be turned off with the
+          VBoxInternal/NEM/AllowX2Apic and VBoxInternal/NEM/InjectIntViaHv extra data
+          values</para>
+      </listitem>
+
+      <listitem>
+        <para>Windows hosts: VM processes now opt out of Windows power throttling
+          (EcoQoS), so background, minimized and headless VMs keep running on
+          performance cores with precise timers. Set the environment variable
+          VBOX_NO_POWER_THROTTLING_OPTOUT=1 to restore the previous behavior</para>
       </listitem>
 
       <listitem>

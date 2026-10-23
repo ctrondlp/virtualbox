@@ -161,6 +161,13 @@ typedef enum CPUMMICROARCH
     kCpumMicroarch_Intel_Core7_WillowCove = kCpumMicroarch_Intel_Core7_TigerLake,
     kCpumMicroarch_Intel_Core7_AlderLake,   /**< 12th gen, 10nm all platforms(?). */
     kCpumMicroarch_Intel_Core7_SapphireRapids, /**< 12th? gen, 10nm server? */
+    kCpumMicroarch_Intel_Core7_RaptorLake,  /**< 13th & 14th gen, Intel 7, hybrid (Raptor Cove + Gracemont). */
+    kCpumMicroarch_Intel_Core7_EmeraldRapids, /**< 5th gen Xeon Scalable, Intel 7 (Raptor Cove). */
+    kCpumMicroarch_Intel_Core7_MeteorLake,  /**< Core Ultra series 1, Intel 4, hybrid (Redwood Cove + Crestmont). */
+    kCpumMicroarch_Intel_Core7_GraniteRapids, /**< Xeon 6 P-core, Intel 3 (Redwood Cove). */
+    kCpumMicroarch_Intel_Core7_ArrowLake,   /**< Core Ultra series 2 desktop/H, hybrid (Lion Cove + Skymont). */
+    kCpumMicroarch_Intel_Core7_LunarLake,   /**< Core Ultra series 2 mobile, hybrid (Lion Cove + Skymont). */
+    kCpumMicroarch_Intel_Core7_PantherLake, /**< Core Ultra series 3, Intel 18A, hybrid (Cougar Cove + Darkmont). */
     kCpumMicroarch_Intel_Core7_End,
 
     kCpumMicroarch_Intel_Atom_First,
@@ -663,8 +670,30 @@ typedef struct CPUMFEATURESX86
     uint32_t        fArchMonUmonMitigSupport : 1;
     /** @} */
 
+    /** Supports GFNI instructions (GF2P8MULB, GF2P8AFFINEQB, GF2P8AFFINEINVQB). */
+    uint32_t        fGfni : 1;
+    /** Supports VAES (VEX encoded 256-bit AES instructions). */
+    uint32_t        fVaes : 1;
+    /** Supports VPCLMULQDQ (VEX encoded 256-bit PCLMULQDQ). */
+    uint32_t        fVpclmulqdq : 1;
+    /** Supports AVX-VNNI (VEX encoded VPDPBUSD and friends). */
+    uint32_t        fAvxVnni : 1;
+    /** Supports AVX-IFMA (VEX encoded VPMADD52LUQ/VPMADD52HUQ). */
+    uint32_t        fAvxIfma : 1;
+    /** Supports AVX-VNNI-INT8. */
+    uint32_t        fAvxVnniInt8 : 1;
+    /** Supports AVX-NE-CONVERT. */
+    uint32_t        fAvxNeConvert : 1;
+    /** Enhanced REP MOVSB/STOSB (ERMS). */
+    uint32_t        fErms : 1;
+    /** Fast short REP MOVSB (FSRM). */
+    uint32_t        fFsrm : 1;
+    /** Supports XSAVEC (compacted XSAVE format). */
+    uint32_t        fXSaveC : 1;
+    /** Supports XGETBV with ECX=1. */
+    uint32_t        fXGetBv1 : 1;
     /** Alignment padding / reserved for future use. */
-    uint32_t        fPadding0 : 16;
+    uint32_t        fPadding0 : 5;
     uint32_t        auPadding[3];
 
     /** @name SVM

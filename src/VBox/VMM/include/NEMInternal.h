@@ -107,6 +107,13 @@ typedef struct NEMWINIOCTL
 # define NEM_WIN_INTW_F_PRIO_SHIFT      2
 /** @} */
 
+/** Windows: Number of register shadow slots, see NEMCPU::aShadowValues. */
+# define NEM_WIN_SHADOW_SLOTS           66
+
+/** Windows: The maximum number of virtual CPUs the timer kicker thread serves
+ * (MAXIMUM_WAIT_OBJECTS minus the termination event). */
+# define NEM_WIN_TIMER_KICK_MAX_CPUS    63
+
 #endif /* RT_OS_WINDOWS */
 
 
@@ -274,6 +281,9 @@ typedef struct NEM
     bool                        fXsaveSupported: 1;
     /** Flag whether the compacting form of XSAVE is used. */
     bool                        fXsaveComp: 1;
+    /** Whether Hyper-V delivers the APIC and PIC interrupts (via
+     *  WHvRegisterPendingInterruption) instead of IEM (/NEM/InjectIntViaHv). */
+    bool                        fInjectIntViaHv : 1;
 #  ifdef NEM_WIN_WITH_A20
     /** Set if we've started more than one CPU and cannot mess with A20. */
     bool                        fA20Fixed : 1;
@@ -282,6 +292,15 @@ typedef struct NEM
 #  endif
     /** Size of the xsave area returned by Hyper-V, required for setting the state. */
     uint32_t                    cbXSaveArea;
+    /** The exception exit bitmap currently configured for the partition
+     *  (WHvPartitionPropertyCodeExceptionExitBitmap). */
+    uint64_t volatile           fXcptExitBitmap;
+    /** The timer kicker thread (NIL_RTTHREAD if not used). */
+    RTTHREAD                    hTimerKickThread;
+    /** Event semaphore (native handle) for terminating the timer kicker thread. */
+    RTR3PTR                     hTimerKickTermEvt;
+    /** Set if the timer kicker thread should terminate. */
+    bool volatile               fTimerKickTerminate;
 # endif
     /** The reported CPU vendor.   */
     CPUMCPUVENDOR               enmCpuVendor;
@@ -546,6 +565,11 @@ typedef struct NEMCPU
     /** Whether debug breakpoints / events are armed or if single-stepping is active
      *  (can be removed later when dedicated debug loop is implemented). */
     bool                        fGuestDebug : 1;
+    /** Whether the interrupt uIntInjectVector was handed to Hyper-V for delivery
+     *  and hasn't been delivered yet (NEM::fInjectIntViaHv). */
+    bool                        fIntInjectPending : 1;
+    /** Whether the last exit reported a pending interruption in Hyper-V. */
+    bool                        fLastExitIntPending : 1;
 #  ifdef _WINHVAPIDEFS_H_
     WHV_RUN_VP_EXIT_REASON      enmExitReason;
 #  else
@@ -558,6 +582,41 @@ typedef struct NEMCPU
     RTR3PTR                     pvMsgSlotMapping;
     /** The windows thread handle. */
     RTR3PTR                     hNativeThreadHandle;
+
+    /** @name Register shadowing.
+     * The shadow slots record register values known to be loaded in Hyper-V,
+     * either because we just read them (import, exit context) or wrote them
+     * (export).  A slot is only valid while its generation matches uShadowGen,
+     * which is advanced every time the virtual processor runs.  This allows the
+     * export code to skip writing registers which Hyper-V already has.
+     * @{ */
+    /** The current shadow generation (never zero). */
+    uint32_t                    uShadowGen;
+    /** CR8 value currently loaded in Hyper-V as far as we know (UINT8_MAX if unknown).
+     * Unlike the shadow slots this is kept across runs since every exit context
+     * reports CR8. */
+    uint8_t                     uHvCr8;
+    /** The CR8 value the APIC TPR was last synchronized with (UINT8_MAX if unknown). */
+    uint8_t                     uCr8ApicSynced;
+    /** The vector of the interrupt pending delivery by Hyper-V (fIntInjectPending). */
+    uint8_t                     uIntInjectVector;
+    uint8_t                     abShadowPadding[1];
+    /** The generation of each shadow slot. */
+    uint32_t                    auShadowGen[NEM_WIN_SHADOW_SLOTS];
+    /** The shadow values (WHV_REGISTER_VALUE layout). */
+    RTUINT128U                  aShadowValues[NEM_WIN_SHADOW_SLOTS];
+    /** @} */
+
+    /** @name Timer kicking.
+     * @{ */
+    /** High resolution waitable timer (native handle) which makes the kicker
+     * thread cancel the run of this virtual CPU when a TM timer is due.  NULL if
+     * not used. */
+    RTR3PTR                     hTimerKick;
+    /** The GIP timestamp of the deadline the timer is armed for, 0 if not armed
+     *  (written by the EMT when arming, cleared by the kicker thread when it fires). */
+    uint64_t volatile           nsTimerKickArmed;
+    /** @} */
 # elif defined(VBOX_VMM_TARGET_ARMV8)
     /** Flag whether syncing the CNTV_CTL_EL0/CNTV_CVAL_EL0 registers to Hyper-V is required. */
     bool                        fSyncCntvRegs;
@@ -608,6 +667,19 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatImportOnReturn;
     STAMCOUNTER                 StatImportOnReturnSkipped;
     STAMCOUNTER                 StatQueryCpuTick;
+# if !defined(VBOX_VMM_TARGET_ARMV8)
+    STAMCOUNTER                 StatImportOnReturnHalt;
+    STAMCOUNTER                 StatImportCalls;
+    STAMCOUNTER                 StatImportRegs;
+    STAMCOUNTER                 StatImportXState;
+    STAMCOUNTER                 StatExportCalls;
+    STAMCOUNTER                 StatExportRegs;
+    STAMCOUNTER                 StatExportRegsSkipped;
+    STAMCOUNTER                 StatExportXState;
+    STAMCOUNTER                 StatApicTprSync;
+    STAMCOUNTER                 StatTimerKickArm;
+    STAMCOUNTER                 StatTimerKickFired;
+# endif
     /** @} */
 
 #elif defined(RT_OS_DARWIN) && defined(VBOX_WITH_NATIVE_NEM)
