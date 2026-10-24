@@ -64,6 +64,75 @@ static HRESULT tstComExpr(HRESULT hrc, const char *pszOperation, int iLine)
 #define TST_COM_EXPR(expr) tstComExpr(expr, #expr, __LINE__)
 
 
+/**
+ * Checks how the x86 APIC and X2APIC CPU properties depend on each other.
+ *
+ * Enabling the x2APIC also enables the APIC, disabling the x2APIC doesn't
+ * change the APIC setting, and the APIC can only be disabled while the x2APIC
+ * is off.
+ *
+ * @param   pMachine    The x86 test VM, not registered yet (so it is mutable).
+ */
+static void tstApiX86ApicProperties(IMachine *pMachine)
+{
+    HRESULT hrc;
+    RTTestSub(g_hTest, "IPlatformX86::CPUProperty APIC/X2APIC");
+
+    ComPtr<IPlatform> ptrPlatform;
+    CHECK_ERROR(pMachine, COMGETTER(Platform)(ptrPlatform.asOutParam()));
+    ComPtr<IPlatformX86> ptrPlatformX86;
+    if (SUCCEEDED(hrc))
+        CHECK_ERROR(ptrPlatform, COMGETTER(X86)(ptrPlatformX86.asOutParam()));
+    if (FAILED(hrc))
+    {
+        RTTestFailed(g_hTest, "%d: Getting the x86 platform object failed", __LINE__);
+        return;
+    }
+
+    static const struct
+    {
+        CPUPropertyTypeX86_T enmProperty;   /**< The property to set. */
+        bool                 fValue;        /**< The value to set it to. */
+        bool                 fApic;         /**< The expected APIC value afterwards. */
+        bool                 fX2Apic;       /**< The expected X2APIC value afterwards. */
+    } s_aSteps[] =
+    {
+        { CPUPropertyTypeX86_X2APIC, true,  true,  true  },
+        { CPUPropertyTypeX86_X2APIC, false, true,  false }, /* Keeps the APIC. */
+        { CPUPropertyTypeX86_APIC,   false, false, false },
+        { CPUPropertyTypeX86_X2APIC, false, false, false },
+        { CPUPropertyTypeX86_X2APIC, true,  true,  true  },
+        { CPUPropertyTypeX86_APIC,   false, true,  true  }, /* Ignored while the x2APIC is on. */
+    };
+    for (unsigned i = 0; i < RT_ELEMENTS(s_aSteps); i++)
+    {
+        const char * const pszProperty = s_aSteps[i].enmProperty == CPUPropertyTypeX86_APIC ? "APIC" : "X2APIC";
+        CHECK_ERROR(ptrPlatformX86, SetCPUProperty(s_aSteps[i].enmProperty, s_aSteps[i].fValue));
+        if (FAILED(hrc))
+        {
+            RTTestFailed(g_hTest, "Step #%u: Setting %s to %RTbool failed", i, pszProperty, s_aSteps[i].fValue);
+            continue;
+        }
+
+        BOOL fApic   = FALSE;
+        BOOL fX2Apic = FALSE;
+        CHECK_ERROR(ptrPlatformX86, GetCPUProperty(CPUPropertyTypeX86_APIC, &fApic));
+        if (SUCCEEDED(hrc))
+            CHECK_ERROR(ptrPlatformX86, GetCPUProperty(CPUPropertyTypeX86_X2APIC, &fX2Apic));
+        if (FAILED(hrc))
+            RTTestFailed(g_hTest, "Step #%u: Getting the APIC or X2APIC property failed", i);
+        else if (   RT_BOOL(fApic)   != s_aSteps[i].fApic
+                 || RT_BOOL(fX2Apic) != s_aSteps[i].fX2Apic)
+            RTTestFailed(g_hTest, "Step #%u: Setting %s to %RTbool gave APIC=%RTbool X2APIC=%RTbool, expected %RTbool/%RTbool",
+                         i, pszProperty, s_aSteps[i].fValue, RT_BOOL(fApic), RT_BOOL(fX2Apic),
+                         s_aSteps[i].fApic, s_aSteps[i].fX2Apic);
+    }
+
+    if (RTTestSubErrorCount(g_hTest) == 0)
+        RTTestPassed(g_hTest, "IPlatformX86::CPUProperty APIC/X2APIC");
+}
+
+
 static void tstApiIVirtualBox(IVirtualBox *pVBox)
 {
     HRESULT hrc;
@@ -206,6 +275,9 @@ static void tstApiIVirtualBox(IVirtualBox *pVBox)
         RTTestFailed(g_hTest, "%d: IVirtualBox::CreateMachine failed", __LINE__);
         return;
     }
+
+    if (enmPlatformArch == PlatformArchitecture_x86)
+        tstApiX86ApicProperties(ptrMachine);
 
     RTTestSub(g_hTest, "IVirtualBox::RegisterMachine");
     CHECK_ERROR(pVBox, RegisterMachine(ptrMachine));

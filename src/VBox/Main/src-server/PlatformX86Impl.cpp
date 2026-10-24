@@ -409,7 +409,9 @@ HRESULT PlatformX86::setCPUProperty(CPUPropertyTypeX86_T aProperty, BOOL aValue)
         {
             m->bd.backup();
             m->bd->fX2APIC = !!aValue;
-            m->bd->fAPIC   = !!aValue;
+            /* The x2APIC needs the APIC. Turning the x2APIC off doesn't change the APIC setting. */
+            if (aValue)
+                m->bd->fAPIC = true;
             break;
         }
 

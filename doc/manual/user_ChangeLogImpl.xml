@@ -110,6 +110,12 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VBoxManage: Fixed 'modifyvm --x86-x2apic off' also disabling the
+          APIC, which stopped 64-bit VMs, VMs with more than one CPU and VMs
+          with an I/O APIC from starting (github:gh-861)</para>
+      </listitem>
+
+      <listitem>
         <para>VBoxManage: Added natnetwork log and dhcpserver log commands
           to display NAT network and DHCP server log files</para>
       </listitem>
