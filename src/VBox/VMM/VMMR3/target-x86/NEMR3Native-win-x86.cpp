@@ -2295,7 +2295,10 @@ DECLHIDDEN(int) nemR3NativeInitAfterCPUM(PVM pVM)
                           "Failed to set WHvPartitionPropertyCodeProcessorClFlushSize to %u: %Rhrc (Last=%#x/%u)",
                           pVM->nem.s.cCacheLineFlushShift, hrc, RTNtLastStatusValue(), RTNtLastErrorValue());
 
-    /* Intercept #DB, #BP and #UD exceptions. */
+    /* Intercept #DB, #BP and #UD exceptions.  #DB is only needed for debugging
+       and is dropped once the partition is set up (nemR3NativeInitCompletedRing3);
+       before Windows 10 19H2 the bitmap can't be changed after setup, so it
+       stays intercepted there. */
     RT_ZERO(Property);
     Property.ExceptionExitBitmap = RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault)
                                  | RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap)
@@ -2311,6 +2314,7 @@ DECLHIDDEN(int) nemR3NativeInitAfterCPUM(PVM pVM)
         return VMSetError(pVM, VERR_NEM_VM_CREATE_FAILED, RT_SRC_POS,
                           "Failed to set WHvPartitionPropertyCodeExceptionExitBitmap to %#RX64: %Rhrc (Last=%#x/%u)",
                           Property.ExceptionExitBitmap, hrc, RTNtLastStatusValue(), RTNtLastErrorValue());
+    pVM->nem.s.fXcptExitBitmap = Property.ExceptionExitBitmap;
 
 
     /*
@@ -2447,12 +2451,47 @@ DECLHIDDEN(int) nemR3NativeInitAfterCPUM(PVM pVM)
 }
 
 
+/**
+ * Changes the exception exit bitmap of the partition.
+ *
+ * Only call this while no virtual processor runs, i.e. during init or in an
+ * EMT rendezvous (see nemR3WinEnableDbExitsRendezvous).
+ *
+ * @returns HRESULT of WHvSetPartitionProperty.
+ * @param   pVM             The cross context VM structure.
+ * @param   fBitmap         The new exception exit bitmap.
+ */
+static HRESULT nemR3WinSetXcptExitBitmap(PVM pVM, uint64_t fBitmap)
+{
+    WHV_PARTITION_PROPERTY Property;
+    RT_ZERO(Property);
+    Property.ExceptionExitBitmap = fBitmap;
+    HRESULT const hrc = WHvSetPartitionProperty(pVM->nem.s.hPartition, WHvPartitionPropertyCodeExceptionExitBitmap,
+                                                &Property, sizeof(Property));
+    if (SUCCEEDED(hrc))
+        ASMAtomicWriteU64(&pVM->nem.s.fXcptExitBitmap, fBitmap);
+    return hrc;
+}
+
+
 DECLHIDDEN(int) nemR3NativeInitCompletedRing3(PVM pVM)
 {
     //BOOL fRet = SetThreadPriority(GetCurrentThread(), 0);
     //AssertLogRel(fRet);
 
-    RT_NOREF_PV(pVM);
+    /*
+     * Stop intercepting #DB: the guest handles its own debug exceptions, and
+     * nemHCWinRunGC intercepts them again once the debugger needs them.  If
+     * Hyper-V doesn't accept the change (before Windows 10 19H2), we keep
+     * intercepting #DB.
+     */
+    HRESULT const hrc = nemR3WinSetXcptExitBitmap(pVM,   pVM->nem.s.fXcptExitBitmap
+                                                       & ~RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault));
+    if (SUCCEEDED(hrc))
+        LogRel(("NEM: Exception exit bitmap: %#RX64 (#DB only while debugging)\n", pVM->nem.s.fXcptExitBitmap));
+    else
+        LogRel(("NEM: Exception exit bitmap: %#RX64 (keeping #DB, changing it after setup failed: %Rhrc)\n",
+                pVM->nem.s.fXcptExitBitmap, hrc));
     return VINF_SUCCESS;
 }
 
@@ -5248,6 +5287,29 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
 
 
 /**
+ * @callback_method_impl{FNVMMEMTRENDEZVOUS,
+ *      Turns on \#DB exits while no virtual processor runs.}
+ */
+static DECLCALLBACK(VBOXSTRICTRC) nemR3WinEnableDbExitsRendezvous(PVM pVM, PVMCPU pVCpu, void *pvUser)
+{
+    RT_NOREF(pVCpu, pvUser);
+    uint64_t const fXcptExitBitmap = ASMAtomicReadU64(&pVM->nem.s.fXcptExitBitmap);
+    if (fXcptExitBitmap & RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault))
+        return VINF_SUCCESS; /* An earlier rendezvous did it. */
+
+    HRESULT const hrc = nemR3WinSetXcptExitBitmap(pVM, fXcptExitBitmap | RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault));
+    if (FAILED(hrc))
+    {
+        LogRel(("NEM: Failed to enable #DB exits for debugging: %Rhrc (Last=%#x/%u)\n",
+                hrc, RTNtLastStatusValue(), RTNtLastErrorValue()));
+        return VERR_NEM_IPE_5;
+    }
+    LogRel(("NEM: Enabled #DB exits for debugging\n"));
+    return VINF_SUCCESS;
+}
+
+
+/**
  * Inner NEM runloop for windows.
  *
  * @returns Strict VBox status code.
@@ -5261,6 +5323,25 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     if (LogIs3Enabled())
         nemHCWinLogState(pVM, pVCpu);
 #endif
+
+    /*
+     * The debugger needs #DB exits (see nemR3NativeInitCompletedRing3) for the
+     * cases covered by fGuestDebug below and for its #DB event.  Turn them on in
+     * a rendezvous, as changing the bitmap while other virtual processors run can
+     * make WHvRunVirtualProcessor fail for them.  Once on, they stay on.
+     */
+    if (   !(ASMAtomicReadU64(&pVM->nem.s.fXcptExitBitmap) & RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault))
+        && (   pVCpu->nem.s.fUseDebugLoop
+            || pVCpu->nem.s.fSingleInstruction
+            || DBGFIsStepping(pVCpu)
+            || pVM->dbgf.ro.cEnabledSwBreakpoints
+            || pVM->dbgf.ro.cEnabledHwBreakpoints
+            || DBGF_IS_EVENT_ENABLED(pVM, DBGFEVENT_XCPT_DB)))
+    {
+        int const rc = VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, nemR3WinEnableDbExitsRendezvous, NULL);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
 
     /*
      * Try switch to NEM runloop state.

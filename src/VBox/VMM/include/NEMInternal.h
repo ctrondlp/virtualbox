@@ -282,6 +282,9 @@ typedef struct NEM
 #  endif
     /** Size of the xsave area returned by Hyper-V, required for setting the state. */
     uint32_t                    cbXSaveArea;
+    /** The exception exit bitmap currently set for the partition
+     *  (WHvPartitionPropertyCodeExceptionExitBitmap). */
+    uint64_t volatile           fXcptExitBitmap;
 # endif
     /** The reported CPU vendor.   */
     CPUMCPUVENDOR               enmCpuVendor;
