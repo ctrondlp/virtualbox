@@ -148,10 +148,11 @@ HRESULT WINAPI WHvQueryGpaRangeDirtyBitmap(WHV_PARTITION_HANDLE, WHV_GUEST_PHYSI
 # define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION  UINT32_C(0x00000002)
 #endif
 
-/** Deadlines further away than this aren't worth kicking the EMT for, the TM
- * watchdog will deal with them (TM also returns 500 ms for the non-timer EMTs). */
+/** Timer deadlines further away than this aren't worth a timer kick, the TM
+ * timer (/TM/TimerMillies) takes care of them.  TM gives EMTs other than the
+ * timer EMT 500 ms. */
 #define NEM_WIN_TIMER_KICK_MAX_NS       (RT_NS_1MS * 250)
-/** Re-arming slack for the timer kick. */
+/** A new deadline this close to the armed one doesn't re-arm the timer kick. */
 #define NEM_WIN_TIMER_KICK_SLACK_NS     (RT_NS_1US * 25)
 
 
@@ -2257,6 +2258,12 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                                    "/NEM/PagesMapGpaRangePage", STAMUNIT_TICKS_PER_CALL, "Profiling calls to WHvMapGpaRange for single pages");
                     STAMR3Register(pVM, &pVM->nem.s.StatProfUnmapGpaRangePage, STAMTYPE_PROFILE, STAMVISIBILITY_ALWAYS,
                                    "/NEM/PagesUnmapGpaRangePage", STAMUNIT_TICKS_PER_CALL, "Profiling calls to WHvUnmapGpaRange for single pages");
+                    STAMR3Register(pVM, &pVM->nem.s.StatTimerKickArm, STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS,
+                                   "/NEM/TimerKickArm", STAMUNIT_OCCURENCES, "Times the timer kick was armed");
+                    STAMR3Register(pVM, &pVM->nem.s.StatTimerKickFired, STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS,
+                                   "/NEM/TimerKickFired", STAMUNIT_OCCURENCES, "Times the timer kick fired");
+                    STAMR3Register(pVM, &pVM->nem.s.StatTimerKickSkipped, STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS,
+                                   "/NEM/TimerKickSkipped", STAMUNIT_OCCURENCES, "Timer kicks with nothing to cancel");
 
                     for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
                     {
@@ -2305,8 +2312,6 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                         STAMR3RegisterF(pVM, &pNemCpu->StatApicTprSync,         STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "APIC TPR updates from CR8",              "/NEM/CPU%u/ApicTprSync", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatIntInjectViaHv,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Interrupts handed to Hyper-V for delivery", "/NEM/CPU%u/IntInjectViaHv", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatIntInjectViaIem,     STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Interrupts taken back from Hyper-V and delivered by IEM", "/NEM/CPU%u/IntInjectViaIem", idCpu);
-                        STAMR3RegisterF(pVM, &pNemCpu->StatTimerKickArm,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Timer kick arming",                      "/NEM/CPU%u/TimerKickArm", idCpu);
-                        STAMR3RegisterF(pVM, &pNemCpu->StatTimerKickFired,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Timer kicks fired",                      "/NEM/CPU%u/TimerKickFired", idCpu);
                     }
 
 #if defined(VBOX_WITH_R0_MODULES) && !defined(VBOX_WITH_MINIMAL_R0)
@@ -5823,49 +5828,61 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
 
 
 /**
- * Arms the timer kick for the given deadline, unless it's already armed for
- * (about) the same deadline.
+ * Arms the timer kick for the next timer deadline of the calling EMT.
  *
- * The TM timers are only run on the timer EMT and nothing else gets it out of
- * WHvRunVirtualProcessor in time when the guest doesn't cause any exits (the
- * TM watchdog timer only fires every 10 ms), so we use a high resolution
- * waitable timer and a helper thread (nemR3WinTimerKickThread) to cancel the
- * run when the next timer is due.
+ * Only the timer EMT runs the TM timers.  While it executes guest code in
+ * WHvRunVirtualProcessor, nothing gets it out when a timer is due unless the
+ * guest happens to cause an exit or the TM timer (/TM/TimerMillies) pokes it.
+ * A busy guest then gets its timer interrupts late, the virtual sync clock
+ * stops at each overdue timer and falls further and further behind, and the
+ * guest's own timers barely make progress.  So we arm a high resolution
+ * waitable timer for the deadline, and nemR3WinTimerKickThread cancels the run
+ * when it fires.
  *
+ * There is one timer per VM: TM gives EMTs other than the timer EMT a deadline
+ * 500 ms away, beyond NEM_WIN_TIMER_KICK_MAX_NS, so only the timer EMT arms it.
+ * A timer another EMT sets while the timer EMT is already running the guest is
+ * still only noticed at the timer EMT's next exit.
+ *
+ * @param   pVM             The cross context VM structure.
  * @param   pVCpu           The cross context per CPU structure of the calling EMT.
  * @param   nsDeadline      The GIP timestamp of the next timer event
  *                          (TMTimerPollGIP).
  * @param   cNsDelta        Nanoseconds until then.
  */
-static void nemR3WinTimerKickArm(PVMCPUCC pVCpu, uint64_t nsDeadline, uint64_t cNsDelta)
+DECLINLINE(void) nemR3WinTimerKickArm(PVMCC pVM, PVMCPUCC pVCpu, uint64_t nsDeadline, uint64_t cNsDelta)
 {
-    /* TM returns 500 ms for EMTs other than the timer one, skip those (and other
-       far away deadlines, the TM watchdog will catch them with little relative delay). */
     if (cNsDelta >= NEM_WIN_TIMER_KICK_MAX_NS)
         return;
 
-    /* Skip if armed for about the same deadline and it's still pending (the
-       kicker thread clears nsTimerKickArmed when the timer fires). */
-    uint64_t const nsArmed = ASMAtomicReadU64(&pVCpu->nem.s.nsTimerKickArmed);
+    /* Skip it if already armed for this EMT and about the same deadline, and
+       still pending (the kick thread zeroes nsTimerKickArmed when it fires). */
+    uint64_t const nsArmed = ASMAtomicReadU64(&pVM->nem.s.nsTimerKickArmed);
     if (   nsArmed + NEM_WIN_TIMER_KICK_SLACK_NS >= nsDeadline
         && nsArmed <= nsDeadline + NEM_WIN_TIMER_KICK_SLACK_NS
-        && nsArmed > nsDeadline - cNsDelta /* now */)
+        && nsArmed > nsDeadline - cNsDelta /* now */
+        && ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick) == pVCpu->idCpu)
         return;
 
+    /* Record the deadline before arming: if the timer fires right away, the kick
+       thread's zeroing must come after this, or we'd skip re-arming next time. */
+    ASMAtomicWriteU32(&pVM->nem.s.idCpuTimerKick, pVCpu->idCpu);
+    ASMAtomicWriteU64(&pVM->nem.s.nsTimerKickArmed, nsDeadline);
     LARGE_INTEGER DueTime;
-    DueTime.QuadPart = -(int64_t)RT_MAX(cNsDelta / 100, 1); /* relative, 100ns units */
-    if (SetWaitableTimer((HANDLE)pVCpu->nem.s.hTimerKick, &DueTime, 0 /*lPeriod*/, NULL, NULL, FALSE /*fResume*/))
-    {
-        ASMAtomicWriteU64(&pVCpu->nem.s.nsTimerKickArmed, nsDeadline);
-        STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatTimerKickArm);
-    }
+    DueTime.QuadPart = -(int64_t)RT_MAX((cNsDelta + 99) / 100, 1); /* relative, in 100 ns units, rounded up */
+    if (SetWaitableTimer((HANDLE)pVM->nem.s.hTimerKick, &DueTime, 0 /*lPeriod*/, NULL /*pfnCompletion*/, NULL /*pvArg*/,
+                         FALSE /*fResume*/))
+        STAM_REL_COUNTER_INC(&pVM->nem.s.StatTimerKickArm);
     else
+    {
+        ASMAtomicWriteU64(&pVM->nem.s.nsTimerKickArmed, 0);
         AssertMsgFailed(("SetWaitableTimer failed: %u\n", GetLastError()));
+    }
 }
 
 
 /**
- * The timer kicker thread, see nemR3WinTimerKickArm.
+ * The timer kick thread, see nemR3WinTimerKickArm.
  *
  * @returns VINF_SUCCESS.
  * @param   hThreadSelf     The thread handle.
@@ -5876,86 +5893,85 @@ static DECLCALLBACK(int) nemR3WinTimerKickThread(RTTHREAD hThreadSelf, void *pvU
     PVM const pVM = (PVM)pvUser;
     RT_NOREF(hThreadSelf);
 
-    HANDLE  ahHandles[1 + NEM_WIN_TIMER_KICK_MAX_CPUS];
-    DWORD   cHandles = 0;
-    ahHandles[cHandles++] = (HANDLE)pVM->nem.s.hTimerKickTermEvt;
-    VMCPUID const cCpus = RT_MIN(pVM->cCpus, NEM_WIN_TIMER_KICK_MAX_CPUS);
-    for (VMCPUID idCpu = 0; idCpu < cCpus; idCpu++)
-        ahHandles[cHandles++] = (HANDLE)pVM->apCpusR3[idCpu]->nem.s.hTimerKick;
-
-    while (!ASMAtomicReadBool(&pVM->nem.s.fTimerKickTerminate))
+    /* The terminate event comes first, so it wins when both are signalled. */
+    HANDLE const ahHandles[2] = { (HANDLE)pVM->nem.s.hTimerKickTermEvt, (HANDLE)pVM->nem.s.hTimerKick };
+    for (;;)
     {
-        DWORD const dwRc = WaitForMultipleObjectsEx(cHandles, ahHandles, FALSE /*fWaitAll*/, INFINITE, FALSE /*fAlertable*/);
-        if (dwRc == WAIT_OBJECT_0)
-            break;
-        if (dwRc > WAIT_OBJECT_0 && dwRc < WAIT_OBJECT_0 + cHandles)
+        DWORD const dwRc = WaitForMultipleObjects(RT_ELEMENTS(ahHandles), ahHandles, FALSE /*fWaitAll*/, INFINITE);
+        if (dwRc != WAIT_OBJECT_0 + 1)
         {
-            VMCPUID const idCpu = dwRc - WAIT_OBJECT_0 - 1;
-            PVMCPU  const pVCpu = pVM->apCpusR3[idCpu];
-            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatTimerKickFired);
-            /* The timer is consumed, so the EMT must re-arm it even for the same deadline. */
-            ASMAtomicWriteU64(&pVCpu->nem.s.nsTimerKickArmed, 0);
+            AssertLogRelMsg(dwRc == WAIT_OBJECT_0, ("NEM: Timer kick wait failed: dwRc=%#x err=%u\n", dwRc, GetLastError()));
+            break;
+        }
+
+        /* The timer is consumed, so it must be armed again even for the same deadline. */
+        ASMAtomicWriteU64(&pVM->nem.s.nsTimerKickArmed, 0);
+        STAM_REL_COUNTER_INC(&pVM->nem.s.StatTimerKickFired);
+
+        /* Only cancel a run that is in progress or about to start.  An EMT in any
+           other state (halted, in EM) polls the timers before it runs the guest
+           again, while a cancel outside a run seems to be kept for the next run
+           and would only cost an extra exit. */
+        VMCPUID const    idCpu    = ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick);
+        VMCPUSTATE const enmState = VMCPU_GET_STATE(pVM->apCpusR3[idCpu]);
+        if (   enmState == VMCPUSTATE_STARTED_EXEC_NEM
+            || enmState == VMCPUSTATE_STARTED_EXEC_NEM_WAIT)
+        {
             HRESULT hrc = WHvCancelRunVirtualProcessor(pVM->nem.s.hPartition, idCpu, 0);
-            AssertMsg(SUCCEEDED(hrc), ("WHvCancelRunVirtualProcessor -> hrc=%Rhrc\n", hrc)); RT_NOREF(hrc);
+            AssertMsg(SUCCEEDED(hrc), ("WHvCancelRunVirtualProcessor -> %Rhrc\n", hrc)); RT_NOREF(hrc);
         }
         else
-        {
-            AssertLogRelMsgFailed(("NEM: Timer kicker wait failed: dwRc=%#x err=%u\n", dwRc, GetLastError()));
-            break;
-        }
+            STAM_REL_COUNTER_INC(&pVM->nem.s.StatTimerKickSkipped);
     }
     return VINF_SUCCESS;
 }
 
 
 /**
- * Sets up the timer kicking (nemR3WinTimerKickArm), if possible.
+ * Sets up the timer kick (nemR3WinTimerKickArm).
  *
- * Failure isn't fatal, we'll just rely on the TM watchdog then.
+ * Failure isn't fatal, the TM timer still gets the timer EMT out of Hyper-V,
+ * just later.
  *
  * @param   pVM             The cross context VM structure.
  */
 static void nemR3WinTimerKickInit(PVM pVM)
 {
-    pVM->nem.s.hTimerKickThread = NIL_RTTHREAD;
-
-    /* High resolution timers were added in Windows 10 1803 (17134). */
-    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus && idCpu < NEM_WIN_TIMER_KICK_MAX_CPUS; idCpu++)
+    HANDLE hTimer = CreateWaitableTimerExW(NULL /*pSecAttr*/, NULL /*pwszName*/, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                           TIMER_MODIFY_STATE | SYNCHRONIZE);
+    if (hTimer == NULL)
     {
-        HANDLE hTimer = CreateWaitableTimerExW(NULL /*pSecAttr*/, NULL /*pwszName*/, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                               TIMER_ALL_ACCESS);
-        if (hTimer == NULL)
-        {
-            LogRel(("NEM: High resolution timers not available (%u), not kicking EMTs for timers.\n", GetLastError()));
-            nemR3WinTimerKickTerm(pVM);
-            return;
-        }
-        pVM->apCpusR3[idCpu]->nem.s.hTimerKick = hTimer;
+        LogRel(("NEM: No high resolution timer (%u), not kicking the timer EMT\n", GetLastError()));
+        return;
     }
-
     HANDLE hEvt = CreateEventW(NULL /*pSecAttr*/, TRUE /*fManualReset*/, FALSE /*fInitialState*/, NULL /*pwszName*/);
-    if (hEvt != NULL)
+    if (hEvt == NULL)
     {
-        pVM->nem.s.hTimerKickTermEvt   = hEvt;
-        pVM->nem.s.fTimerKickTerminate = false;
-        int rc = RTThreadCreate(&pVM->nem.s.hTimerKickThread, nemR3WinTimerKickThread, pVM, 0 /*cbStack*/,
-                                RTTHREADTYPE_TIMER, RTTHREADFLAGS_WAITABLE, "NEMTmrKick");
-        if (RT_SUCCESS(rc))
-        {
-            LogRel(("NEM: Using high resolution timer to kick EMTs for timers.\n"));
-            return;
-        }
-        LogRel(("NEM: Failed to create timer kicker thread: %Rrc\n", rc));
-        pVM->nem.s.hTimerKickThread = NIL_RTTHREAD;
+        LogRel(("NEM: CreateEventW failed (%u), not kicking the timer EMT\n", GetLastError()));
+        CloseHandle(hTimer);
+        return;
     }
-    else
-        LogRel(("NEM: CreateEventW failed: %u\n", GetLastError()));
-    nemR3WinTimerKickTerm(pVM);
+
+    pVM->nem.s.hTimerKick        = hTimer;
+    pVM->nem.s.hTimerKickTermEvt = hEvt;
+    int rc = RTThreadCreate(&pVM->nem.s.hTimerKickThread, nemR3WinTimerKickThread, pVM, 0 /*cbStack*/,
+                            RTTHREADTYPE_TIMER, RTTHREADFLAGS_WAITABLE, "NEMTmrKick");
+    if (RT_SUCCESS(rc))
+    {
+        LogRel(("NEM: Kicking the timer EMT out of Hyper-V when timers are due\n"));
+        return;
+    }
+    LogRel(("NEM: Failed to create the timer kick thread (%Rrc), not kicking the timer EMT\n", rc));
+    pVM->nem.s.hTimerKickThread  = NIL_RTTHREAD;
+    pVM->nem.s.hTimerKick        = NULL;
+    pVM->nem.s.hTimerKickTermEvt = NULL;
+    CloseHandle(hEvt);
+    CloseHandle(hTimer);
 }
 
 
 /**
- * Terminates the timer kicking, freeing the resources.
+ * Stops the timer kick thread and frees its resources.
  *
  * @param   pVM             The cross context VM structure.
  */
@@ -5963,9 +5979,9 @@ static void nemR3WinTimerKickTerm(PVM pVM)
 {
     if (pVM->nem.s.hTimerKickThread != NIL_RTTHREAD)
     {
-        ASMAtomicWriteBool(&pVM->nem.s.fTimerKickTerminate, true);
+        /* Wait as long as it takes: the thread uses the handles and the partition. */
         SetEvent((HANDLE)pVM->nem.s.hTimerKickTermEvt);
-        int rc = RTThreadWait(pVM->nem.s.hTimerKickThread, RT_MS_30SEC, NULL);
+        int rc = RTThreadWait(pVM->nem.s.hTimerKickThread, RT_INDEFINITE_WAIT, NULL);
         AssertLogRelRC(rc);
         pVM->nem.s.hTimerKickThread = NIL_RTTHREAD;
     }
@@ -5974,14 +5990,10 @@ static void nemR3WinTimerKickTerm(PVM pVM)
         CloseHandle((HANDLE)pVM->nem.s.hTimerKickTermEvt);
         pVM->nem.s.hTimerKickTermEvt = NULL;
     }
-    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+    if (pVM->nem.s.hTimerKick)
     {
-        PVMCPU pVCpu = pVM->apCpusR3[idCpu];
-        if (pVCpu->nem.s.hTimerKick)
-        {
-            CloseHandle((HANDLE)pVCpu->nem.s.hTimerKick);
-            pVCpu->nem.s.hTimerKick = NULL;
-        }
+        CloseHandle((HANDLE)pVM->nem.s.hTimerKick);
+        pVM->nem.s.hTimerKick = NULL;
     }
 }
 
@@ -6186,9 +6198,9 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
         /*
          * Poll timers and run for a bit.
          *
-         * With the VID approach (ring-0 or ring-3) we can specify a timeout here,
-         * so we take the time of the next timer event and uses that as a deadline.
-         * The rounding heuristics are "tuned" so that rhel5 (1K timer) will boot fine.
+         * WHvRunVirtualProcessor has no timeout.  On the timer EMT the timer
+         * kick (nemR3WinTimerKickArm) gets us out when the next timer event is
+         * due, if that's less than NEM_WIN_TIMER_KICK_MAX_NS away.
          */
         /** @todo See if we cannot optimize this TMTimerPollGIP by only redoing
          *        the whole polling job when timers have changed... */
@@ -6215,8 +6227,8 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                     PDMApicExportState(pVCpu);
 
                 /* Make sure we get out of WHvRunVirtualProcessor when the next timer is due. */
-                if (pVCpu->nem.s.hTimerKick)
-                    nemR3WinTimerKickArm(pVCpu, nsNextTimerEvt, offDeltaTimer);
+                if (pVM->nem.s.hTimerKick)
+                    nemR3WinTimerKickArm(pVM, pVCpu, nsNextTimerEvt, offDeltaTimer);
 
                 WHV_RUN_VP_EXIT_CONTEXT ExitReason = {0};
                 TMNotifyStartOfExecution(pVM, pVCpu);
@@ -6371,6 +6383,14 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     /*
      * Restore modified state associated with hypervisor breakpoints/events and/or single-stepping.
      */
+    if (pVCpu->nem.s.fGuestDebug)
+    {
+        /* The export loaded the debugger's DRx values into Hyper-V.  Make the next
+           export write the guest's values (CPUM has them) back, or the debugger's
+           breakpoints stay armed in Hyper-V after they are removed, and a later
+           import would take them for the guest's. */
+        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_DR_MASK;
+    }
     if (CPUMIsHyperDebugStateActive(pVCpu))
     {
         CPUMR3NemActivateGuestDebugState(pVCpu);

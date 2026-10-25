@@ -110,10 +110,6 @@ typedef struct NEMWINIOCTL
 /** Windows: Number of register shadow slots, see NEMCPU::aShadowValues. */
 # define NEM_WIN_SHADOW_SLOTS           66
 
-/** Windows: The maximum number of virtual CPUs the timer kicker thread serves
- * (MAXIMUM_WAIT_OBJECTS minus the termination event). */
-# define NEM_WIN_TIMER_KICK_MAX_CPUS    63
-
 #endif /* RT_OS_WINDOWS */
 
 
@@ -295,12 +291,27 @@ typedef struct NEM
     /** The exception exit bitmap currently configured for the partition
      *  (WHvPartitionPropertyCodeExceptionExitBitmap). */
     uint64_t volatile           fXcptExitBitmap;
-    /** The timer kicker thread (NIL_RTTHREAD if not used). */
-    RTTHREAD                    hTimerKickThread;
-    /** Event semaphore (native handle) for terminating the timer kicker thread. */
+    /** @name Timer kick, see nemR3WinTimerKickArm.
+     * @{ */
+    /** High resolution waitable timer (native handle), NULL if not used. */
+    RTR3PTR                     hTimerKick;
+    /** Event (native handle) telling the timer kick thread to terminate. */
     RTR3PTR                     hTimerKickTermEvt;
-    /** Set if the timer kicker thread should terminate. */
-    bool volatile               fTimerKickTerminate;
+    /** The timer kick thread, NIL_RTTHREAD if not used. */
+    RTTHREAD                    hTimerKickThread;
+    /** The GIP timestamp the timer is armed for, 0 when it has fired (or wasn't
+     *  armed yet). */
+    uint64_t volatile           nsTimerKickArmed;
+    /** The virtual CPU whose run the timer kick cancels. */
+    VMCPUID volatile            idCpuTimerKick;
+    uint32_t                    u32TimerKickPadding;
+    /** Times the timer kick was armed. */
+    STAMCOUNTER                 StatTimerKickArm;
+    /** Times the timer kick fired. */
+    STAMCOUNTER                 StatTimerKickFired;
+    /** Times it fired while the EMT wasn't running the guest (nothing to cancel). */
+    STAMCOUNTER                 StatTimerKickSkipped;
+    /** @} */
 # endif
     /** The reported CPU vendor.   */
     CPUMCPUVENDOR               enmCpuVendor;
@@ -606,17 +617,6 @@ typedef struct NEMCPU
     /** The shadow values (WHV_REGISTER_VALUE layout). */
     RTUINT128U                  aShadowValues[NEM_WIN_SHADOW_SLOTS];
     /** @} */
-
-    /** @name Timer kicking.
-     * @{ */
-    /** High resolution waitable timer (native handle) which makes the kicker
-     * thread cancel the run of this virtual CPU when a TM timer is due.  NULL if
-     * not used. */
-    RTR3PTR                     hTimerKick;
-    /** The GIP timestamp of the deadline the timer is armed for, 0 if not armed
-     *  (written by the EMT when arming, cleared by the kicker thread when it fires). */
-    uint64_t volatile           nsTimerKickArmed;
-    /** @} */
 # elif defined(VBOX_VMM_TARGET_ARMV8)
     /** Flag whether syncing the CNTV_CTL_EL0/CNTV_CVAL_EL0 registers to Hyper-V is required. */
     bool                        fSyncCntvRegs;
@@ -679,8 +679,6 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatApicTprSync;
     STAMCOUNTER                 StatIntInjectViaHv;
     STAMCOUNTER                 StatIntInjectViaIem;
-    STAMCOUNTER                 StatTimerKickArm;
-    STAMCOUNTER                 StatTimerKickFired;
 # endif
     /** @} */
 
