@@ -3367,6 +3367,36 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
 }
 
 
+/**
+ * Updates the APIC TPR from the guest CR8 value Hyper-V reports.
+ *
+ * If CR8 changed since the TPR was last synchronized with it (uCr8ApicSynced),
+ * the guest wrote CR8 and the TPR becomes CR8 << 4.  Otherwise the TPR is set
+ * to its current value, which keeps bits 3:0 the guest may have written through
+ * the APIC.  The TPR is set either way, as that also updates the PPR and
+ * signals the highest pending interrupt; skipping it when CR8 was unchanged
+ * made a Windows guest hang at shutdown.
+ *
+ * @param   pVCpu   The cross context per CPU structure.
+ * @param   uCr8    The guest CR8 value (bits 3:0).
+ */
+DECLINLINE(void) nemHCWinSyncApicTprFromCr8(PVMCPUCC pVCpu, uint8_t uCr8)
+{
+    if (uCr8 != pVCpu->nem.s.uCr8ApicSynced)
+    {
+        STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatApicTprSync);
+        PDMApicSetTpr(pVCpu, (uint8_t)(uCr8 << 4));
+        pVCpu->nem.s.uCr8ApicSynced = uCr8;
+    }
+    else
+    {
+        uint8_t u8Tpr = 0;
+        if (RT_SUCCESS(PDMApicGetTpr(pVCpu, &u8Tpr, NULL /*pfPending*/, NULL /*pu8PendingIntr*/)))
+            PDMApicSetTpr(pVCpu, u8Tpr);
+    }
+}
+
+
 static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat)
 {
     WHV_REGISTER_NAME  aenmNames[128];
@@ -3776,13 +3806,8 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
         Assert(aenmNames[iReg] == WHvX64RegisterCr8);
         uint8_t const uCr8 = (uint8_t)aValues[iReg].Reg64;
         pVCpu->nem.s.uHvCr8 = uCr8;
-        if (   uCr8 != pVCpu->nem.s.uCr8ApicSynced
-            && !pVCpu->CTX_SUFF(pVM)->nem.s.fLocalApicEmulation)
-        {
-            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatApicTprSync);
-            PDMApicSetTpr(pVCpu, uCr8 << 4);
-            pVCpu->nem.s.uCr8ApicSynced = uCr8;
-        }
+        if (!pVCpu->CTX_SUFF(pVM)->nem.s.fLocalApicEmulation)
+            nemHCWinSyncApicTprFromCr8(pVCpu, uCr8);
         iReg++;
     }
 
@@ -4539,19 +4564,10 @@ DECLINLINE(void) nemR3WinCopyStateFromX64Header(PVMCPUCC pVCpu, WHV_VP_EXIT_CONT
     Value.Reg64 = pExitCtx->Rflags;
     nemR3WinShadowUpdate(pVCpu, WHvX64RegisterRflags, &Value);
 
-    /* Only update the APIC TPR when the guest changed CR8, as setting the TPR
-       involves updating the PPR and re-evaluating pending interrupts. */
     uint8_t const uCr8 = (uint8_t)pExitCtx->Cr8;
     pVCpu->nem.s.uHvCr8 = uCr8;
     if (!pVCpu->CTX_SUFF(pVM)->nem.s.fLocalApicEmulation)
-    {
-        if (uCr8 != pVCpu->nem.s.uCr8ApicSynced)
-        {
-            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatApicTprSync);
-            PDMApicSetTpr(pVCpu, (uint8_t)(uCr8 << 4));
-            pVCpu->nem.s.uCr8ApicSynced = uCr8;
-        }
-    }
+        nemHCWinSyncApicTprFromCr8(pVCpu, uCr8);
     else
         PDMApicImportState(pVCpu);
 
