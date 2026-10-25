@@ -2303,6 +2303,8 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                         STAMR3RegisterF(pVM, &pNemCpu->StatExportRegsSkipped,   STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Registers not exported because Hyper-V has the value", "/NEM/CPU%u/ExportRegsSkipped", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatExportXState,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "XSAVE state exports",                    "/NEM/CPU%u/ExportXState", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatApicTprSync,         STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "APIC TPR updates from CR8",              "/NEM/CPU%u/ApicTprSync", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatIntInjectViaHv,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Interrupts handed to Hyper-V for delivery", "/NEM/CPU%u/IntInjectViaHv", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatIntInjectViaIem,     STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Interrupts taken back from Hyper-V and delivered by IEM", "/NEM/CPU%u/IntInjectViaIem", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatTimerKickArm,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Timer kick arming",                      "/NEM/CPU%u/TimerKickArm", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatTimerKickFired,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Timer kicks fired",                      "/NEM/CPU%u/TimerKickFired", idCpu);
                     }
@@ -2632,22 +2634,6 @@ DECLHIDDEN(void) nemR3NativeReset(PVM pVM)
 
 DECLHIDDEN(void) nemR3NativeResetCpu(PVMCPU pVCpu, bool fInitIpi)
 {
-    /* Forget any interrupt handed to Hyper-V for delivery (NEM::fInjectIntViaHv), also
-       in Hyper-V: a stale pending interruption makes Hyper-V reject the reset state
-       (RFLAGS.IF=0) we load next with ERROR_HV_INVALID_VP_STATE. */
-    pVCpu->nem.s.fIntInjectPending   = false;
-    pVCpu->nem.s.fLastExitIntPending = false;
-    PVM const pVMReset = pVCpu->CTX_SUFF(pVM);
-    if (pVMReset->nem.s.fInjectIntViaHv && pVMReset->nem.s.hPartition)
-    {
-        static const WHV_REGISTER_NAME s_enmName = WHvRegisterPendingInterruption;
-        WHV_REGISTER_VALUE Value;
-        RT_ZERO(Value);
-        HRESULT hrc = WHvSetVirtualProcessorRegisters(pVMReset->nem.s.hPartition, pVCpu->idCpu, &s_enmName, 1, &Value);
-        AssertLogRelMsg(SUCCEEDED(hrc), ("NEM/%u: Clearing WHvRegisterPendingInterruption failed: %Rhrc\n", pVCpu->idCpu, hrc));
-        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT;
-    }
-
 #ifdef NEM_WIN_WITH_A20
     /* Lock the A20 gate if INIT IPI, make sure it's enabled.  */
     if (fInitIpi && pVCpu->idCpu > 0)
@@ -3151,18 +3137,6 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
         }
     }
 
-    /* event injection (clear it, unless it's an interrupt Hyper-V hasn't delivered yet). */
-    if (fWhat & CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT)
-    {
-        ADD_REG64_ALWAYS(WHvRegisterPendingInterruption, 0);
-        if (pVCpu->nem.s.fIntInjectPending)
-        {
-            aValues[iReg - 1].PendingInterruption.InterruptionPending = 1;
-            aValues[iReg - 1].PendingInterruption.InterruptionType    = WHvX64PendingInterrupt;
-            aValues[iReg - 1].PendingInterruption.InterruptionVector  = pVCpu->nem.s.uIntInjectVector;
-        }
-    }
-
     if (!pVM->nem.s.fLocalApicEmulation)
     {
         /* Interruptibility state.  This can get a little complicated since we get
@@ -3284,6 +3258,20 @@ static int nemHCWinCopyStateToHyperV(PVMCC pVM, PVMCPUCC pVCpu)
                 ADD_REG64_ALWAYS(WHvRegisterInternalActivityState, ActReg.Reg64);
             }
             pVCpu->nem.s.fClearHaltSuspend = false;
+        }
+    }
+
+    /* Event injection (clear it, unless it's an interrupt Hyper-V hasn't delivered
+       yet).  This comes after the interruptibility state, so an interrupt shadow
+       that has just ended is gone in Hyper-V before we hand it an interrupt. */
+    if (fWhat & CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT)
+    {
+        ADD_REG64_ALWAYS(WHvRegisterPendingInterruption, 0);
+        if (pVCpu->nem.s.fIntInjectPending)
+        {
+            aValues[iReg - 1].PendingInterruption.InterruptionPending = 1;
+            aValues[iReg - 1].PendingInterruption.InterruptionType    = WHvX64PendingInterrupt;
+            aValues[iReg - 1].PendingInterruption.InterruptionVector  = pVCpu->nem.s.uIntInjectVector;
         }
     }
 
@@ -5586,24 +5574,43 @@ static VBOXSTRICTRC nemR3WinHandleExit(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXI
 
 
 /**
- * Hands a hardware interrupt pending in TRPM to Hyper-V for delivery
+ * Takes back the interrupt handed to Hyper-V and delivers it with IEM instead
  * (NEM::fInjectIntViaHv).
  *
+ * This is for when we leave the run loop before Hyper-V delivered it, so
+ * nothing of ours stays behind in Hyper-V or needs to be passed on, and for
+ * when the delivery itself caused the exit (e.g. the IDT or the stack is in
+ * MMIO), so the exit isn't handled as if the interrupted instruction did it.
+ *
+ * @returns VBox strict status code.
+ * @param   pVM     The cross context VM structure.
  * @param   pVCpu   The cross context per CPU structure.
  */
-static void nemR3WinTrpmToIntInject(PVMCPUCC pVCpu)
+static VBOXSTRICTRC nemR3WinIntInjectViaIem(PVMCC pVM, PVMCPUCC pVCpu)
 {
-    uint8_t   bVector  = 0;
-    TRPMEVENT enmEvent = TRPM_TRAP;
-    int rc = TRPMQueryTrapAll(pVCpu, &bVector, &enmEvent, NULL /*puErrCode*/, NULL /*puCR2*/, NULL /*pcbInstr*/,
-                              NULL /*pfIcebp*/);
-    if (RT_SUCCESS(rc) && enmEvent == TRPM_HARDWARE_INT)
+    Assert(pVCpu->nem.s.fIntInjectPending);
+    pVCpu->nem.s.fIntInjectPending = false;
+    STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatIntInjectViaIem);
+
+    /* Remove it from Hyper-V first: Hyper-V refuses state with RFLAGS.IF=0, which
+       the delivery below (and a reset or INIT) loads, while an interrupt is pending
+       (ERROR_HV_INVALID_VP_STATE). */
+    static const WHV_REGISTER_NAME s_enmName = WHvRegisterPendingInterruption;
+    WHV_REGISTER_VALUE Value;
+    RT_ZERO(Value);
+    HRESULT hrc = WHvSetVirtualProcessorRegisters(pVM->nem.s.hPartition, pVCpu->idCpu, &s_enmName, 1, &Value);
+    AssertLogRelMsg(SUCCEEDED(hrc), ("NEM/%u: Clearing WHvRegisterPendingInterruption failed: %Rhrc\n", pVCpu->idCpu, hrc));
+    pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT;
+
+    VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT, "IntViaIem");
+    if (rcStrict == VINF_SUCCESS)
     {
-        TRPMResetTrap(pVCpu);
-        pVCpu->nem.s.fIntInjectPending = true;
-        pVCpu->nem.s.uIntInjectVector  = bVector;
-        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT; /* (makes the export write it) */
+        IEMTlbInvalidateAll(pVCpu);
+        rcStrict = IEMInjectTrap(pVCpu, pVCpu->nem.s.uIntInjectVector, TRPM_HARDWARE_INT, 0, 0, 0);
+        Log8(("Injected interrupt %#x on %u via IEM after all (%d)\n",
+              pVCpu->nem.s.uIntInjectVector, pVCpu->idCpu, VBOXSTRICTRC_VAL(rcStrict)));
     }
+    return rcStrict;
 }
 
 
@@ -5624,10 +5631,10 @@ static void nemR3WinCheckIntInjectDelivered(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_V
     {
         /* Something is pending (or the run was canceled): check whether it's still ours,
            i.e. the run was canceled before entry or the delivery caused the exit. */
-        WHV_REGISTER_NAME  enmName = WHvRegisterPendingInterruption;
+        static const WHV_REGISTER_NAME s_enmName = WHvRegisterPendingInterruption;
         WHV_REGISTER_VALUE Value;
         RT_ZERO(Value);
-        HRESULT hrc = WHvGetVirtualProcessorRegisters(pVM->nem.s.hPartition, pVCpu->idCpu, &enmName, 1, &Value);
+        HRESULT hrc = WHvGetVirtualProcessorRegisters(pVM->nem.s.hPartition, pVCpu->idCpu, &s_enmName, 1, &Value);
         if (SUCCEEDED(hrc))
             pVCpu->nem.s.fIntInjectPending = Value.PendingInterruption.InterruptionPending
                                           && Value.PendingInterruption.InterruptionType   == WHvX64PendingInterrupt
@@ -5671,11 +5678,16 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
     /*
      * Check if we've got the minimum of state required for deciding whether we
      * can inject interrupts and NMIs.  If we don't have it, get all we might require
-     * for injection via IEM.
+     * for injection via IEM, or only that minimum and the TPR when Hyper-V delivers
+     * the interrupts: PDMGetInterrupt checks the TPR, and the guest may have
+     * changed it through CR8 since the last exit that synced it (not every exit
+     * does).
      */
     bool const fPendingNmi = VMCPU_FF_IS_SET(pVCpu, VMCPU_FF_INTERRUPT_NMI);
     uint64_t   fNeedExtrn  = CPUMCTX_EXTRN_INHIBIT_INT | CPUMCTX_EXTRN_RIP | CPUMCTX_EXTRN_RFLAGS
                            | (fPendingNmi ? CPUMCTX_EXTRN_INHIBIT_NMI : 0);
+    if (pVM->nem.s.fInjectIntViaHv)
+        fNeedExtrn |= CPUMCTX_EXTRN_APIC_TPR;
     if (pVCpu->cpum.GstCtx.fExtrn & fNeedExtrn)
     {
         VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu,
@@ -5719,8 +5731,13 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
          * This needs no further guest state and no IEM.  One interrupt at a time,
          * and not while Hyper-V still has another event pending; if more are
          * pending we request an interrupt window below to come back for them.
+         *
+         * Not while single-stepping: the stepping code sets EFLAGS.TF in the
+         * exported state, and Hyper-V would push it onto the guest stack with the
+         * interrupt frame.  Stepping keeps using the IEM path below.
          */
         if (   pVM->nem.s.fInjectIntViaHv
+            && !pVCpu->nem.s.fSingleInstruction
             && !CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx)
             && pVCpu->cpum.GstCtx.rflags.Bits.u1IF)
         {
@@ -5733,6 +5750,7 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
                 if (RT_SUCCESS(rc))
                 {
                     Log8(("Injecting interrupt %#x on %u via Hyper-V\n", bInterrupt, pVCpu->idCpu));
+                    STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatIntInjectViaHv);
                     pVCpu->nem.s.fIntInjectPending = true;
                     pVCpu->nem.s.uIntInjectVector  = bInterrupt;
                     pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT; /* (makes the export write it) */
@@ -5740,15 +5758,19 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
                 else if (rc == VERR_APIC_INTR_MASKED_BY_TPR)
                 {
                     *pfInterruptWindows |= ((bInterrupt >> 4) << NEM_WIN_INTW_F_PRIO_SHIFT) | NEM_WIN_INTW_F_REGULAR;
+                    Log8(("VERR_APIC_INTR_MASKED_BY_TPR: *pfInterruptWindows=%#x\n", *pfInterruptWindows));
                     return VINF_SUCCESS;
                 }
+                else
+                    Log8(("PDMGetInterrupt failed -> %Rrc\n", rc));
             }
             if (!VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_INTERRUPT_APIC | VMCPU_FF_INTERRUPT_PIC))
                 return VINF_SUCCESS;
         }
         /** @todo check NMI inhibiting here too! */
         else if (   !CPUMIsInInterruptShadow(&pVCpu->cpum.GstCtx)
-                 && pVCpu->cpum.GstCtx.rflags.Bits.u1IF)
+                 && pVCpu->cpum.GstCtx.rflags.Bits.u1IF
+                 && !pVCpu->nem.s.fIntInjectPending)
         {
             AssertCompile(NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT & CPUMCTX_EXTRN_APIC_TPR);
             VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT, "NMI");
@@ -6107,10 +6129,6 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
          * to the state syncing.
          */
         pVCpu->nem.s.fDesiredInterruptWindows = 0;
-        if (   pVM->nem.s.fInjectIntViaHv
-            && !pVCpu->nem.s.fIntInjectPending
-            && TRPMHasTrap(pVCpu))
-            nemR3WinTrpmToIntInject(pVCpu); /* An interrupt we gave to TRPM when leaving the loop. */
         if (!pVM->nem.s.fLocalApicEmulation)
         {
             if (VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_INTERRUPT_APIC | VMCPU_FF_UPDATE_APIC | VMCPU_FF_INTERRUPT_PIC
@@ -6223,9 +6241,15 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                         nemR3WinCheckIntInjectDelivered(pVM, pVCpu, &ExitReason);
 
                     /*
-                     * Deal with the message.
+                     * Deal with the message.  If our interrupt is still pending after
+                     * anything but a canceled run, its delivery caused the exit (e.g. the
+                     * IDT or the stack is in MMIO), so let IEM do the delivery instead.
                      */
-                    rcStrict = nemR3WinHandleExit(pVM, pVCpu, &ExitReason);
+                    if (   !pVCpu->nem.s.fIntInjectPending
+                        || ExitReason.ExitReason == WHvRunVpExitReasonCanceled)
+                        rcStrict = nemR3WinHandleExit(pVM, pVCpu, &ExitReason);
+                    else
+                        rcStrict = nemR3WinIntInjectViaIem(pVM, pVCpu);
                     if (rcStrict == VINF_SUCCESS)
                     { /* hopefully likely */ }
                     else
@@ -6324,17 +6348,24 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     }
 
     /*
-     * An interrupt Hyper-V hasn't delivered yet goes to TRPM, so that EM, IEM and
-     * saved states know about it.  The pending interruption in Hyper-V gets cleared
-     * on the next export (the event injection state isn't in Hyper-V any more), and
-     * we take the interrupt back from TRPM when we get here again.
+     * An interrupt Hyper-V hasn't delivered yet (the run was canceled first) is
+     * delivered with IEM now, like all interrupts are without fInjectIntViaHv, so
+     * EM, saved states and other VirtualBox versions never see it in flight.
      */
     if (pVCpu->nem.s.fIntInjectPending)
     {
-        pVCpu->nem.s.fIntInjectPending = false;
-        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT;
-        int rc2 = TRPMAssertTrap(pVCpu, pVCpu->nem.s.uIntInjectVector, TRPM_HARDWARE_INT);
-        AssertLogRelRC(rc2);
+        VBOXSTRICTRC rcStrict2 = nemR3WinIntInjectViaIem(pVM, pVCpu);
+        if (   rcStrict2 != VINF_SUCCESS
+            && RT_SUCCESS(rcStrict))
+        {
+            /* Keep the more important status; lower EM status values are more important. */
+            if (   rcStrict == VINF_SUCCESS
+                || RT_FAILURE(rcStrict2)
+                || (   rcStrict2 >= VINF_EM_FIRST && rcStrict2 <= VINF_EM_LAST
+                    && (   rcStrict < VINF_EM_FIRST || rcStrict > VINF_EM_LAST
+                        || VBOXSTRICTRC_VAL(rcStrict2) < VBOXSTRICTRC_VAL(rcStrict))))
+                rcStrict = rcStrict2;
+        }
     }
 
     /*

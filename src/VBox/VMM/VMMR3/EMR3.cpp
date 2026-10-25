@@ -1976,11 +1976,11 @@ int emR3ForcedActions(PVM pVM, PVMCPU pVCpu, int rc)
                             && NEMR3DeliversInterrupts(pVM)
                             && emR3Reschedule(pVM, pVCpu) == EMSTATE_NEM)
                         {
-                            /* NEM delivers it when resuming the guest, which needs neither
-                               the full guest state nor IEM.  Only when NEM really runs the
-                               guest next: IEM (IemExecutesAll, A20 gate disabled) would
-                               execute guest code first, which might disable interrupts again
-                               (e.g. sti+hlt+cli loops) and the interrupt would never arrive. */
+                            /* NEM delivers it when resuming the guest, without IEM.  Only
+                               when NEM really runs the guest next: IEM (fIemExecutesAll, A20
+                               gate disabled) would execute guest code first, which might
+                               disable interrupts again (e.g. sti+hlt+cli loops) and the
+                               interrupt would never arrive. */
                             rc2 = VINF_EM_RESCHEDULE;
                             fWakeupPending = true;
                         }

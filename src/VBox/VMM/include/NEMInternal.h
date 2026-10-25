@@ -677,6 +677,8 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatExportRegsSkipped;
     STAMCOUNTER                 StatExportXState;
     STAMCOUNTER                 StatApicTprSync;
+    STAMCOUNTER                 StatIntInjectViaHv;
+    STAMCOUNTER                 StatIntInjectViaIem;
     STAMCOUNTER                 StatTimerKickArm;
     STAMCOUNTER                 StatTimerKickFired;
 # endif
