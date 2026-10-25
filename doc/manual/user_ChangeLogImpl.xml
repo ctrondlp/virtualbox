@@ -94,6 +94,12 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Fixed guest timers falling far behind on x86 Windows hosts
+          using Hyper-V when the guest keeps a virtual CPU busy, which could
+          make the guest extremely slow or seem to hang (github:gh-726)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>

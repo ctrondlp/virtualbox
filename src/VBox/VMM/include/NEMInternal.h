@@ -328,6 +328,30 @@ typedef struct NEM
         uint64_t                cPagesInUse;
     } R0Stats;
 
+# ifdef VBOX_VMM_TARGET_X86
+    /** @name Timer kick, see nemR3WinTimerKickArm.
+     * @{ */
+    /** High resolution waitable timer (native handle), NULL if not used. */
+    RTR3PTR                     hTimerKick;
+    /** Event (native handle) telling the timer kick thread to terminate. */
+    RTR3PTR                     hTimerKickTermEvt;
+    /** The timer kick thread, NIL_RTTHREAD if not used. */
+    RTTHREAD                    hTimerKickThread;
+    /** The GIP timestamp the timer is armed for, 0 when it has fired (or wasn't
+     *  armed yet). */
+    uint64_t volatile           nsTimerKickArmed;
+    /** The virtual CPU whose run the timer kick cancels. */
+    VMCPUID volatile            idCpuTimerKick;
+    uint32_t                    u32TimerKickPadding;
+    /** Times the timer kick was armed. */
+    STAMCOUNTER                 StatTimerKickArm;
+    /** Times the timer kick fired. */
+    STAMCOUNTER                 StatTimerKickFired;
+    /** Times it fired while the EMT wasn't running the guest (nothing to cancel). */
+    STAMCOUNTER                 StatTimerKickSkipped;
+    /** @} */
+# endif
+
 # ifdef VBOX_VMM_TARGET_ARMV8
     /** Re-distributor memory region for all vCPUs. */
     RTGCPHYS                    GCPhysMmioBaseReDist;
