@@ -105,6 +105,12 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Fixed guest timers falling far behind on x86 Windows hosts
+          using Hyper-V when the guest keeps a virtual CPU busy, which could
+          make the guest extremely slow or seem to hang (github:gh-726)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
@@ -171,9 +177,8 @@ Rules for adding a changelog entry to make them look more uniform:
       <listitem>
         <para>Windows hosts: Improved performance when running VMs with the
           Hyper-V execution engine by skipping register transfers to Hyper-V
-          for unchanged registers and on HLT, intercepting fewer guest
-          exceptions and using high resolution timers to deliver guest timer
-          events on time</para>
+          for unchanged registers and on HLT, and by intercepting fewer guest
+          exceptions</para>
       </listitem>
 
       <listitem>
