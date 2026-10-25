@@ -2552,23 +2552,26 @@ DECLHIDDEN(int) nemR3NativeInitCompletedRing3(PVM pVM)
 
     /*
      * Narrow down the exception intercepts now that GIM is configured:
-     *  - #DB and #BP are only needed while debugging (nemR3WinEnsureDebugXcptExits).
+     *  - #BP stays intercepted: the debugger arms int3 breakpoints without
+     *    stopping the vCPUs, so a lazily enabled #BP intercept could hand one of
+     *    its breakpoints to the guest.
+     *  - #DB stays intercepted for now.  Without the intercept, a guest that
+     *    single-steps with EFLAGS.TF sometimes gets a #DB in the wrong place and
+     *    hangs (bootsector2-cpu-xcpt-2 'EFLAGS.TF stepping', 25-50% of runs,
+     *    whoever delivers the interrupts); the cause isn't understood yet.  The
+     *    lazy enabling (nemR3WinEnableDbExitsRendezvous) is kept for later.
      *  - #UD is only needed when the GIM provider offers hypercalls (VMCALL and
      *    VMMCALL raise #UD in the partition, see nemR3WinHandleExitException).
      *  - #GP is only needed for the mesa driver workaround.
      */
     GIMPROVIDERID const enmGimProvider = GIMGetProvider(pVM);
-    uint64_t fXcptExitBitmap = 0;
+    uint64_t fXcptExitBitmap = RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap) | RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault);
     if (   enmGimProvider == GIMPROVIDERID_HYPERV
         || enmGimProvider == GIMPROVIDERID_KVM
         || pVM->apCpusR3[0]->nem.s.fGIMTrapXcptUD)
         fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeInvalidOpcodeFault);
     if (pVM->apCpusR3[0]->nem.s.fTrapXcptGpForLovelyMesaDrv)
         fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeGeneralProtectionFault);
-    if (   pVM->nem.s.fUseDebugLoop
-        || pVM->dbgf.ro.cEnabledSwBreakpoints
-        || pVM->dbgf.ro.cEnabledHwBreakpoints)
-        fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault) | RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap);
     if (fXcptExitBitmap != pVM->nem.s.fXcptExitBitmap)
     {
         int rc = nemR3WinSetXcptExitBitmap(pVM, fXcptExitBitmap);
@@ -5987,22 +5990,22 @@ static int nemR3WinSetXcptExitBitmap(PVM pVM, uint64_t fBitmap)
 
 
 /**
- * Makes sure \#DB and \#BP are intercepted when the debugger needs them.
+ * @callback_method_impl{FNVMMEMTRENDEZVOUS,
+ *      Turns on \#DB exits while no virtual processor runs.}
  *
- * We don't intercept these when no debugging is going on, as the guest can
- * handle them perfectly fine by itself.  Once enabled, they stay enabled.
- *
- * @param   pVM             The cross context VM structure.
+ * Changing the exception exit bitmap while other virtual processors run can
+ * make WHvRunVirtualProcessor fail for them (WHV_E_INVALID_VP_STATE).
  */
-DECLINLINE(void) nemR3WinEnsureDebugXcptExits(PVM pVM)
+static DECLCALLBACK(VBOXSTRICTRC) nemR3WinEnableDbExitsRendezvous(PVM pVM, PVMCPU pVCpu, void *pvUser)
 {
-    uint64_t const fDbgXcpts = RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault) | RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap);
-    uint64_t const fCur      = ASMAtomicReadU64(&pVM->nem.s.fXcptExitBitmap);
-    if ((fCur & fDbgXcpts) != fDbgXcpts)
-    {
-        LogRel(("NEM: Enabling #DB and #BP exits for debugging.\n"));
-        nemR3WinSetXcptExitBitmap(pVM, fCur | fDbgXcpts);
-    }
+    RT_NOREF(pVCpu, pvUser);
+    uint64_t const fCur = ASMAtomicReadU64(&pVM->nem.s.fXcptExitBitmap);
+    if (fCur & RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault))
+        return VINF_SUCCESS; /* An earlier rendezvous did it. */
+    int const rc = nemR3WinSetXcptExitBitmap(pVM, fCur | RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault));
+    if (RT_SUCCESS(rc))
+        LogRel(("NEM: Enabled #DB exits for debugging\n"));
+    return rc;
 }
 
 
@@ -6020,6 +6023,24 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     if (LogIs3Enabled())
         nemHCWinLogState(pVM, pVCpu);
 #endif
+
+    /*
+     * The debugger needs #DB exits (see nemR3NativeInitCompletedRing3) for the
+     * cases covered by fGuestDebug below and for its #DB event.  Turn them on in
+     * a rendezvous, before this vCPU enters the run state.  Once on, they stay on.
+     */
+    if (   !(ASMAtomicReadU64(&pVM->nem.s.fXcptExitBitmap) & RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault))
+        && (   pVCpu->nem.s.fUseDebugLoop
+            || pVCpu->nem.s.fSingleInstruction
+            || DBGFIsStepping(pVCpu)
+            || pVM->dbgf.ro.cEnabledSwBreakpoints
+            || pVM->dbgf.ro.cEnabledHwBreakpoints
+            || DBGF_IS_EVENT_ENABLED(pVM, DBGFEVENT_XCPT_DB)))
+    {
+        int const rc = VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, nemR3WinEnableDbExitsRendezvous, NULL);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
 
     /*
      * Try switch to NEM runloop state.
@@ -6050,8 +6071,6 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                                         || fSingleStepping
                                         || pVM->dbgf.ro.cEnabledSwBreakpoints
                                         || pVM->dbgf.ro.cEnabledHwBreakpoints;
-    if (pVCpu->nem.s.fGuestDebug)
-        nemR3WinEnsureDebugXcptExits(pVM);
 
     /* Make sure the hypervisor debug register values are up to date. */
     if (   pVCpu->nem.s.fGuestDebug
