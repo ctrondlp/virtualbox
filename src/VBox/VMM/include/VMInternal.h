@@ -318,6 +318,12 @@ typedef struct VMINTUSERPERVM
             uint32_t                u32StopSpinningCfg;
             /** The minimum timeout to pass to RTSemEventWaitEx(). */
             uint32_t                cSemWaitNsMin;
+            /** Halt polling: the longest an EMT polls for a wake-up before it
+             * blocks (nano secs), 0 if disabled.  See vmR3HaltMethod1Poll. */
+            uint32_t                cNsPollMaxCfg;
+            /** Halt polling: the poll time to start with when growing it from
+             * zero (nano secs). */
+            uint32_t                cNsPollGrowStartCfg;
         }                           Method12;
 
        /**
@@ -406,8 +412,9 @@ typedef struct VMINTUSERPERVMCPU
         {
             /** How many times we've blocked while cBlockedNS and cBlockedTooLongNS has been accumulating. */
             uint32_t                cBlocks;
-            /** Align the next member. */
-            uint32_t                u32Alignment;
+            /** Halt polling: the current poll time (nano secs), adjusted after
+             * each halt by vmR3HaltMethod1AdjustPoll. */
+            uint32_t                cNsPoll;
             /** Avg. time spend oversleeping when blocking. (Re-calculated every so often.) */
             uint64_t                cNSBlockedTooLongAvg;
             /** Total time spend oversleeping when blocking. */
@@ -466,6 +473,10 @@ typedef struct VMINTUSERPERVMCPU
     STAMPROFILE                     StatHaltBlockOnTime;
     STAMPROFILE                     StatHaltTimers;
     STAMPROFILE                     StatHaltPoll;
+    /** Halt polls that saw the wake-up. */
+    STAMCOUNTER                     StatHaltPollHits;
+    /** Halt polls that timed out (the EMT blocked afterwards). */
+    STAMCOUNTER                     StatHaltPollMisses;
     /** @} */
 } VMINTUSERPERVMCPU;
 AssertCompileMemberAlignment(VMINTUSERPERVMCPU, u64HaltsStartTS, 8);
