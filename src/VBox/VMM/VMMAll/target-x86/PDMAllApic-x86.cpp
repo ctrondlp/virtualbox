@@ -537,6 +537,26 @@ VMM_INT_DECL(uint8_t) PDMApicGetHighestIrr(PVMCPUCC pVCpu)
 
 
 /**
+ * Gets the vector a paravirtualized EOI (KVM PV EOI, Hyper-V EOI assist) may be
+ * armed for before the guest runs: the highest in-service vector when it is
+ * edge triggered and no other interrupt is pending.
+ *
+ * @returns VBox status code.
+ * @retval  VINF_SUCCESS and the vector if a paravirtualized EOI may be armed.
+ * @retval  VERR_NOT_FOUND if not.
+ * @retval  VERR_NOT_SUPPORTED if the APIC backend doesn't support it.
+ * @param   pVCpu       The cross context virtual CPU structure.
+ * @param   puVector    Where to return the vector.
+ */
+VMM_INT_DECL(int) PDMApicGetPvEoiVector(PVMCPUCC pVCpu, uint8_t *puVector)
+{
+    if (PDMCPU_TO_APICBACKEND(pVCpu)->pfnGetPvEoiVector)
+        return PDMCPU_TO_APICBACKEND(pVCpu)->pfnGetPvEoiVector(pVCpu, puVector);
+    return VERR_NOT_SUPPORTED;
+}
+
+
+/**
  * Calculates and returns the EOI exit bitmap.
  *
  * @param   pVCpu          The cross context virtual CPU structure to query the bitmap for.

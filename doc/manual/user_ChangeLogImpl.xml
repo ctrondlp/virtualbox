@@ -112,6 +112,13 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VMM: Linux guests using the KVM paravirtualization provider can
+          skip the APIC end-of-interrupt write for most interrupts when using
+          Windows Hyper-V as the virtualization engine, which makes
+          interrupt-heavy workloads faster (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>VMM: Fixed guest timers falling far behind on x86 Windows hosts
           using Hyper-V when the guest keeps a virtual CPU busy, which could
           make the guest extremely slow or seem to hang (github:gh-726)</para>

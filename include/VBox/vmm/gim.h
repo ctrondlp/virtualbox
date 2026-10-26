@@ -191,6 +191,7 @@ VMMR3_INT_DECL(int)         GIMR3InitCompleted(PVM pVM);
 VMMR3_INT_DECL(void)        GIMR3Relocate(PVM pVM, RTGCINTPTR offDelta);
 VMMR3_INT_DECL(int)         GIMR3Term(PVM pVM);
 VMMR3_INT_DECL(void)        GIMR3Reset(PVM pVM);
+VMMR3_INT_DECL(void)        GIMR3ResetCpu(PVM pVM, PVMCPU pVCpu);
 VMMR3DECL(void)             GIMR3GimDeviceRegister(PVM pVM, PPDMDEVINS pDevInsR3, PGIMDEBUG pDbg);
 VMMR3DECL(int)              GIMR3GetDebugSetup(PVM pVM, PGIMDEBUGSETUP pDbgSetup);
 /** @} */
@@ -200,6 +201,8 @@ VMMDECL(bool)               GIMIsEnabled(PVM pVM);
 VMMDECL(GIMPROVIDERID)      GIMGetProvider(PVM pVM);
 VMMDECL(PGIMMMIO2REGION)    GIMGetMmio2Regions(PVMCC pVM, uint32_t *pcRegions);
 VMM_INT_DECL(bool)          GIMIsParavirtTscEnabled(PVMCC pVM);
+VMM_INT_DECL(void)          GIMPvEoiArm(PVMCPUCC pVCpu);
+VMM_INT_DECL(void)          GIMPvEoiDisarm(PVMCPUCC pVCpu);
 VMM_INT_DECL(bool)          GIMAreHypercallsEnabled(PVMCPUCC pVCpu);
 VMM_INT_DECL(VBOXSTRICTRC)  GIMHypercall(PVMCPUCC pVCpu, PCPUMCTX pCtx);
 VMM_INT_DECL(VBOXSTRICTRC)  GIMHypercallEx(PVMCPUCC pVCpu, PCPUMCTX pCtx, unsigned uDisOpcode, uint8_t cbInstr);

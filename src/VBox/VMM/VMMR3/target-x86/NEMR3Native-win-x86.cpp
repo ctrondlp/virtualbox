@@ -6339,6 +6339,9 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                 if (pVM->nem.s.hTimerKick)
                     nemR3WinTimerKickArm(pVM, pVCpu, nsNextTimerEvt, offDeltaTimer);
 
+                /* Let the guest skip its EOI write for the interrupt in service, if any (KVM PV EOI). */
+                GIMPvEoiArm(pVCpu);
+
                 WHV_RUN_VP_EXIT_CONTEXT ExitReason = {0};
                 TMNotifyStartOfExecution(pVM, pVCpu);
 
@@ -6348,6 +6351,9 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
 
                 VMCPU_CMPXCHG_STATE(pVCpu, VMCPUSTATE_STARTED_EXEC_NEM, VMCPUSTATE_STARTED_EXEC_NEM_WAIT);
                 TMNotifyEndOfExecution(pVM, pVCpu, ASMReadTSC());
+
+                /* Settle the paravirtualized EOI before anything looks at the APIC state. */
+                GIMPvEoiDisarm(pVCpu);
 #ifdef LOG_ENABLED
                 LogFlow(("NEM/%u: Exit  @ %04X:%08RX64 IF=%d CR8=%#x Reason=%#x\n", pVCpu->idCpu, ExitReason.VpContext.Cs.Selector,
                          ExitReason.VpContext.Rip, RT_BOOL(ExitReason.VpContext.Rflags & X86_EFL_IF), ExitReason.VpContext.Cr8,

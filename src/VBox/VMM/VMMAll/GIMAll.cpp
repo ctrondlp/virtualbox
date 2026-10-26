@@ -152,6 +152,44 @@ VMM_INT_DECL(bool) GIMAreHypercallsEnabled(PVMCPUCC pVCpu)
  * @remarks The caller of this function needs to advance RIP as required.
  * @thread  EMT.
  */
+/**
+ * Arms a paravirtualized EOI for the guest run that follows, if the provider
+ * offers one and it is safe now.  Call right before the guest runs; a run in
+ * which the guest may skip its EOI write must be bracketed by this and
+ * GIMPvEoiDisarm.
+ *
+ * @param   pVCpu       The cross context virtual CPU structure.
+ * @thread  EMT(pVCpu).
+ */
+VMM_INT_DECL(void) GIMPvEoiArm(PVMCPUCC pVCpu)
+{
+#if !defined(VBOX_VMM_TARGET_ARMV8)
+    if (pVCpu->CTX_SUFF(pVM)->gim.s.enmProviderId == GIMPROVIDERID_KVM)
+        gimKvmPvEoiArm(pVCpu);
+#else
+    RT_NOREF(pVCpu);
+#endif
+}
+
+
+/**
+ * Completes or takes back the paravirtualized EOI armed by GIMPvEoiArm.  Call
+ * right after the guest run returns, before anything looks at the APIC state.
+ *
+ * @param   pVCpu       The cross context virtual CPU structure.
+ * @thread  EMT(pVCpu).
+ */
+VMM_INT_DECL(void) GIMPvEoiDisarm(PVMCPUCC pVCpu)
+{
+#if !defined(VBOX_VMM_TARGET_ARMV8)
+    if (pVCpu->CTX_SUFF(pVM)->gim.s.enmProviderId == GIMPROVIDERID_KVM)
+        gimKvmPvEoiDisarm(pVCpu);
+#else
+    RT_NOREF(pVCpu);
+#endif
+}
+
+
 VMM_INT_DECL(VBOXSTRICTRC) GIMHypercall(PVMCPUCC pVCpu, PCPUMCTX pCtx)
 {
 #if defined(VBOX_VMM_TARGET_ARMV8)
