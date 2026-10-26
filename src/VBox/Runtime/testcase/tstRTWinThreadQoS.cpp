@@ -210,15 +210,16 @@ static void tstInitCpuSets(void)
     if (!pfnGetSystemCpuSetInformation)
         return;
 
-    static uint8_t s_abBuf[64 * 1024];
-    ULONG          cbRet = 0;
-    if (!pfnGetSystemCpuSetInformation(s_abBuf, sizeof(s_abBuf), &cbRet, GetCurrentProcess(), 0))
+    static uint64_t s_au64Buf[8 * 1024]; /* The entries contain DWORD64 members. */
+    ULONG           cbRet = 0;
+    if (!pfnGetSystemCpuSetInformation(s_au64Buf, sizeof(s_au64Buf), &cbRet, GetCurrentProcess(), 0))
         return;
 
-    uint8_t bMin = UINT8_MAX;
+    uint8_t const *pbBuf = (uint8_t const *)&s_au64Buf[0];
+    uint8_t        bMin  = UINT8_MAX;
     for (ULONG off = 0; off + RT_UOFFSETOF(TSTCPUSETINFO, AllFlags) <= cbRet;)
     {
-        TSTCPUSETINFO const *pInfo = (TSTCPUSETINFO const *)&s_abBuf[off];
+        TSTCPUSETINFO const *pInfo = (TSTCPUSETINFO const *)&pbBuf[off];
         if (pInfo->Size == 0)
             break;
         if (pInfo->Type == 0 /*CpuSetInformation*/)
@@ -418,6 +419,35 @@ static void tstWorkerUntouched(const char *pszWhat)
 
 
 /**
+ * Worker: Checks that a timer or I/O thread in a VM process has opted out of
+ * EcoQoS at the thread level, and that changing it to a type we don't touch
+ * hands it back to the system.
+ */
+static void tstWorkerLatencySensitive(const char *pszWhat)
+{
+    TSTPOWERTHROTTLINGSTATE State;
+    if (!tstQueryThreadState(&State))
+        return;
+    RTTestIPrintf(RTTESTLVL_ALWAYS, "%-22s thread power throttling: control=%#x state=%#x\n",
+                  pszWhat, State.ControlMask, State.StateMask);
+    if (   !(State.ControlMask & TST_POWER_THROTTLING_EXECUTION_SPEED)
+        || (State.StateMask & TST_POWER_THROTTLING_EXECUTION_SPEED))
+        RTTestIFailed("%s: thread not opted out of EcoQoS: control=%#x state=%#x",
+                      pszWhat, State.ControlMask, State.StateMask);
+
+    RTTESTI_CHECK_RC_RETV(RTThreadSetType(RTThreadSelf(), RTTHREADTYPE_DEFAULT), VINF_SUCCESS);
+    if (tstQueryThreadState(&State))
+    {
+        RTTestIPrintf(RTTESTLVL_ALWAYS, "%-22s thread power throttling: control=%#x state=%#x\n",
+                      "  ...changed to DEFAULT", State.ControlMask, State.StateMask);
+        if (State.ControlMask != 0)
+            RTTestIFailed("%s: not handed back to the system when changed to DEFAULT: control=%#x state=%#x",
+                          pszWhat, State.ControlMask, State.StateMask);
+    }
+}
+
+
+/**
  * Worker: Checks that an emulation thread in the opt-out child didn't change
  * anything.
  */
@@ -523,8 +553,9 @@ int main(int argc, char **argv)
         return RTTestSummaryAndDestroy(hTest);
     }
 
-    /* The parent checks the opt-out itself, so make sure it is not disabled. */
-    RTEnvUnset(TST_OPT_OUT_ENV_VAR);
+    /* The parent checks the opt-out itself, so make sure it is not disabled.
+       (Not RTEnvUnset, which hands NULL to _putenv_s on Windows.) */
+    RTTESTI_CHECK(RT_SUCCESS(RTEnvUnsetEx(RTENV_DEFAULT, TST_OPT_OUT_ENV_VAR)));
 
     tstInitCpuSets();
     RTTestPrintf(hTest, RTTESTLVL_ALWAYS, "Hybrid CPU: %RTbool (max efficiency class %u)\n", g_fHybrid, g_bMaxEfficiencyClass);
@@ -553,6 +584,8 @@ int main(int argc, char **argv)
 
     RTTestSub(hTest, "Other thread types");
     tstRunInThread(RTTHREADTYPE_DEFAULT, tstWorkerUntouched, "DEFAULT");
+    tstRunInThread(RTTHREADTYPE_TIMER, tstWorkerLatencySensitive, "TIMER");
+    tstRunInThread(RTTHREADTYPE_IO, tstWorkerLatencySensitive, "IO");
     if (g_fBenchmark)
         tstRunInThread(RTTHREADTYPE_DEFAULT, tstWorkerMeasure, "DEFAULT in VM process");
 

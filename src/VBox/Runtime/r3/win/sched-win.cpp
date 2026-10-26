@@ -44,8 +44,9 @@
  * Windows power throttling (EcoQoS, W10 1709+).  Windows 11 applies EcoQoS to
  * processes it considers to be in the background (minimized, occluded or
  * windowless, e.g. headless VMs), which means running their threads on
- * efficiency cores at reduced clock speeds and ignoring their timer resolution
- * requests.  For a process emulating a VM this is quite harmful, as virtual
+ * efficiency cores at reduced clock speeds.  It may also ignore the timer
+ * resolution requests of a process whose windows are all minimized or
+ * occluded.  For a process emulating a VM this is quite harmful, as virtual
  * CPUs (EMTs) and timer/IO threads are latency sensitive and a starved vCPU can
  * make a guest panic (e.g. spinlock timeouts).
  *

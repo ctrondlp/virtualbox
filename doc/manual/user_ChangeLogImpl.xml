@@ -211,10 +211,11 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
-        <para>Windows hosts: VM processes now opt out of Windows power throttling
+        <para>Windows Host: VM processes now opt out of Windows power throttling
           (EcoQoS), so background, minimized and headless VMs keep running on
           performance cores with precise timers. Set the environment variable
-          VBOX_NO_POWER_THROTTLING_OPTOUT=1 to restore the previous behavior</para>
+          VBOX_NO_POWER_THROTTLING_OPTOUT=1 to restore the previous behavior
+          (bug #21985)</para>
       </listitem>
 
       <listitem>

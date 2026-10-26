@@ -148,11 +148,13 @@ HRESULT WINAPI WHvQueryGpaRangeDirtyBitmap(WHV_PARTITION_HANDLE, WHV_GUEST_PHYSI
 # define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION  UINT32_C(0x00000002)
 #endif
 
-/** Timer deadlines further away than this aren't worth a timer kick, the TM
- * timer (/TM/TimerMillies) takes care of them.  TM gives EMTs other than the
- * timer EMT 500 ms. */
+/** The furthest ahead the timer kick is armed.  Timer deadlines further away get
+ * a kick at this distance as a backstop, see nemR3WinTimerKickArm. */
 #define NEM_WIN_TIMER_KICK_MAX_NS       (RT_NS_1MS * 250)
-/** A new deadline this close to the armed one doesn't re-arm the timer kick. */
+/** The deadline TM gives EMTs other than the timer EMT (tmTimerPollReturnOtherCpu);
+ * only the timer EMT gets closer ones. */
+#define NEM_WIN_TIMER_KICK_OTHER_EMT_NS (RT_NS_1MS * 500)
+/** A pending timer kick firing at most this long after a new deadline isn't re-armed. */
 #define NEM_WIN_TIMER_KICK_SLACK_NS     (RT_NS_1US * 25)
 
 
@@ -2563,10 +2565,13 @@ DECLHIDDEN(int) nemR3NativeInitCompletedRing3(PVM pVM)
      *    stopping the vCPUs, so a lazily enabled #BP intercept could hand one of
      *    its breakpoints to the guest.
      *  - #DB stays intercepted for now.  Without the intercept, a guest that
-     *    single-steps with EFLAGS.TF sometimes gets a #DB in the wrong place and
-     *    hangs (bootsector2-cpu-xcpt-2 'EFLAGS.TF stepping', 25-50% of runs,
-     *    whoever delivers the interrupts); the cause isn't understood yet.  The
-     *    lazy enabling (nemR3WinEnableDbExitsRendezvous) is kept for later.
+     *    single-steps with EFLAGS.TF sometimes loses a #DB and hangs
+     *    (bootsector2-cpu-xcpt-2 'EFLAGS.TF stepping', 25-50% of runs): a
+     *    canceled run can leave the single step #DB pending in Hyper-V, and the
+     *    event injection state handling clears it.  The nem-lazy-db-exits branch
+     *    delivers such a #DB with IEM (nemR3WinIsDbPendingAfterExit); that has to
+     *    come along before #DB is dropped here.  The lazy enabling
+     *    (nemR3WinEnableDbExitsRendezvous) is kept for later.
      *  - #UD is only needed when the GIM provider offers hypercalls (VMCALL and
      *    VMMCALL raise #UD in the partition, see nemR3WinHandleExitException).
      *  - #GP is only needed for the mesa driver workaround.
@@ -4946,7 +4951,11 @@ nemR3WinHandleExitCpuId(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const
  * are implemented by CPUM without touching the guest context.  However, the
  * MSRs backed by the guest context (CPUMCTX_EXTRN_ALL_MSRS, FS/GS base) and the
  * ones which involve the control registers (EFER, the P6 CR0..CR4 aliases) need
- * the state imported so it's consistent and gets written back afterwards.
+ * the state imported so it's consistent and gets written back afterwards.  So
+ * does the APIC base, which Hyper-V and our APIC both keep: the
+ * CPUMCTX_EXTRN_OTHER_MSRS import and export sync it between the two, so the
+ * import gives our APIC Hyper-V's value before the access, and a write only
+ * reaches Hyper-V through the export that follows.
  *
  * @returns CPUMCTX_EXTRN_XXX mask.
  * @param   idMsr           The MSR being accessed.
@@ -5625,6 +5634,8 @@ static VBOXSTRICTRC nemR3WinIntInjectViaIem(PVMCC pVM, PVMCPUCC pVCpu)
         rcStrict = IEMInjectTrap(pVCpu, pVCpu->nem.s.uIntInjectVector, TRPM_HARDWARE_INT, 0, 0, 0);
         Log8(("Injected interrupt %#x on %u via IEM after all (%d)\n",
               pVCpu->nem.s.uIntInjectVector, pVCpu->idCpu, VBOXSTRICTRC_VAL(rcStrict)));
+        if (rcStrict == VINF_IEM_RAISED_XCPT) /* The delivery raised an exception, which IEM delivered instead. */
+            rcStrict = VINF_SUCCESS;
     }
     return rcStrict;
 }
@@ -5641,12 +5652,15 @@ static VBOXSTRICTRC nemR3WinIntInjectViaIem(PVMCC pVM, PVMCPUCC pVCpu)
 static void nemR3WinCheckIntInjectDelivered(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const *pExit)
 {
     if (   !pExit->VpContext.ExecutionState.InterruptionPending
-        && pExit->ExitReason != WHvRunVpExitReasonCanceled)
+        && pExit->ExitReason != WHvRunVpExitReasonCanceled
+        && pExit->ExitReason != WHvRunVpExitReasonX64InterruptWindow)
         pVCpu->nem.s.fIntInjectPending = false;
     else
     {
         /* Something is pending (or the run was canceled): check whether it's still ours,
-           i.e. the run was canceled before entry or the delivery caused the exit. */
+           i.e. the run was canceled before entry or the delivery caused the exit.  The
+           interrupt window exit we may have requested along with the interrupt is checked
+           too: Hyper-V should deliver the interrupt first, but that isn't documented. */
         static const WHV_REGISTER_NAME s_enmName = WHvRegisterPendingInterruption;
         WHV_REGISTER_VALUE Value;
         RT_ZERO(Value);
@@ -5851,9 +5865,14 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
  * when it fires.
  *
  * There is one timer per VM: TM gives EMTs other than the timer EMT a deadline
- * 500 ms away, beyond NEM_WIN_TIMER_KICK_MAX_NS, so only the timer EMT arms it.
- * A timer another EMT sets while the timer EMT is already running the guest is
- * still only noticed at the timer EMT's next exit.
+ * NEM_WIN_TIMER_KICK_OTHER_EMT_NS away and only the timer EMT closer ones, so
+ * only the timer EMT arms it, and that also identifies it (idCpuTimerKick).
+ * Deadlines further away than NEM_WIN_TIMER_KICK_MAX_NS get a kick at that
+ * distance as a backstop, also on the timer EMT only: once another EMT's timer
+ * poll has set the timer EMT's VMCPU_FF_TIMER, the TM timer stops poking it, so
+ * nothing else would get a busy timer EMT out when that timer comes due.  A
+ * timer another EMT sets while the timer EMT is already running the guest is
+ * noticed at the timer EMT's next exit, at the latest by the next kick.
  *
  * @param   pVM             The cross context VM structure.
  * @param   pVCpu           The cross context per CPU structure of the calling EMT.
@@ -5863,14 +5882,22 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
  */
 DECLINLINE(void) nemR3WinTimerKickArm(PVMCC pVM, PVMCPUCC pVCpu, uint64_t nsDeadline, uint64_t cNsDelta)
 {
-    if (cNsDelta >= NEM_WIN_TIMER_KICK_MAX_NS)
-        return;
+    if (cNsDelta > NEM_WIN_TIMER_KICK_MAX_NS)
+    {
+        /* Not the timer EMT, or not identified yet? */
+        if (   cNsDelta >= NEM_WIN_TIMER_KICK_OTHER_EMT_NS
+            && ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick) != pVCpu->idCpu)
+            return;
+        /* Backstop kick. */
+        nsDeadline -= cNsDelta - NEM_WIN_TIMER_KICK_MAX_NS;
+        cNsDelta    = NEM_WIN_TIMER_KICK_MAX_NS;
+    }
 
-    /* Skip it if already armed for this EMT and about the same deadline, and
-       still pending (the kick thread zeroes nsTimerKickArmed when it fires). */
+    /* Skip it if a kick is already pending for this EMT that fires no later than
+       the deadline (the kick thread zeroes nsTimerKickArmed when it fires).  An
+       earlier kick just means one more exit, after which we arm it again. */
     uint64_t const nsArmed = ASMAtomicReadU64(&pVM->nem.s.nsTimerKickArmed);
-    if (   nsArmed + NEM_WIN_TIMER_KICK_SLACK_NS >= nsDeadline
-        && nsArmed <= nsDeadline + NEM_WIN_TIMER_KICK_SLACK_NS
+    if (   nsArmed <= nsDeadline + NEM_WIN_TIMER_KICK_SLACK_NS
         && nsArmed > nsDeadline - cNsDelta /* now */
         && ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick) == pVCpu->idCpu)
         return;
@@ -5924,6 +5951,7 @@ static DECLCALLBACK(int) nemR3WinTimerKickThread(RTTHREAD hThreadSelf, void *pvU
            again, while a cancel outside a run seems to be kept for the next run
            and would only cost an extra exit. */
         VMCPUID const    idCpu    = ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick);
+        AssertContinue(idCpu < pVM->cCpus);
         VMCPUSTATE const enmState = VMCPU_GET_STATE(pVM->apCpusR3[idCpu]);
         if (   enmState == VMCPUSTATE_STARTED_EXEC_NEM
             || enmState == VMCPUSTATE_STARTED_EXEC_NEM_WAIT)
@@ -5965,6 +5993,7 @@ static void nemR3WinTimerKickInit(PVM pVM)
 
     pVM->nem.s.hTimerKick        = hTimer;
     pVM->nem.s.hTimerKickTermEvt = hEvt;
+    pVM->nem.s.idCpuTimerKick    = NIL_VMCPUID; /* Until the timer EMT arms it (nemR3WinTimerKickArm). */
     int rc = RTThreadCreate(&pVM->nem.s.hTimerKickThread, nemR3WinTimerKickThread, pVM, 0 /*cbStack*/,
                             RTTHREADTYPE_TIMER, RTTHREADFLAGS_WAITABLE, "NEMTmrKick");
     if (RT_SUCCESS(rc))
@@ -6083,7 +6112,7 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
             || DBGF_IS_EVENT_ENABLED(pVM, DBGFEVENT_XCPT_DB)))
     {
         int const rc = VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, nemR3WinEnableDbExitsRendezvous, NULL);
-        if (RT_FAILURE(rc))
+        if (rc != VINF_SUCCESS)
             return rc;
     }
 
@@ -6211,11 +6240,11 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
          *
          * WHvRunVirtualProcessor has no timeout.  On the timer EMT the timer
          * kick (nemR3WinTimerKickArm) gets us out when the next timer event is
-         * due, if that's less than NEM_WIN_TIMER_KICK_MAX_NS away.
+         * due, at least every NEM_WIN_TIMER_KICK_MAX_NS.
          */
         /** @todo See if we cannot optimize this TMTimerPollGIP by only redoing
          *        the whole polling job when timers have changed... */
-        uint64_t       offDeltaTimer;
+        uint64_t       offDeltaTimer = UINT64_MAX;
         uint64_t const nsNextTimerEvt = TMTimerPollGIP(pVM, pVCpu, &offDeltaTimer);
         if (   !VM_FF_IS_ANY_SET(pVM, VM_FF_EMT_RENDEZVOUS | VM_FF_TM_VIRTUAL_SYNC)
             && !VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_HM_TO_R3_MASK))
@@ -6266,7 +6295,10 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                     /*
                      * Deal with the message.  If our interrupt is still pending after
                      * anything but a canceled run, its delivery caused the exit (e.g. the
-                     * IDT or the stack is in MMIO), so let IEM do the delivery instead.
+                     * IDT or the stack is in MMIO) or Hyper-V reported the interrupt window
+                     * before delivering it, so let IEM do the delivery instead.  (Skipping
+                     * an interrupt window exit is fine, the next export sets up the
+                     * deliverability notifications again if they're still wanted.)
                      */
                     if (   !pVCpu->nem.s.fIntInjectPending
                         || ExitReason.ExitReason == WHvRunVpExitReasonCanceled)
