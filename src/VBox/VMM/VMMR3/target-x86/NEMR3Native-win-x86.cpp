@@ -2564,20 +2564,17 @@ DECLHIDDEN(int) nemR3NativeInitCompletedRing3(PVM pVM)
      *  - #BP stays intercepted: the debugger arms int3 breakpoints without
      *    stopping the vCPUs, so a lazily enabled #BP intercept could hand one of
      *    its breakpoints to the guest.
-     *  - #DB stays intercepted for now.  Without the intercept, a guest that
-     *    single-steps with EFLAGS.TF sometimes loses a #DB and hangs
-     *    (bootsector2-cpu-xcpt-2 'EFLAGS.TF stepping', 25-50% of runs): a
-     *    canceled run can leave the single step #DB pending in Hyper-V, and the
-     *    event injection state handling clears it.  The nem-lazy-db-exits branch
-     *    delivers such a #DB with IEM (nemR3WinIsDbPendingAfterExit); that has to
-     *    come along before #DB is dropped here.  The lazy enabling
-     *    (nemR3WinEnableDbExitsRendezvous) is kept for later.
+     *  - #DB is only intercepted while debugging: nemHCWinRunGC turns it on in
+     *    an EMT rendezvous when the debugger needs it (nemR3WinEnableDbExitsRendezvous).
+     *    The guest's own debug exceptions are delivered by Hyper-V, and one that
+     *    a canceled run leaves pending is delivered with IEM, see
+     *    nemR3WinIsDbPendingAfterExit.
      *  - #UD is only needed when the GIM provider offers hypercalls (VMCALL and
      *    VMMCALL raise #UD in the partition, see nemR3WinHandleExitException).
      *  - #GP is only needed for the mesa driver workaround.
      */
     GIMPROVIDERID const enmGimProvider = GIMGetProvider(pVM);
-    uint64_t fXcptExitBitmap = RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap) | RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault);
+    uint64_t fXcptExitBitmap = RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap);
     if (   enmGimProvider == GIMPROVIDERID_HYPERV
         || enmGimProvider == GIMPROVIDERID_KVM
         || pVM->apCpusR3[0]->nem.s.fGIMTrapXcptUD)
@@ -6064,6 +6061,78 @@ static int nemR3WinSetXcptExitBitmap(PVM pVM, uint64_t fBitmap)
 
 
 /**
+ * Checks whether Hyper-V still has a \#DB pending after an exit that reported a
+ * pending interruption.
+ *
+ * Without \#DB exits (see nemR3NativeInitCompletedRing3) Hyper-V delivers the
+ * guest's debug exceptions itself, and a run that gets canceled (or an exit
+ * caused by the delivery) can leave one pending in WHvRegisterPendingInterruption.
+ * Our state handling clears that register on the next run (or when importing
+ * the event injection state on the way back to EM), which is fine for faults,
+ * as the guest raises them again when it re-executes the instruction, but a
+ * single step or data breakpoint \#DB is a trap and would be lost for good.
+ *
+ * @returns true if a \#DB is pending, false if not (or something else is).
+ * @param   pVM     The cross context VM structure.
+ * @param   pVCpu   The cross context per CPU structure.
+ * @param   pExit   The exit context.
+ */
+static bool nemR3WinIsDbPendingAfterExit(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const *pExit)
+{
+    /* Only exits that don't need the instruction at RIP to have completed. */
+    if (   pExit->ExitReason != WHvRunVpExitReasonCanceled
+        && pExit->ExitReason != WHvRunVpExitReasonMemoryAccess
+        && pExit->ExitReason != WHvRunVpExitReasonX64InterruptWindow)
+        return false;
+
+    static const WHV_REGISTER_NAME s_enmName = WHvRegisterPendingInterruption;
+    WHV_REGISTER_VALUE Value;
+    RT_ZERO(Value);
+    HRESULT hrc = WHvGetVirtualProcessorRegisters(pVM->nem.s.hPartition, pVCpu->idCpu, &s_enmName, 1, &Value);
+    AssertLogRelMsgReturn(SUCCEEDED(hrc), ("NEM/%u: Getting WHvRegisterPendingInterruption failed: %Rhrc\n", pVCpu->idCpu, hrc),
+                          false);
+    return Value.PendingInterruption.InterruptionPending
+        && Value.PendingInterruption.InterruptionType   == WHvX64PendingException
+        && Value.PendingInterruption.InterruptionVector == X86_XCPT_DB;
+}
+
+
+/**
+ * Delivers the \#DB Hyper-V still has pending after an exit with IEM, like the
+ * \#DB exit handler does, see nemR3WinIsDbPendingAfterExit.
+ *
+ * The exit itself isn't handled: for a canceled run or an interrupt window
+ * there's nothing to do, and a memory access by the \#DB delivery is done by IEM
+ * now (another access to the page by the guest maps it).
+ *
+ * @returns Strict VBox status code.
+ * @param   pVM     The cross context VM structure.
+ * @param   pVCpu   The cross context per CPU structure.
+ * @param   pExit   The exit context.
+ */
+static VBOXSTRICTRC nemR3WinDeliverPendingDb(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const *pExit)
+{
+    if (pExit->ExitReason == WHvRunVpExitReasonCanceled)
+        pVCpu->nem.s.fClearHaltSuspend = true; /* as nemR3WinHandleExit does */
+
+    /* Take it out of Hyper-V (the next run clears the pending interruption) and deliver it. */
+    pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT;
+    VBOXSTRICTRC rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM_XCPT, "PendingDb");
+    if (rcStrict == VINF_SUCCESS)
+    {
+        IEMTlbInvalidateAll(pVCpu);
+        rcStrict = IEMInjectTrap(pVCpu, X86_XCPT_DB, TRPM_TRAP, 0 /*uErrCode*/, 0 /*uCr2*/, 0 /*cbInstr*/);
+        Log4(("PendingDb/%u: %04x:%08RX64 exit %#x: delivered #DB -> %Rrc\n", pVCpu->idCpu, pExit->VpContext.Cs.Selector,
+              pExit->VpContext.Rip, pExit->ExitReason, VBOXSTRICTRC_VAL(rcStrict)));
+        if (rcStrict == VINF_IEM_RAISED_XCPT) /* The delivery raised an exception, which IEM delivered instead. */
+            rcStrict = VINF_SUCCESS;
+    }
+    RT_NOREF(pVM);
+    return rcStrict;
+}
+
+
+/**
  * @callback_method_impl{FNVMMEMTRENDEZVOUS,
  *      Turns on \#DB exits while no virtual processor runs.}
  *
@@ -6293,15 +6362,22 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
                         nemR3WinCheckIntInjectDelivered(pVM, pVCpu, &ExitReason);
 
                     /*
-                     * Deal with the message.  If our interrupt is still pending after
-                     * anything but a canceled run, its delivery caused the exit (e.g. the
-                     * IDT or the stack is in MMIO) or Hyper-V reported the interrupt window
-                     * before delivering it, so let IEM do the delivery instead.  (Skipping
-                     * an interrupt window exit is fine, the next export sets up the
-                     * deliverability notifications again if they're still wanted.)
+                     * Deal with the message.  If Hyper-V still has a #DB pending, it is
+                     * delivered first instead (see nemR3WinIsDbPendingAfterExit; it can't
+                     * be pending while our interrupt still is).  If our interrupt is still
+                     * pending after anything but a canceled run, its delivery caused the
+                     * exit (e.g. the IDT or the stack is in MMIO) or Hyper-V reported the
+                     * interrupt window before delivering it, so let IEM do the delivery
+                     * instead.  (Skipping an interrupt window exit is fine, the next export
+                     * sets up the deliverability notifications again if they're still
+                     * wanted.)
                      */
-                    if (   !pVCpu->nem.s.fIntInjectPending
-                        || ExitReason.ExitReason == WHvRunVpExitReasonCanceled)
+                    if (   ExitReason.VpContext.ExecutionState.InterruptionPending
+                        && !pVCpu->nem.s.fIntInjectPending
+                        && nemR3WinIsDbPendingAfterExit(pVM, pVCpu, &ExitReason))
+                        rcStrict = nemR3WinDeliverPendingDb(pVM, pVCpu, &ExitReason);
+                    else if (   !pVCpu->nem.s.fIntInjectPending
+                             || ExitReason.ExitReason == WHvRunVpExitReasonCanceled)
                         rcStrict = nemR3WinHandleExit(pVM, pVCpu, &ExitReason);
                     else
                         rcStrict = nemR3WinIntInjectViaIem(pVM, pVCpu);

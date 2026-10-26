@@ -118,6 +118,12 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VMM: Fixed debug exceptions raised by the guest passing a wrong
+          return address or RFLAGS.RF value to the guest's handler when using
+          Windows Hyper-V as the virtualization engine (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>VMM: Fixed the guest APIC task priority losing its low 4 bits
           when using Windows Hyper-V as the virtualization engine
           (github:gh-932)</para>
