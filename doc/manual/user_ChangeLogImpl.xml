@@ -118,9 +118,10 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
-        <para>Windows hosts: Fixed VMs slowing down considerably when their
+        <para>Windows Host: Fixed VMs slowing down considerably when their
           window is minimized or when they run headless, because Windows
-          runs such processes in efficiency mode (EcoQoS) (github:gh-NNN)</para>
+          runs such processes in efficiency mode (EcoQoS)
+          (bug #21985, github:gh-NNN)</para>
       </listitem>
 
       <listitem>
