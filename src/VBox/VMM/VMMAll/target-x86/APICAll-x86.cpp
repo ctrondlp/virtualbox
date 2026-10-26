@@ -1155,6 +1155,35 @@ static DECLCALLBACK(uint8_t) apicGetHighestIrr(PVMCPUCC pVCpu)
 
 
 /**
+ * @interface_method_impl{PDMAPICBACKEND,pfnGetPvEoiVector}
+ *
+ * The same rules as KVM's apic_sync_pv_eoi_to_guest: the guest may skip its EOI
+ * write only when exactly one interrupt is in service (nothing in the IRR that
+ * the EOI would have to let through, no nesting to get wrong) and that one is
+ * edge triggered, so the EOI has nothing to tell the I/O APIC.
+ */
+static DECLCALLBACK(int) apicGetPvEoiVector(PVMCPUCC pVCpu, uint8_t *puVector)
+{
+    VMCPU_ASSERT_EMT(pVCpu);
+    PCXAPICPAGE pXApicPage = VMCPU_TO_CXAPICPAGE(pVCpu);
+    if (   apicIsEnabled(pVCpu)
+        && pXApicPage->svr.u.fApicSoftwareEnable
+        && !VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_UPDATE_APIC | VMCPU_FF_INTERRUPT_APIC)
+        && apicGetHighestSetBitInReg(&pXApicPage->irr, -1 /* rcNotFound */) < 0)
+    {
+        int const isrv = apicGetHighestSetBitInReg(&pXApicPage->isr, -1 /* rcNotFound */);
+        if (   isrv > XAPIC_ILLEGAL_VECTOR_END
+            && !apicTestVectorInReg(&pXApicPage->tmr, (uint8_t)isrv))
+        {
+            *puVector = (uint8_t)isrv;
+            return VINF_SUCCESS;
+        }
+    }
+    return VERR_NOT_FOUND;
+}
+
+
+/**
  * Sets the Logical Destination Register (LDR).
  *
  * @returns Strict VBox status code.
@@ -3442,5 +3471,6 @@ const PDMAPICBACKEND g_ApicBackend =
     /* .pfnGetHighestIrr = */           apicGetHighestIrr,
     /* .pfnQueryEoiExitBitmap = */      apicQueryEoiExitBitmap,
     /* .pfnIoApicRteChanged = */        apicIoApicRteChanged,
+    /* .pfnGetPvEoiVector = */          apicGetPvEoiVector,
 };
 

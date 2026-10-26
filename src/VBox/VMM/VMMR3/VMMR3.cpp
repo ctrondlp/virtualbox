@@ -1399,6 +1399,7 @@ static DECLCALLBACK(int) vmmR3SendInitIpi(PVM pVM, VMCPUID idCpu)
     PGMR3ResetCpu(pVM, pVCpu);
     PDMR3ResetCpu(pVCpu);   /* Only clears pending interrupts force flags */
     PDMR3ApicInitIpi(pVCpu);
+    GIMR3ResetCpu(pVM, pVCpu);
     TRPMR3ResetCpu(pVCpu);
     CPUMR3ResetCpu(pVM, pVCpu);
     EMR3ResetCpu(pVCpu);

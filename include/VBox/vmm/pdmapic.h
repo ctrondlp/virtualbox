@@ -434,10 +434,15 @@ typedef struct PDMAPICBACKENDR3
                                                     uint8_t uVector, uint8_t uTriggerMode));
 
 
-    /** @name Reserved for future (MBZ).
-     * @{ */
-    DECLR3CALLBACKMEMBER(int, pfnReserved0, (void));
-    /** @} */
+    /**
+     * Gets the vector a paravirtualized EOI may be armed for, see
+     * PDMApicGetPvEoiVector.  Optional.
+     *
+     * @returns VBox status code.
+     * @param   pVCpu           The cross context virtual CPU structure.
+     * @param   puVector        Where to return the vector.
+     */
+    DECLR3CALLBACKMEMBER(int, pfnGetPvEoiVector, (PVMCPUCC pVCpu, uint8_t *puVector));
 } PDMAPICBACKENDR3;
 /** Pointer to ring-3 APIC backend. */
 typedef R3PTRTYPE(struct PDMAPICBACKENDR3 *) PPDMAPICBACKENDR3;
@@ -768,10 +773,8 @@ typedef struct PDMAPICBACKENDR0
                                                     uint8_t uVector, uint8_t uTriggerMode));
 
 
-    /** @name Reserved for future (MBZ).
-     * @{ */
-    DECLR0CALLBACKMEMBER(int, pfnReserved0, (void));
-    /** @} */
+    /** @copydoc PDMAPICBACKENDR3::pfnGetPvEoiVector */
+    DECLR0CALLBACKMEMBER(int, pfnGetPvEoiVector, (PVMCPUCC pVCpu, uint8_t *puVector));
 } PDMAPICBACKENDR0;
 /** Pointer to ring-0 APIC backend. */
 typedef R0PTRTYPE(struct PDMAPICBACKENDR0 *) PPDMAPICBACKENDR0;
@@ -1018,7 +1021,8 @@ typedef struct PDMAPICBACKENDRC
 
     /** @name Reserved for future (MBZ).
      * @{ */
-    DECLRCCALLBACKMEMBER(int, pfnReserved0, (void));
+    /** @copydoc PDMAPICBACKENDR3::pfnGetPvEoiVector */
+    DECLRCCALLBACKMEMBER(int, pfnGetPvEoiVector, (PVMCPUCC pVCpu, uint8_t *puVector));
     DECLRCCALLBACKMEMBER(int, pfnReserved1, (void));
     DECLRCCALLBACKMEMBER(int, pfnReserved2, (void));
     DECLRCCALLBACKMEMBER(int, pfnReserved3, (void));
@@ -1084,6 +1088,7 @@ VMM_INT_DECL(VBOXSTRICTRC)  PDMApicSetEoiFast(PVMCPUCC pVCpu, uint8_t uIsrVector
 VMM_INT_DECL(bool)          PDMApicIsLvt0ExtInt(PVMCPUCC pVCpu);
 VMM_INT_DECL(uint8_t)       PDMApicGetHighestIsr(PVMCPUCC pVCpu);
 VMM_INT_DECL(uint8_t)       PDMApicGetHighestIrr(PVMCPUCC pVCpu);
+VMM_INT_DECL(int)           PDMApicGetPvEoiVector(PVMCPUCC pVCpu, uint8_t *puVector);
 VMM_INT_DECL(void)          PDMApicQueryEoiExitBitmap(PVMCPUCC pVCpu, uint64_t *pau64EoiBitmap);
 VMM_INT_DECL(int)           PDMApicIoApicRteChanged(PVMCC pVM, uint8_t uIoApicPin, uint8_t uDest, uint8_t uDestMode,
                                                     uint8_t uDeliveryMode, uint8_t uVector, uint8_t uTriggerMode);

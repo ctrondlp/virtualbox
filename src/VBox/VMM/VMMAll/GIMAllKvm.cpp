@@ -37,6 +37,7 @@
 #include <VBox/vmm/pgm.h>
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/vmm/pdmapi.h>
+#include <VBox/vmm/pdmapic.h>
 #include "GIMKvmInternal.h"
 #include "GIMInternal.h"
 #include <VBox/vmm/vmcc.h>
@@ -76,7 +77,7 @@ VMM_INT_DECL(VBOXSTRICTRC) gimKvmHypercall(PVMCPUCC pVCpu, PCPUMCTX pCtx)
     uint64_t uHyperOp       = pCtx->rax;
     uint64_t uHyperArg0     = pCtx->rbx;
     uint64_t uHyperArg1     = pCtx->rcx;
-    uint64_t uHyperArg2     = pCtx->rdi;
+    uint64_t uHyperArg2     = pCtx->rdx; /* KVM's ABI: rbx, rcx, rdx, rsi (Linux kvm_hypercall4). */
     uint64_t uHyperArg3     = pCtx->rsi;
     uint64_t uHyperRet      = KVM_HYPERCALL_RET_ENOSYS;
     uint64_t uAndMask       = UINT64_C(0xffffffffffffffff);
@@ -137,6 +138,80 @@ VMM_INT_DECL(VBOXSTRICTRC) gimKvmHypercall(PVMCPUCC pVCpu, PCPUMCTX pCtx)
      */
     pCtx->rax = uHyperRet & uAndMask;
     return rc;
+}
+
+
+/**
+ * Arms the paravirtualized EOI for the guest run that follows, see
+ * GIMPvEoiArm.
+ *
+ * Like KVM, the "no EOI needed" flag is set only when exactly one edge
+ * triggered interrupt is in service and nothing else is pending (the APIC
+ * decides, PDMApicGetPvEoiVector), and only for one guest run: whatever the
+ * guest did with it is settled in gimKvmPvEoiDisarm right after the run.
+ *
+ * @param   pVCpu       The cross context virtual CPU structure.
+ * @thread  EMT(pVCpu).
+ */
+VMM_INT_DECL(void) gimKvmPvEoiArm(PVMCPUCC pVCpu)
+{
+    PGIMKVMCPU pKvmCpu = &pVCpu->gim.s.u.KvmCpu;
+    Assert(!pKvmCpu->fPvEoiArmed);
+    if (!(pKvmCpu->u64PvEoiMsr & MSR_GIM_KVM_EOI_ENABLE_BIT))
+        return;
+
+    uint8_t uVector;
+    int rc = PDMApicGetPvEoiVector(pVCpu, &uVector);
+    if (RT_FAILURE(rc))
+        return;
+
+    static uint8_t const s_bSet = 1;
+    rc = PGMPhysSimpleWriteGCPhys(pVCpu->CTX_SUFF(pVM), pKvmCpu->GCPhysPvEoi, &s_bSet, sizeof(s_bSet));
+    if (RT_SUCCESS(rc))
+    {
+        pKvmCpu->fPvEoiArmed  = true;
+        pKvmCpu->uPvEoiVector = uVector;
+        STAM_REL_COUNTER_INC(&pKvmCpu->StatPvEoiArmed);
+    }
+}
+
+
+/**
+ * Settles the paravirtualized EOI armed by gimKvmPvEoiArm after the guest run,
+ * see GIMPvEoiDisarm.
+ *
+ * If the guest cleared the flag it has skipped its EOI write, so the EOI is
+ * done here on its behalf.  If the flag is still set the guest hasn't got to
+ * its EOI yet; the flag is cleared again so the guest does a real EOI write
+ * later (the flag is only valid for the run it was armed for, as the APIC state
+ * may change before the next one).
+ *
+ * @param   pVCpu       The cross context virtual CPU structure.
+ * @thread  EMT(pVCpu).
+ */
+VMM_INT_DECL(void) gimKvmPvEoiDisarm(PVMCPUCC pVCpu)
+{
+    PGIMKVMCPU pKvmCpu = &pVCpu->gim.s.u.KvmCpu;
+    if (!pKvmCpu->fPvEoiArmed)
+        return;
+    pKvmCpu->fPvEoiArmed = false;
+
+    uint8_t bFlag = 0;
+    int rc = PGMPhysSimpleReadGCPhys(pVCpu->CTX_SUFF(pVM), &bFlag, pKvmCpu->GCPhysPvEoi, sizeof(bFlag));
+    if (   RT_FAILURE(rc)
+        || !(bFlag & 1))
+    {
+        /* The guest consumed it (or the flag is unreadable, as KVM assume consumed). */
+        STAM_REL_COUNTER_INC(&pKvmCpu->StatPvEoiConsumed);
+        PDMApicSetEoiFast(pVCpu, pKvmCpu->uPvEoiVector);
+    }
+    else
+    {
+        static uint8_t const s_bClear = 0;
+        rc = PGMPhysSimpleWriteGCPhys(pVCpu->CTX_SUFF(pVM), pKvmCpu->GCPhysPvEoi, &s_bClear, sizeof(s_bClear));
+        AssertRC(rc);
+        STAM_REL_COUNTER_INC(&pKvmCpu->StatPvEoiTakenBack);
+    }
 }
 
 
@@ -208,6 +283,14 @@ VMM_INT_DECL(VBOXSTRICTRC) gimKvmReadMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUMM
             *puValue = pKvm->u64WallClockMsr;
             return VINF_SUCCESS;
 
+        case MSR_GIM_KVM_EOI:
+            if (pKvm->uBaseFeat & GIM_KVM_BASE_FEAT_PV_EOI)
+            {
+                *puValue = pKvmCpu->u64PvEoiMsr;
+                return VINF_SUCCESS;
+            }
+            break;
+
         default:
         {
 #ifdef IN_RING3
@@ -241,6 +324,39 @@ VMM_INT_DECL(VBOXSTRICTRC) gimKvmWriteMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUM
     NOREF(pRange);
     switch (idMsr)
     {
+        case MSR_GIM_KVM_EOI:
+        {
+            /*
+             * Paravirtualized EOI: bit 0 enables, bit 1 must be zero, the rest is
+             * the guest-physical address of a 4-byte aligned flag in guest RAM.
+             */
+            PVMCC      pVM     = pVCpu->CTX_SUFF(pVM);
+            PGIMKVMCPU pKvmCpu = &pVCpu->gim.s.u.KvmCpu;
+            if (!(pVM->gim.s.u.Kvm.uBaseFeat & GIM_KVM_BASE_FEAT_PV_EOI))
+                break;
+            if (uRawValue & MSR_GIM_KVM_EOI_ENABLE_BIT)
+            {
+                RTGCPHYS const GCPhysFlag = MSR_GIM_KVM_EOI_GUEST_GPA(uRawValue);
+                if (   (uRawValue & MSR_GIM_KVM_EOI_RSVD_BIT)
+                    || (GCPhysFlag & 3)
+                    || !PGMPhysIsGCPhysNormal(pVM, GCPhysFlag))
+                {
+                    LogRel(("GIM%u: KVM: Invalid PV EOI MSR value %#RX64 -> #GP(0)\n", pVCpu->idCpu, uRawValue));
+                    return VERR_CPUM_RAISE_GP_0;
+                }
+                pKvmCpu->GCPhysPvEoi = GCPhysFlag;
+                if (!(pKvmCpu->u64PvEoiMsr & MSR_GIM_KVM_EOI_ENABLE_BIT))
+                    LogRel(("GIM%u: KVM: Enabled PV EOI, flag at %#RGp\n", pVCpu->idCpu, GCPhysFlag));
+            }
+            else
+            {
+                pKvmCpu->GCPhysPvEoi = NIL_RTGCPHYS;
+                pKvmCpu->fPvEoiArmed = false;
+            }
+            pKvmCpu->u64PvEoiMsr = uRawValue;
+            return VINF_SUCCESS;
+        }
+
         case MSR_GIM_KVM_SYSTEM_TIME:
         case MSR_GIM_KVM_SYSTEM_TIME_OLD:
         {

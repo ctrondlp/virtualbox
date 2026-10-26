@@ -190,7 +190,7 @@ VMMR3_INT_DECL(int) GIMR3Init(PVM pVM)
     rc = CFGMR3ValidateConfig(pCfgNode, "/GIM/", /* pszNode */
                               "Provider"         /* pszValidValues */
                               "|Version",
-                              "HyperV",          /* pszValidNodes */
+                              "HyperV|KVM",      /* pszValidNodes */
                               "GIM",             /* pszWho */
                               0);                /* uInstance */
     if (RT_FAILURE(rc))
@@ -502,6 +502,29 @@ VMMR3_INT_DECL(void) GIMR3Reset(PVM pVM)
             break;
 #endif
         default:
+            break;
+    }
+}
+
+
+/**
+ * Resets the per-CPU provider state of a virtual CPU that receives an INIT IPI.
+ *
+ * @param   pVM     The cross context VM structure.
+ * @param   pVCpu   The cross context virtual CPU structure.
+ * @thread  EMT(pVCpu).
+ */
+VMMR3_INT_DECL(void) GIMR3ResetCpu(PVM pVM, PVMCPU pVCpu)
+{
+    switch (pVM->gim.s.enmProviderId)
+    {
+#if defined(VBOX_VMM_TARGET_X86)
+        case GIMPROVIDERID_KVM:
+            gimR3KvmResetCpu(pVM, pVCpu);
+            break;
+#endif
+        default:
+            RT_NOREF(pVCpu);
             break;
     }
 }

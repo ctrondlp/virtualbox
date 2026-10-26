@@ -34,6 +34,8 @@
 #include <VBox/vmm/cpum.h>
 #include <VBox/vmm/hm.h>
 #include <VBox/vmm/pdmapi.h>
+#include <VBox/vmm/cfgm.h>
+#include <VBox/vmm/stam.h>
 #include <VBox/vmm/ssm.h>
 #include <VBox/vmm/em.h>
 #include "GIMInternal.h"
@@ -56,8 +58,12 @@
 
 /**
  * GIM KVM saved-state version.
+ *
+ * Version 2 adds the per-VCPU paravirtualized EOI MSR.
  */
-#define GIM_KVM_SAVED_STATE_VERSION         UINT32_C(1)
+#define GIM_KVM_SAVED_STATE_VERSION         UINT32_C(2)
+/** Saved-state version before the paravirtualized EOI. */
+#define GIM_KVM_SAVED_STATE_VERSION_PRE_PV_EOI  UINT32_C(1)
 
 /**
  * VBox internal struct. to passback to EMT rendezvous callback while enabling
@@ -234,6 +240,27 @@ VMMR3_INT_DECL(int) gimR3KvmInit(PVM pVM)
     PGIMKVM pKvm = &pVM->gim.s.u.Kvm;
 
     /*
+     * Read configuration.
+     */
+    bool      fPvEoi  = true;
+    PCFGMNODE pCfgKvm = CFGMR3GetChild(CFGMR3GetRoot(pVM), "GIM/KVM");
+    if (pCfgKvm)
+    {
+        rc = CFGMR3ValidateConfig(pCfgKvm, "/KVM/", "PvEoi", "" /* pszValidNodes */, "GIM/KVM" /* pszWho */,
+                                  0 /* uInstance */);
+        if (RT_FAILURE(rc))
+            return rc;
+
+        /** @cfgm{/GIM/KVM/PvEoi, bool, true}
+         * Whether to offer the guest the paravirtualized EOI: the guest may then
+         * skip the EOI write, and thus a VM exit, for an interrupt when told that
+         * no other interrupt is pending.  Only used by execution engines that
+         * arm it (NEM); otherwise the guest always does the real EOI. */
+        rc = CFGMR3QueryBoolDef(pCfgKvm, "PvEoi", &fPvEoi, true);
+        AssertLogRelRCReturn(rc, rc);
+    }
+
+    /*
      * Determine interface capabilities based on the version.
      */
     if (!pVM->gim.s.u32Version)
@@ -246,10 +273,26 @@ VMMR3_INT_DECL(int) gimR3KvmInit(PVM pVM)
                         | GIM_KVM_BASE_FEAT_CLOCK
                         //| GIM_KVM_BASE_FEAT_ASYNC_PF
                         //| GIM_KVM_BASE_FEAT_STEAL_TIME
-                        //| GIM_KVM_BASE_FEAT_PV_EOI
+                        | (fPvEoi ? GIM_KVM_BASE_FEAT_PV_EOI : 0)
                         | GIM_KVM_BASE_FEAT_PV_UNHALT
                         ;
         /* Rest of the features are determined in gimR3KvmInitCompleted(). */
+    }
+    LogRel(("GIM: KVM: Paravirtualized EOI %s\n", pKvm->uBaseFeat & GIM_KVM_BASE_FEAT_PV_EOI ? "offered" : "not offered"));
+
+    /*
+     * Per-VCPU state and statistics.
+     */
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+    {
+        PGIMKVMCPU pKvmCpu = &pVM->apCpusR3[idCpu]->gim.s.u.KvmCpu;
+        pKvmCpu->GCPhysPvEoi = NIL_RTGCPHYS;
+        STAMR3RegisterF(pVM, &pKvmCpu->StatPvEoiArmed,     STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES,
+                        "Paravirtualized EOIs armed.",                      "/GIM/KVM/CPU%u/PvEoiArmed", idCpu);
+        STAMR3RegisterF(pVM, &pKvmCpu->StatPvEoiConsumed,  STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES,
+                        "Paravirtualized EOIs the guest used.",             "/GIM/KVM/CPU%u/PvEoiConsumed", idCpu);
+        STAMR3RegisterF(pVM, &pKvmCpu->StatPvEoiTakenBack, STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES,
+                        "Paravirtualized EOIs taken back after the run.",   "/GIM/KVM/CPU%u/PvEoiTakenBack", idCpu);
     }
 
     /*
@@ -383,7 +426,26 @@ VMMR3_INT_DECL(void) gimR3KvmReset(PVM pVM)
         pKvmCpu->GCPhysSystemTime = 0;
         pKvmCpu->uTsc = 0;
         pKvmCpu->uVirtNanoTS = 0;
+        gimR3KvmResetCpu(pVM, pVM->apCpusR3[idCpu]);
     }
+}
+
+
+/**
+ * Resets the per-VCPU state that an INIT IPI (and a VM reset) clears: the
+ * paravirtualized EOI MSR, like KVM does, so no stale guest address is written
+ * to after the CPU restarts.
+ *
+ * @param   pVM     The cross context VM structure.
+ * @param   pVCpu   The cross context virtual CPU structure.
+ */
+VMMR3_INT_DECL(void) gimR3KvmResetCpu(PVM pVM, PVMCPU pVCpu)
+{
+    RT_NOREF(pVM);
+    PGIMKVMCPU pKvmCpu = &pVCpu->gim.s.u.KvmCpu;
+    pKvmCpu->u64PvEoiMsr = 0;
+    pKvmCpu->GCPhysPvEoi = NIL_RTGCPHYS;
+    pKvmCpu->fPvEoiArmed = false;
 }
 
 
@@ -421,7 +483,15 @@ VMMR3_INT_DECL(int) gimR3KvmSave(PVM pVM, PSSMHANDLE pSSM)
      * Save per-VM data.
      */
     SSMR3PutU64(pSSM, pKvm->u64WallClockMsr);
-    return SSMR3PutU32(pSSM, pKvm->uBaseFeat);
+    SSMR3PutU32(pSSM, pKvm->uBaseFeat);
+
+    /*
+     * Version 2: the paravirtualized EOI MSR of each VCPU (appended so that the
+     * version 1 layout stays a prefix).
+     */
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+        SSMR3PutU64(pSSM, pVM->apCpusR3[idCpu]->gim.s.u.KvmCpu.u64PvEoiMsr);
+    return SSMR3PutU32(pSSM, UINT32_MAX); /* Terminator. */
 }
 
 
@@ -440,7 +510,8 @@ VMMR3_INT_DECL(int) gimR3KvmLoad(PVM pVM, PSSMHANDLE pSSM)
     uint32_t uKvmSavedStatVersion;
     int rc = SSMR3GetU32(pSSM, &uKvmSavedStatVersion);
     AssertRCReturn(rc, rc);
-    if (uKvmSavedStatVersion != GIM_KVM_SAVED_STATE_VERSION)
+    if (   uKvmSavedStatVersion != GIM_KVM_SAVED_STATE_VERSION
+        && uKvmSavedStatVersion != GIM_KVM_SAVED_STATE_VERSION_PRE_PV_EOI)
         return SSMR3SetLoadError(pSSM, VERR_SSM_UNSUPPORTED_DATA_UNIT_VERSION, RT_SRC_POS,
                                  N_("Unsupported KVM saved-state version %u (expected %u)."),
                                  uKvmSavedStatVersion, GIM_KVM_SAVED_STATE_VERSION);
@@ -484,6 +555,31 @@ VMMR3_INT_DECL(int) gimR3KvmLoad(PVM pVM, PSSMHANDLE pSSM)
     SSMR3GetU64(pSSM, &pKvm->u64WallClockMsr);
     rc = SSMR3GetU32(pSSM, &pKvm->uBaseFeat);
     AssertRCReturn(rc, rc);
+
+    /*
+     * Version 2: the paravirtualized EOI MSRs.  An old state has none, and its
+     * guest never saw the feature (CPUID comes from the state too).
+     */
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+    {
+        PGIMKVMCPU pKvmCpu = &pVM->apCpusR3[idCpu]->gim.s.u.KvmCpu;
+        pKvmCpu->u64PvEoiMsr = 0;
+        if (uKvmSavedStatVersion >= GIM_KVM_SAVED_STATE_VERSION)
+        {
+            rc = SSMR3GetU64(pSSM, &pKvmCpu->u64PvEoiMsr);
+            AssertRCReturn(rc, rc);
+        }
+        pKvmCpu->GCPhysPvEoi = pKvmCpu->u64PvEoiMsr & MSR_GIM_KVM_EOI_ENABLE_BIT
+                             ? MSR_GIM_KVM_EOI_GUEST_GPA(pKvmCpu->u64PvEoiMsr) : NIL_RTGCPHYS;
+        pKvmCpu->fPvEoiArmed = false;
+    }
+    if (uKvmSavedStatVersion >= GIM_KVM_SAVED_STATE_VERSION)
+    {
+        uint32_t uTerminator = 0;
+        rc = SSMR3GetU32(pSSM, &uTerminator);
+        AssertRCReturn(rc, rc);
+        AssertLogRelMsgReturn(uTerminator == UINT32_MAX, ("%#x\n", uTerminator), VERR_SSM_DATA_UNIT_FORMAT_CHANGED);
+    }
 
     return VINF_SUCCESS;
 }

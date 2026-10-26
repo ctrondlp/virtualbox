@@ -133,6 +133,17 @@ AssertCompile(MSR_GIM_KVM_RANGE1_FIRST <= MSR_GIM_KVM_RANGE1_LAST);
 #define MSR_GIM_KVM_WALL_CLOCK_GUEST_GPA(a)        (a)
 /** @} */
 
+/** @name KVM MSR - Paravirtualized EOI (MSR_GIM_KVM_EOI).
+ * @{
+ */
+/** The PV EOI enable bit. */
+#define MSR_GIM_KVM_EOI_ENABLE_BIT                 RT_BIT_64(0)
+/** Reserved, must be zero. */
+#define MSR_GIM_KVM_EOI_RSVD_BIT                   RT_BIT_64(1)
+/** Guest-physical address of the "no EOI needed" flag (4-byte aligned). */
+#define MSR_GIM_KVM_EOI_GUEST_GPA(a)               ((a) & ~UINT64_C(3))
+/** @} */
+
 
 /** @name KVM Hypercall operations.
  *  @{ */
@@ -244,6 +255,22 @@ typedef struct GIMKVMCPU
     uint64_t                    uVirtNanoTS;
     /** The flags of the system-time struct. */
     uint8_t                     fSystemTimeFlags;
+    /** Whether a paravirtualized EOI is armed for the current guest run. */
+    bool                        fPvEoiArmed;
+    /** The in-service vector the armed paravirtualized EOI is for. */
+    uint8_t                     uPvEoiVector;
+    /** Alignment padding. */
+    uint8_t                     abPadding[5];
+    /** Paravirtualized EOI MSR (MSR_GIM_KVM_EOI). */
+    uint64_t                    u64PvEoiMsr;
+    /** The guest-physical address of the paravirtualized EOI flag byte. */
+    RTGCPHYS                    GCPhysPvEoi;
+    /** Paravirtualized EOIs armed. */
+    STAMCOUNTER                 StatPvEoiArmed;
+    /** Paravirtualized EOIs the guest consumed (EOI done on its behalf). */
+    STAMCOUNTER                 StatPvEoiConsumed;
+    /** Paravirtualized EOIs taken back after the run (guest hadn't EOI'd yet). */
+    STAMCOUNTER                 StatPvEoiTakenBack;
 } GIMKVMCPU;
 /** Pointer to per-VCPU GIM KVM instance data. */
 typedef GIMKVMCPU *PGIMKVMCPU;
@@ -256,6 +283,7 @@ RT_C_DECLS_BEGIN
 #ifdef IN_RING3
 VMMR3_INT_DECL(int)             gimR3KvmInit(PVM pVM);
 VMMR3_INT_DECL(int)             gimR3KvmInitCompleted(PVM pVM);
+VMMR3_INT_DECL(void)            gimR3KvmResetCpu(PVM pVM, PVMCPU pVCpu);
 VMMR3_INT_DECL(int)             gimR3KvmTerm(PVM pVM);
 VMMR3_INT_DECL(void)            gimR3KvmRelocate(PVM pVM, RTGCINTPTR offDelta);
 VMMR3_INT_DECL(void)            gimR3KvmReset(PVM pVM);
@@ -274,6 +302,8 @@ VMM_INT_DECL(VBOXSTRICTRC)      gimKvmHypercall(PVMCPUCC pVCpu, PCPUMCTX pCtx);
 VMM_INT_DECL(VBOXSTRICTRC)      gimKvmReadMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUMMSRRANGE pRange, uint64_t *puValue);
 VMM_INT_DECL(VBOXSTRICTRC)      gimKvmWriteMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUMMSRRANGE pRange, uint64_t uRawValue);
 #endif
+VMM_INT_DECL(void)              gimKvmPvEoiArm(PVMCPUCC pVCpu);
+VMM_INT_DECL(void)              gimKvmPvEoiDisarm(PVMCPUCC pVCpu);
 VMM_INT_DECL(bool)              gimKvmShouldTrapXcptUD(PVM pVM);
 VMM_INT_DECL(VBOXSTRICTRC)      gimKvmXcptUD(PVMCC pVM, PVMCPUCC pVCpu, PCPUMCTX pCtx, PDISSTATE pDis, uint8_t *pcbInstr);
 VMM_INT_DECL(VBOXSTRICTRC)      gimKvmHypercallEx(PVMCPUCC pVCpu, PCPUMCTX pCtx, unsigned uDisOpcode, uint8_t cbInstr);

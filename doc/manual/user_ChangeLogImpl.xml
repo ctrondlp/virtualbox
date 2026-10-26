@@ -94,6 +94,13 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Linux guests using the KVM paravirtualization provider can
+          skip the APIC end-of-interrupt write for most interrupts when using
+          Windows Hyper-V as the virtualization engine, which makes
+          interrupt-heavy workloads faster (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>

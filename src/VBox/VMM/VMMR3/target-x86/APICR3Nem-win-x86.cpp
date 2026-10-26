@@ -1837,6 +1837,7 @@ const PDMAPICBACKEND g_ApicNemBackend =
     /* .pfnGetHighestIrr = */           apicR3HvGetHighestIrr,
     /* .pfnQueryEoiExitBitmap = */      apicR3HvQueryEoiExitBitmap,
     /* .pfnIoApicRteChanged = */        apicR3HvIoApicRteChanged,
+    /* .pfnGetPvEoiVector = */          NULL,
 };
 
 #endif /* !VBOX_DEVICE_STRUCT_TESTCASE */
