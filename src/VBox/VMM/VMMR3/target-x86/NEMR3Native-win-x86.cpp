@@ -4945,8 +4945,8 @@ nemR3WinHandleExitCpuId(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const
  * Hyper-V only lets us see MSRs it doesn't handle itself, and most of those
  * are implemented by CPUM without touching the guest context.  However, the
  * MSRs backed by the guest context (CPUMCTX_EXTRN_ALL_MSRS, FS/GS base) and the
- * ones which may involve CR0, CR3 and CR4 (EFER, the P6 CRx aliases) need the
- * state imported so it's consistent and gets written back afterwards.
+ * ones which involve the control registers (EFER, the P6 CR0..CR4 aliases) need
+ * the state imported so it's consistent and gets written back afterwards.
  *
  * @returns CPUMCTX_EXTRN_XXX mask.
  * @param   idMsr           The MSR being accessed.
@@ -4960,7 +4960,7 @@ DECLINLINE(uint64_t) nemR3WinMsrExitImportMask(uint32_t idMsr)
         || idMsr - UINT32_C(0x00000200) <= UINT32_C(0xff)                                /* MTRRs, PAT */
         || idMsr - UINT32_C(0x00002000) <= UINT32_C(0x04)                                /* P6_CR0..P6_CR4 */
         || idMsr - MSR_K6_EFER          <= MSR_K8_TSC_AUX - MSR_K6_EFER)                 /* EFER..TSC_AUX */
-        return CPUMCTX_EXTRN_ALL_MSRS | CPUMCTX_EXTRN_CR0 | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4
+        return CPUMCTX_EXTRN_ALL_MSRS | CPUMCTX_EXTRN_CR0 | CPUMCTX_EXTRN_CR2 | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4
              | CPUMCTX_EXTRN_FS | CPUMCTX_EXTRN_GS;
     return 0;
 }
