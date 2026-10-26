@@ -105,6 +105,13 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Virtual CPUs that halt only briefly, for example while
+          waiting for another virtual CPU, are woken up faster when the
+          support driver is not used, such as on Windows hosts using Hyper-V
+          as the virtualization engine (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>VMM: Fixed guest timers falling far behind on x86 Windows hosts
           using Hyper-V when the guest keeps a virtual CPU busy, which could
           make the guest extremely slow or seem to hang (github:gh-726)</para>
