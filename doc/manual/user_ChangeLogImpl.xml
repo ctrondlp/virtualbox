@@ -94,6 +94,13 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Virtual CPUs that halt only briefly, for example while
+          waiting for another virtual CPU, are woken up faster when the
+          support driver is not used, such as on Windows hosts using Hyper-V
+          as the virtualization engine (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
