@@ -4994,6 +4994,17 @@ static VBOXSTRICTRC nemR3WinHandleExitMsr(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_
                                                 ? EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_X86_MSR_WRITE)
                                                 : EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_X86_MSR_READ),
                                                 pExit->VpContext.Rip + pExit->VpContext.Cs.Base, ASMReadTSC());
+        /*
+         * Keep x2APIC EOI writes out of the exit history's hands.  Windows guests
+         * write it at the end of every interrupt handler, and having IEM execute
+         * the following instructions costs more than the exits it saves, since
+         * that needs the whole guest state imported and written back, while the
+         * EOI itself needs no guest state at all.  (EM handles ignored records.)
+         */
+        if (   pExitRec
+            && pExit->MsrAccess.MsrNumber == MSR_IA32_X2APIC_EOI
+            && pExit->MsrAccess.AccessInfo.IsWrite)
+            pExitRec = NULL;
         nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
         rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu,
                                                        !pExitRec
