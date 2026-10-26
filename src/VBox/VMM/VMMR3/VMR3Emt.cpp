@@ -45,10 +45,18 @@
 #include <iprt/assert.h>
 #include <iprt/asm.h>
 #include <iprt/asm-math.h>
+#include <iprt/mp.h>
 #include <iprt/semaphore.h>
 #include <iprt/string.h>
 #include <iprt/thread.h>
 #include <iprt/time.h>
+
+
+/*********************************************************************************************************************************
+*   Defined Constants And Macros                                                                                                 *
+*********************************************************************************************************************************/
+/** The default maximum halt poll time (nano secs), see vmR3HaltMethod1Poll. */
+#define VM_HALT_POLL_MAX_NS_DEFAULT     UINT32_C(50000)
 
 
 /*********************************************************************************************************************************
@@ -480,6 +488,19 @@ static int vmR3HaltMethod12ReadConfigU(PUVM pUVM)
 
     pUVM->vm.s.Halt.Method12.cSemWaitNsMin          = RTSemEventGetResolution();
 
+    /* Halt polling, see vmR3HaltMethod1Poll.  Only on hosts with plenty of CPUs
+       to spare (at least two per virtual CPU): with fewer, a polling EMT can keep
+       the thread that would wake it (another EMT, an I/O thread) off a CPU.  Not
+       used for ARM guests, the virtual timer handling in the halt loop hasn't
+       been adjusted for it. */
+#ifdef VBOX_VMM_TARGET_ARMV8
+    pUVM->vm.s.Halt.Method12.cNsPollMaxCfg          = 0;
+#else
+    pUVM->vm.s.Halt.Method12.cNsPollMaxCfg          = (uint64_t)pUVM->cCpus * 2 <= RTMpGetOnlineCount()
+                                                    ? VM_HALT_POLL_MAX_NS_DEFAULT : 0;
+#endif
+    pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg    = 10000;
+
     /*
      * Query overrides.
      *
@@ -500,6 +521,15 @@ static int vmR3HaltMethod12ReadConfigU(PUVM pUVM)
             pUVM->vm.s.Halt.Method12.u32StartSpinningCfg = u32;
         if (RT_SUCCESS(CFGMR3QueryU32(pCfg, "StopSpinning", &u32)))
             pUVM->vm.s.Halt.Method12.u32StopSpinningCfg = u32;
+        /** @cfgm{/VMM/HaltedMethod1/PollMax, uint32_t, nanoseconds, 0, 1000000, 50000}
+         * The longest a halted EMT polls for a wake-up before it blocks; 0
+         * disables halt polling. */
+        if (RT_SUCCESS(CFGMR3QueryU32(pCfg, "PollMax", &u32)))
+            pUVM->vm.s.Halt.Method12.cNsPollMaxCfg = RT_MIN(u32, RT_NS_1MS);
+        /** @cfgm{/VMM/HaltedMethod1/PollGrowStart, uint32_t, nanoseconds, 1000, 1000000, 10000}
+         * The poll time to start with after it shrank to zero. */
+        if (RT_SUCCESS(CFGMR3QueryU32(pCfg, "PollGrowStart", &u32)))
+            pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg = RT_MIN(RT_MAX(u32, RT_NS_1US), RT_NS_1MS);
         LogRel(("VMEmt: HaltedMethod1 config: %d/%d/%d/%d/%d\n",
                 pUVM->vm.s.Halt.Method12.u32LagBlockIntervalDivisorCfg,
                 pUVM->vm.s.Halt.Method12.u32MinBlockIntervalCfg,
@@ -507,8 +537,102 @@ static int vmR3HaltMethod12ReadConfigU(PUVM pUVM)
                 pUVM->vm.s.Halt.Method12.u32StartSpinningCfg,
                 pUVM->vm.s.Halt.Method12.u32StopSpinningCfg));
     }
+    LogRel(("VMEmt: Halt polling: max %u ns, grow start %u ns\n",
+            pUVM->vm.s.Halt.Method12.cNsPollMaxCfg, pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg));
 
     return VINF_SUCCESS;
+}
+
+
+/**
+ * Polls for a wake-up of a halted EMT before it blocks (halt polling).
+ *
+ * Blocking on the event semaphore and being woken up again takes the host
+ * scheduler tens of microseconds.  When the guest halts a virtual CPU only
+ * briefly, say while waiting for an IPI reply from another virtual CPU, polling
+ * for the wake-up for a short while is a lot cheaper.  vmR3HaltMethod1AdjustPoll
+ * adjusts the poll time to how long the halts take, so a virtual CPU that halts
+ * for long (an idle guest) doesn't poll at all.
+ *
+ * While polling, fWait is clear, so the waker sets the force flag without
+ * signalling the semaphore (vmR3DefaultNotifyCpuFF).  Setting fWait again and
+ * then checking the force flags once more closes the race with a waker that
+ * saw fWait clear: both sides write their flag before reading the other's
+ * (full barriers), so at least one of them sees the other.
+ *
+ * @returns true if a wake-up condition is pending, false if the poll timed out.
+ * @param   pUVCpu      Pointer to the user mode per CPU VM structure.
+ * @param   fMask       The VMCPU force flags that end the halt.
+ * @param   cNsPoll     How long to poll for.
+ */
+static bool vmR3HaltMethod1Poll(PUVMCPU pUVCpu, uint64_t fMask, uint64_t cNsPoll)
+{
+    PVM    pVM   = pUVCpu->pVM;
+    PVMCPU pVCpu = pUVCpu->pVCpu;
+
+    STAM_REL_PROFILE_START(&pUVCpu->vm.s.StatHaltPoll, a);
+    ASMAtomicWriteBool(&pUVCpu->vm.s.fWait, false);
+
+    bool           fWakeUp = false;
+    uint64_t const nsStart = RTTimeNanoTS();
+    for (uint32_t cLoops = 1;; cLoops++)
+    {
+        if (   VM_FF_IS_ANY_SET(pVM, VM_FF_EXTERNAL_HALTED_MASK)
+            || VMCPU_FF_IS_ANY_SET(pVCpu, fMask))
+        {
+            fWakeUp = true;
+            break;
+        }
+        ASMNopPause();
+        if (   !(cLoops & 7)
+            && RTTimeNanoTS() - nsStart >= cNsPoll)
+            break;
+    }
+
+    ASMAtomicWriteBool(&pUVCpu->vm.s.fWait, true);
+    if (   !fWakeUp
+        && (   VM_FF_IS_ANY_SET(pVM, VM_FF_EXTERNAL_HALTED_MASK)
+            || VMCPU_FF_IS_ANY_SET(pVCpu, fMask)))
+        fWakeUp = true;
+
+    STAM_REL_PROFILE_STOP(&pUVCpu->vm.s.StatHaltPoll, a);
+    if (fWakeUp)
+        STAM_REL_COUNTER_INC(&pUVCpu->vm.s.StatHaltPollHits);
+    else
+        STAM_REL_COUNTER_INC(&pUVCpu->vm.s.StatHaltPollMisses);
+    return fWakeUp;
+}
+
+
+/**
+ * Adjusts the halt poll time after a halt, like KVM's halt_poll_ns.
+ *
+ * A halt that took longer than the maximum poll time couldn't have been caught
+ * by polling, so the poll time is halved (and dropped once it is below the grow
+ * start).  A halt that took longer than the current poll time but less than the
+ * maximum would have been caught by a longer poll, so the poll time is doubled.
+ *
+ * @param   pUVM        Pointer to the user mode VM structure.
+ * @param   pUVCpu      Pointer to the user mode per CPU VM structure.
+ * @param   cNsHalt     How long the halt took, polling included.
+ */
+static void vmR3HaltMethod1AdjustPoll(PUVM pUVM, PUVMCPU pUVCpu, uint64_t cNsHalt)
+{
+    uint32_t const cNsMax  = pUVM->vm.s.Halt.Method12.cNsPollMaxCfg;
+    uint32_t       cNsPoll = pUVCpu->vm.s.Halt.Method12.cNsPoll;
+    if (cNsHalt <= cNsPoll)
+        return;
+    if (cNsHalt > cNsMax)
+    {
+        cNsPoll /= 2;
+        if (cNsPoll < pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg)
+            cNsPoll = 0;
+    }
+    else if (cNsPoll)
+        cNsPoll = RT_MIN(cNsPoll * 2, cNsMax);
+    else
+        cNsPoll = RT_MIN(pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg, cNsMax);
+    pUVCpu->vm.s.Halt.Method12.cNsPoll = cNsPoll;
 }
 
 
@@ -581,6 +705,10 @@ static DECLCALLBACK(int) vmR3HaltMethod1Halt(PUVMCPU pUVCpu, const uint64_t fMas
     const bool fVTimerActive     = cNsVTimerActivate != UINT64_MAX;
 #endif
 
+    /* Halt polling (once per halt, not while catching up). */
+    bool const fPollEnabled = pUVM->vm.s.Halt.Method12.cNsPollMaxCfg != 0 && !fSpinning;
+    bool       fPolled      = !fPollEnabled;
+
     /*
      * Halt loop.
      */
@@ -637,6 +765,23 @@ static DECLCALLBACK(int) vmR3HaltMethod1Halt(PUVMCPU pUVCpu, const uint64_t fMas
             &&  u64NanoTS >= 250000) /* 0.250 ms */
 #endif
         {
+            /*
+             * Poll for a wake-up first, once per halt and never past the next
+             * timer event.  If nothing came, redo the timers and the estimate
+             * (the poll took a while) and then block.
+             */
+            if (!fPolled)
+            {
+                fPolled = true;
+                uint32_t const cNsPoll = pUVCpu->vm.s.Halt.Method12.cNsPoll;
+                if (cNsPoll)
+                {
+                    if (vmR3HaltMethod1Poll(pUVCpu, fMask, RT_MIN(cNsPoll, u64NanoTS)))
+                        break;
+                    continue;
+                }
+            }
+
             const uint64_t Start = pUVCpu->vm.s.Halt.Method12.u64LastBlockTS = RTTimeNanoTS();
             VMMR3YieldStop(pVM);
 
@@ -696,6 +841,9 @@ static DECLCALLBACK(int) vmR3HaltMethod1Halt(PUVMCPU pUVCpu, const uint64_t fMas
         }
     }
     //if (fSpinning) RTLogRelPrintf("spun for %RU64 ns %u loops; lag=%RU64 pct=%d\n", RTTimeNanoTS() - u64Now, cLoops, TMVirtualSyncGetLag(pVM), u32CatchUpPct);
+
+    if (fPollEnabled)
+        vmR3HaltMethod1AdjustPoll(pUVM, pUVCpu, RTTimeNanoTS() - u64Now);
 
 #ifdef VBOX_VMM_TARGET_ARMV8
     if (fVTimerActive)

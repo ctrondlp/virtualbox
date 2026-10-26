@@ -828,6 +828,12 @@ static int vmR3InitRing3(PVM pVM, PUVM pUVM)
         AssertRC(rc);
         rc = STAMR3RegisterF(pVM, &pUVM->aCpus[idCpu].vm.s.StatHaltTimers,          STAMTYPE_PROFILE, STAMVISIBILITY_ALWAYS, STAMUNIT_NS_PER_CALL, "Profiling halted state timer tasks.", "/PROF/CPU%d/VM/Halt/Timers", idCpu);
         AssertRC(rc);
+        rc = STAMR3RegisterF(pVM, &pUVM->aCpus[idCpu].vm.s.StatHaltPoll,            STAMTYPE_PROFILE, STAMVISIBILITY_ALWAYS, STAMUNIT_NS_PER_CALL, "Profiling halt polling.",            "/PROF/CPU%d/VM/Halt/Poll", idCpu);
+        AssertRC(rc);
+        rc = STAMR3RegisterF(pVM, &pUVM->aCpus[idCpu].vm.s.StatHaltPollHits,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES,  "Halt polls that saw the wake-up.",   "/PROF/CPU%d/VM/Halt/PollHits", idCpu);
+        AssertRC(rc);
+        rc = STAMR3RegisterF(pVM, &pUVM->aCpus[idCpu].vm.s.StatHaltPollMisses,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES,  "Halt polls that timed out.",         "/PROF/CPU%d/VM/Halt/PollMisses", idCpu);
+        AssertRC(rc);
     }
 
     STAM_REG(pVM, &pUVM->vm.s.StatReqAllocNew,   STAMTYPE_COUNTER,     "/VM/Req/AllocNew",       STAMUNIT_OCCURENCES,        "Number of VMR3ReqAlloc returning a new packet.");
