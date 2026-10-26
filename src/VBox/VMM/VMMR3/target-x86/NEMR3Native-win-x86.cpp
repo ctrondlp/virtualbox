@@ -97,11 +97,13 @@ HRESULT WINAPI WHvQueryGpaRangeDirtyBitmap(WHV_PARTITION_HANDLE, WHV_GUEST_PHYSI
 /** VID I/O control detection: Fake timeout input. */
 #define NEM_WIN_IOCTL_DETECTOR_FAKE_TIMEOUT                     UINT32_C(0x00080286)
 
-/** Timer deadlines further away than this aren't worth a timer kick, the TM
- * timer (/TM/TimerMillies) takes care of them.  TM gives EMTs other than the
- * timer EMT 500 ms. */
+/** The furthest ahead the timer kick is armed.  Timer deadlines further away get
+ * a kick at this distance as a backstop, see nemR3WinTimerKickArm. */
 #define NEM_WIN_TIMER_KICK_MAX_NS                               (RT_NS_1MS * 250)
-/** A new deadline this close to the armed one doesn't re-arm the timer kick. */
+/** The deadline TM gives EMTs other than the timer EMT (tmTimerPollReturnOtherCpu);
+ * only the timer EMT gets closer ones. */
+#define NEM_WIN_TIMER_KICK_OTHER_EMT_NS                         (RT_NS_1MS * 500)
+/** A pending timer kick firing at most this long after a new deadline isn't re-armed. */
 #define NEM_WIN_TIMER_KICK_SLACK_NS                             (RT_NS_1US * 25)
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION /* Windows 10 1803 (17134) and later. */
 # define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION                  UINT32_C(0x00000002)
@@ -2496,6 +2498,7 @@ static DECLCALLBACK(int) nemR3WinTimerKickThread(RTTHREAD hThreadSelf, void *pvU
            again, while a cancel outside a run seems to be kept for the next run
            and would only cost an extra exit. */
         VMCPUID const    idCpu    = ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick);
+        AssertContinue(idCpu < pVM->cCpus);
         VMCPUSTATE const enmState = VMCPU_GET_STATE(pVM->apCpusR3[idCpu]);
         if (   enmState == VMCPUSTATE_STARTED_EXEC_NEM
             || enmState == VMCPUSTATE_STARTED_EXEC_NEM_WAIT)
@@ -2537,6 +2540,7 @@ static void nemR3WinTimerKickInit(PVM pVM)
 
     pVM->nem.s.hTimerKick        = hTimer;
     pVM->nem.s.hTimerKickTermEvt = hEvt;
+    pVM->nem.s.idCpuTimerKick    = NIL_VMCPUID; /* Until the timer EMT arms it (nemR3WinTimerKickArm). */
     int rc = RTThreadCreate(&pVM->nem.s.hTimerKickThread, nemR3WinTimerKickThread, pVM, 0 /*cbStack*/,
                             RTTHREADTYPE_TIMER, RTTHREADFLAGS_WAITABLE, "NEMTmrKick");
     if (RT_SUCCESS(rc))
@@ -5399,9 +5403,14 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
  * when it fires.
  *
  * There is one timer per VM: TM gives EMTs other than the timer EMT a deadline
- * 500 ms away, beyond NEM_WIN_TIMER_KICK_MAX_NS, so only the timer EMT arms it.
- * A timer another EMT sets while the timer EMT is already running the guest is
- * still only noticed at the timer EMT's next exit.
+ * NEM_WIN_TIMER_KICK_OTHER_EMT_NS away and only the timer EMT closer ones, so
+ * only the timer EMT arms it, and that also identifies it (idCpuTimerKick).
+ * Deadlines further away than NEM_WIN_TIMER_KICK_MAX_NS get a kick at that
+ * distance as a backstop, also on the timer EMT only: once another EMT's timer
+ * poll has set the timer EMT's VMCPU_FF_TIMER, the TM timer stops poking it, so
+ * nothing else would get a busy timer EMT out when that timer comes due.  A
+ * timer another EMT sets while the timer EMT is already running the guest is
+ * noticed at the timer EMT's next exit, at the latest by the next kick.
  *
  * @param   pVM             The cross context VM structure.
  * @param   pVCpu           The cross context per CPU structure of the calling EMT.
@@ -5411,14 +5420,22 @@ static VBOXSTRICTRC nemHCWinHandleInterruptFF(PVMCC pVM, PVMCPUCC pVCpu, uint8_t
  */
 DECLINLINE(void) nemR3WinTimerKickArm(PVMCC pVM, PVMCPUCC pVCpu, uint64_t nsDeadline, uint64_t cNsDelta)
 {
-    if (cNsDelta >= NEM_WIN_TIMER_KICK_MAX_NS)
-        return;
+    if (cNsDelta > NEM_WIN_TIMER_KICK_MAX_NS)
+    {
+        /* Not the timer EMT, or not identified yet? */
+        if (   cNsDelta >= NEM_WIN_TIMER_KICK_OTHER_EMT_NS
+            && ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick) != pVCpu->idCpu)
+            return;
+        /* Backstop kick. */
+        nsDeadline -= cNsDelta - NEM_WIN_TIMER_KICK_MAX_NS;
+        cNsDelta    = NEM_WIN_TIMER_KICK_MAX_NS;
+    }
 
-    /* Skip it if already armed for this EMT and about the same deadline, and
-       still pending (the kick thread zeroes nsTimerKickArmed when it fires). */
+    /* Skip it if a kick is already pending for this EMT that fires no later than
+       the deadline (the kick thread zeroes nsTimerKickArmed when it fires).  An
+       earlier kick just means one more exit, after which we arm it again. */
     uint64_t const nsArmed = ASMAtomicReadU64(&pVM->nem.s.nsTimerKickArmed);
-    if (   nsArmed + NEM_WIN_TIMER_KICK_SLACK_NS >= nsDeadline
-        && nsArmed <= nsDeadline + NEM_WIN_TIMER_KICK_SLACK_NS
+    if (   nsArmed <= nsDeadline + NEM_WIN_TIMER_KICK_SLACK_NS
         && nsArmed > nsDeadline - cNsDelta /* now */
         && ASMAtomicReadU32(&pVM->nem.s.idCpuTimerKick) == pVCpu->idCpu)
         return;
@@ -5579,11 +5596,11 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
          *
          * WHvRunVirtualProcessor has no timeout.  On the timer EMT the timer
          * kick (nemR3WinTimerKickArm) gets us out when the next timer event is
-         * due, if that's less than NEM_WIN_TIMER_KICK_MAX_NS away.
+         * due, at least every NEM_WIN_TIMER_KICK_MAX_NS.
          */
         /** @todo See if we cannot optimize this TMTimerPollGIP by only redoing
          *        the whole polling job when timers have changed... */
-        uint64_t       cNsNextTimerEvt;
+        uint64_t       cNsNextTimerEvt = UINT64_MAX;
         uint64_t const nsNextTimerEvt = TMTimerPollGIP(pVM, pVCpu, &cNsNextTimerEvt);
         if (   !VM_FF_IS_ANY_SET(pVM, VM_FF_EMT_RENDEZVOUS | VM_FF_TM_VIRTUAL_SYNC)
             && !VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_HM_TO_R3_MASK))
