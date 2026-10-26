@@ -124,6 +124,13 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VMM: Improved the performance of interrupt heavy guests on x86
+          Windows hosts using Hyper-V by speeding up guest accesses to model
+          specific registers handled by VirtualBox, such as the local APIC
+          accesses of Windows guests (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
