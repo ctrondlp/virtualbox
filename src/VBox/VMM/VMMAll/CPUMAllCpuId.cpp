@@ -2016,11 +2016,12 @@ VMMDECL(int) CPUMCpuIdExplodeFeaturesX86(PCCPUMCPUIDLEAF paLeaves, uint32_t cLea
                 AssertLogRelMsgFailedStmt(("Expected leaf eax=0xd/ecx=0 with the XSAVE/XRSTOR feature!\n"),
                                           pFeatures->fXSaveRstor = 0);
 
-            /* XSAVE extensions. */
+            /* XSAVE extensions.  Same sub-leaf check as for leaf 7 above: a few
+               database profiles have leaf 0xd without a sub-leaf mask. */
             if (pFeatures->fXSaveRstor)
             {
                 PCCPUMCPUIDLEAF const pXStateLeaf1 = cpumCpuIdFindLeafEx(paLeaves, cLeaves, 13, 1);
-                if (pXStateLeaf1)
+                if (pXStateLeaf1 && pXStateLeaf1->uSubLeaf == 1)
                 {
                     pFeatures->fXSaveOpt    = RT_BOOL(pXStateLeaf1->uEax & X86_CPUID_XSAVE_1_EAX_XSAVEOPT);
                     pFeatures->fXSaveC      = RT_BOOL(pXStateLeaf1->uEax & X86_CPUID_XSAVE_1_EAX_XSAVEC);

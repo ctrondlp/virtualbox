@@ -717,8 +717,6 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 #define X86_CPUID_STEXT_FEATURE_ECX_MAWAU             UINT32_C(0x003e0000)
 /** ECX Bit 22 - RDPID - Supports the RDPID (read processor ID) instruction. */
 #define X86_CPUID_STEXT_FEATURE_ECX_RDPID             RT_BIT_32(22)
-/** ECX Bit 25 - CLDEMOTE - Supports the CLDEMOTE instruction. */
-#define X86_CPUID_STEXT_FEATURE_ECX_CLDEMOTE          RT_BIT_32(25)
 /** ECX Bit 30 - SGX_LC - Supports SGX launch configuration. */
 #define X86_CPUID_STEXT_FEATURE_ECX_SGX_LC            RT_BIT_32(30)
 

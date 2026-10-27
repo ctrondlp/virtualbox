@@ -5389,9 +5389,9 @@ static int cpumR3LoadCpuIdInner(PVM pVM, PSSMHANDLE pSSM, uint32_t uVersion, PCP
             {
                 if (fStrictCpuIdChecks && s_aChecks[i].fNew)
                     return SSMR3SetLoadError(pSSM, VERR_SSM_LOAD_CPUID_MISMATCH, RT_SRC_POS,
-                                             N_("%s is not supported by the host but has already exposed to the guest"),
+                                             N_("%s is not supported by the host but has already been exposed to the guest"),
                                              s_aChecks[i].pszName);
-                LogRel(("CPUM: %s is not supported by the host but has already exposed to the guest\n", s_aChecks[i].pszName));
+                LogRel(("CPUM: %s is not supported by the host but has already been exposed to the guest\n", s_aChecks[i].pszName));
             }
         }
     }
