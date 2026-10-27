@@ -1491,10 +1491,10 @@ static PCCPUMCPUIDLEAF cpumCpuIdFindLeafEx(PCCPUMCPUIDLEAF paLeaves, uint32_t cL
 {
     PCCPUMCPUIDLEAF pLeaf = cpumCpuIdFindLeaf(paLeaves, cLeaves, uLeaf);
     if (   !pLeaf
-        || pLeaf->uSubLeaf != (uSubLeaf & pLeaf->fSubLeafMask))
+        || pLeaf->uSubLeaf == (uSubLeaf & pLeaf->fSubLeafMask))
         return pLeaf;
 
-    /* Linear sub-leaf search. Lazy as usual. */
+    /* Linear sub-leaf search (cpumCpuIdFindLeaf returns the first sub-leaf). Lazy as usual. */
     cLeaves -= pLeaf - paLeaves;
     while (   cLeaves-- > 0
            && pLeaf->uLeaf == uLeaf)
@@ -1787,7 +1787,13 @@ VMMDECL(int) CPUMCpuIdExplodeFeaturesX86(PCCPUMCPUIDLEAF paLeaves, uint32_t cLea
             pFeatures->fRtm                 = RT_BOOL(pSxfLeaf0->uEbx & X86_CPUID_STEXT_FEATURE_EBX_RTM);
             pFeatures->fSha                 = RT_BOOL(pSxfLeaf0->uEbx & X86_CPUID_STEXT_FEATURE_EBX_SHA);
             pFeatures->fAdx                 = RT_BOOL(pSxfLeaf0->uEbx & X86_CPUID_STEXT_FEATURE_EBX_ADX);
+            pFeatures->fErms                = RT_BOOL(pSxfLeaf0->uEbx & X86_CPUID_STEXT_FEATURE_EBX_ERMS);
 
+            pFeatures->fGfni                = RT_BOOL(pSxfLeaf0->uEcx & X86_CPUID_STEXT_FEATURE_ECX_GFNI);
+            pFeatures->fVaes                = RT_BOOL(pSxfLeaf0->uEcx & X86_CPUID_STEXT_FEATURE_ECX_VAES);
+            pFeatures->fVpclmulqdq          = RT_BOOL(pSxfLeaf0->uEcx & X86_CPUID_STEXT_FEATURE_ECX_VPCLMULQDQ);
+
+            pFeatures->fFsrm                = RT_BOOL(pSxfLeaf0->uEdx & X86_CPUID_STEXT_FEATURE_EDX_FSRM);
             pFeatures->fIbpb                = RT_BOOL(pSxfLeaf0->uEdx & X86_CPUID_STEXT_FEATURE_EDX_IBRS_IBPB);
             pFeatures->fIbrs                = pFeatures->fIbpb;
             pFeatures->fStibp               = RT_BOOL(pSxfLeaf0->uEdx & X86_CPUID_STEXT_FEATURE_EDX_STIBP);
@@ -1801,8 +1807,18 @@ VMMDECL(int) CPUMCpuIdExplodeFeaturesX86(PCCPUMCPUIDLEAF paLeaves, uint32_t cLea
                                            && (   pFeatures->enmCpuVendor == CPUMCPUVENDOR_AMD
                                                || pFeatures->enmCpuVendor == CPUMCPUVENDOR_HYGON);
         }
+        /* Note! cpumCpuIdFindLeafEx returns sub-leaf 0 for leaves without a sub-leaf
+                 mask (some database profiles), so check that we got the right one. */
+        PCCPUMCPUIDLEAF const pSxfLeaf1 = cpumCpuIdFindLeafEx(paLeaves, cLeaves, 7, 1);
+        if (pSxfLeaf1 && pSxfLeaf1->uSubLeaf == 1)
+        {
+            pFeatures->fAvxVnni             = RT_BOOL(pSxfLeaf1->uEax & X86_CPUID_STEXT_FEATURE_1_EAX_AVX_VNNI);
+            pFeatures->fAvxIfma             = RT_BOOL(pSxfLeaf1->uEax & X86_CPUID_STEXT_FEATURE_1_EAX_AVX_IFMA);
+            pFeatures->fAvxVnniInt8         = RT_BOOL(pSxfLeaf1->uEdx & X86_CPUID_STEXT_FEATURE_1_EDX_AVX_VNNI_INT8);
+            pFeatures->fAvxNeConvert        = RT_BOOL(pSxfLeaf1->uEdx & X86_CPUID_STEXT_FEATURE_1_EDX_AVX_NE_CONVERT);
+        }
         PCCPUMCPUIDLEAF const pSxfLeaf2 = cpumCpuIdFindLeafEx(paLeaves, cLeaves, 7, 2);
-        if (pSxfLeaf2)
+        if (pSxfLeaf2 && pSxfLeaf2->uSubLeaf == 2)
         {
             pFeatures->fPsfd                = RT_BOOL(pSxfLeaf2->uEdx & X86_CPUID_STEXT_FEATURE_2_EDX_PSFD);
             pFeatures->fIpredCtrl           = RT_BOOL(pSxfLeaf2->uEdx & X86_CPUID_STEXT_FEATURE_2_EDX_IPRED_CTRL);
@@ -1952,6 +1968,19 @@ VMMDECL(int) CPUMCpuIdExplodeFeaturesX86(PCCPUMCPUIDLEAF paLeaves, uint32_t cLea
             else
                 AssertLogRelMsgFailedStmt(("Expected leaf eax=0xd/ecx=0 with the XSAVE/XRSTOR feature!\n"),
                                           pFeatures->fXSaveRstor = 0);
+
+            /* XSAVE extensions.  Same sub-leaf check as for leaf 7 above: a few
+               database profiles have leaf 0xd without a sub-leaf mask. */
+            if (pFeatures->fXSaveRstor)
+            {
+                PCCPUMCPUIDLEAF const pXStateLeaf1 = cpumCpuIdFindLeafEx(paLeaves, cLeaves, 13, 1);
+                if (pXStateLeaf1 && pXStateLeaf1->uSubLeaf == 1)
+                {
+                    pFeatures->fXSaveOpt    = RT_BOOL(pXStateLeaf1->uEax & X86_CPUID_XSAVE_1_EAX_XSAVEOPT);
+                    pFeatures->fXSaveC      = RT_BOOL(pXStateLeaf1->uEax & X86_CPUID_XSAVE_1_EAX_XSAVEC);
+                    pFeatures->fXGetBv1     = RT_BOOL(pXStateLeaf1->uEax & X86_CPUID_XSAVE_1_EAX_XGETBV1);
+                }
+            }
         }
 
         /*

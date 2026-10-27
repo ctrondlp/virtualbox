@@ -94,6 +94,21 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Guests can now use the GFNI, VAES, VPCLMULQDQ, AVX-VNNI,
+          AVX-VNNI-INT8, AVX-IFMA, AVX-NE-CONVERT, XSAVEOPT and XSAVEC
+          instruction set extensions and fast string operations when the host
+          supports them.
+          Saved states of VMs which were offered any of these can only be
+          restored on hosts supporting them (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
+        <para>VMM: Fixed detecting the host CPU features of CPUID leaf 7
+          sub-leaves 1 and 2, which could offer guests wrong speculation control
+          features</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>

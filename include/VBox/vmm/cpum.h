@@ -663,8 +663,30 @@ typedef struct CPUMFEATURESX86
     uint32_t        fArchMonUmonMitigSupport : 1;
     /** @} */
 
+    /** Supports GFNI instructions (GF2P8MULB, GF2P8AFFINEQB, GF2P8AFFINEINVQB). */
+    uint32_t        fGfni : 1;
+    /** Supports VAES (VEX encoded 256-bit AES instructions). */
+    uint32_t        fVaes : 1;
+    /** Supports VPCLMULQDQ (VEX encoded 256-bit PCLMULQDQ). */
+    uint32_t        fVpclmulqdq : 1;
+    /** Supports AVX-VNNI (VEX encoded VPDPBUSD and friends). */
+    uint32_t        fAvxVnni : 1;
+    /** Supports AVX-IFMA (VEX encoded VPMADD52LUQ/VPMADD52HUQ). */
+    uint32_t        fAvxIfma : 1;
+    /** Supports AVX-VNNI-INT8. */
+    uint32_t        fAvxVnniInt8 : 1;
+    /** Supports AVX-NE-CONVERT. */
+    uint32_t        fAvxNeConvert : 1;
+    /** Enhanced REP MOVSB/STOSB (ERMS). */
+    uint32_t        fErms : 1;
+    /** Fast short REP MOVSB (FSRM). */
+    uint32_t        fFsrm : 1;
+    /** Supports XSAVEC (compacted XSAVE format). */
+    uint32_t        fXSaveC : 1;
+    /** Supports XGETBV with ECX=1. */
+    uint32_t        fXGetBv1 : 1;
     /** Alignment padding / reserved for future use. */
-    uint32_t        fPadding0 : 16;
+    uint32_t        fPadding0 : 5;
     uint32_t        auPadding[3];
 
     /** @name SVM

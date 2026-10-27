@@ -275,6 +275,34 @@ static DBGFREGSUBFIELD const g_aLeaf7Sub0EdxSubFields[] =
 };
 
 
+/** CPUID(7,1).EAX field descriptions. */
+static DBGFREGSUBFIELD const g_aLeaf7Sub1EaxSubFields[] =
+{
+    DBGFREGSUBFIELD_RO("SHA512\0"           "Supports the SHA512 instructions",              0, 1, 0),
+    DBGFREGSUBFIELD_RO("SM3\0"              "Supports the SM3 instructions",                 1, 1, 0),
+    DBGFREGSUBFIELD_RO("SM4\0"              "Supports the SM4 instructions",                 2, 1, 0),
+    DBGFREGSUBFIELD_RO("AVX_VNNI\0"         "Supports the VEX encoded AVX-VNNI instructions", 4, 1, 0),
+    DBGFREGSUBFIELD_RO("AVX512_BF16\0"      "Supports the AVX512 BFLOAT16 instructions",     5, 1, 0),
+    DBGFREGSUBFIELD_RO("CMPCCXADD\0"        "Supports the CMPccXADD instructions",           7, 1, 0),
+    DBGFREGSUBFIELD_RO("ARCH_PERFMON_EXT\0" "Supports architectural perfmon leaf 0x23",      8, 1, 0),
+    DBGFREGSUBFIELD_RO("FZLRM\0"            "Fast zero-length REP MOVSB",                   10, 1, 0),
+    DBGFREGSUBFIELD_RO("FSRS\0"             "Fast short REP STOSB",                         11, 1, 0),
+    DBGFREGSUBFIELD_RO("FSRC\0"             "Fast short REP CMPSB and REP SCASB",           12, 1, 0),
+    DBGFREGSUBFIELD_RO("HRESET\0"           "Supports history reset",                       22, 1, 0),
+    DBGFREGSUBFIELD_RO("AVX_IFMA\0"         "Supports the VEX encoded AVX-IFMA instructions", 23, 1, 0),
+    DBGFREGSUBFIELD_RO("LAM\0"              "Supports linear address masking",              26, 1, 0),
+    DBGFREGSUBFIELD_TERMINATOR()
+};
+
+/** CPUID(7,1).EDX field descriptions. */
+static DBGFREGSUBFIELD const g_aLeaf7Sub1EdxSubFields[] =
+{
+    DBGFREGSUBFIELD_RO("AVX_VNNI_INT8\0"    "Supports the AVX-VNNI-INT8 instructions",       4, 1, 0),
+    DBGFREGSUBFIELD_RO("AVX_NE_CONVERT\0"   "Supports the AVX-NE-CONVERT instructions",      5, 1, 0),
+    DBGFREGSUBFIELD_RO("AVX_VNNI_INT16\0"   "Supports the AVX-VNNI-INT16 instructions",     10, 1, 0),
+    DBGFREGSUBFIELD_TERMINATOR()
+};
+
 /** CPUID(7,2).EBX field descriptions. */
 static DBGFREGSUBFIELD const g_aLeaf7Sub2EbxSubFields[] =
 {
@@ -606,7 +634,27 @@ static void cpumR3CpuIdInfoStdLeaf7Details(PCPUMCPUIDINFOSTATEX86 pThis, PCCPUMC
                 }
                 break;
 
-            /** @todo case 1   */
+            case 1:
+                if (pThis->Cmn.iVerbosity > 1)
+                {
+                    pHlp->pfnPrintf(pHlp, " Sub-leaf 1\n");
+                    pHlp->pfnPrintf(pHlp, "  Mnemonic - Description                                  = %s %s%s%s\n",
+                                    pThis->Cmn.pszLabel, pThis->Cmn.pszLabel2 ? "(" : "",
+                                    pThis->Cmn.pszLabel2 ? pThis->Cmn.pszLabel2 : "", pThis->Cmn.pszLabel2 ? ")" : "");
+                    cpumR3CpuIdInfoVerboseCompareListU32(&pThis->Cmn, pCurLeaf->uEax, pL2 ? pL2->uEax : 0, g_aLeaf7Sub1EaxSubFields, NULL, 56);
+                    cpumR3CpuIdInfoVerboseCompareListU32(&pThis->Cmn, pCurLeaf->uEdx, pL2 ? pL2->uEdx : 0, g_aLeaf7Sub1EdxSubFields, NULL, 56);
+                }
+                else
+                {
+                    if (pCurLeaf->uEax)
+                        cpumR3CpuIdInfoMnemonicListU32(&pThis->Cmn, pCurLeaf->uEax, g_aLeaf7Sub1EaxSubFields, "Ext Features #1 EAX", 36);
+                    if (pCurLeaf->uEdx)
+                        cpumR3CpuIdInfoMnemonicListU32(&pThis->Cmn, pCurLeaf->uEdx, g_aLeaf7Sub1EdxSubFields, "Ext Features #1 EDX", 36);
+                }
+                if (pCurLeaf->uEbx || pCurLeaf->uEcx)
+                    pHlp->pfnPrintf(pHlp, "Unknown extended feature sub-leaf #1 bits: EBX=%#x ECX=%#x\n",
+                                    pCurLeaf->uEbx, pCurLeaf->uEcx);
+                break;
 
             case 2:
                 if (pThis->Cmn.iVerbosity > 1)
