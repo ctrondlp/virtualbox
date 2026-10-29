@@ -135,6 +135,8 @@ Framebuffer::Framebuffer(Display *pDisplay, uint32_t uScreenId,
     mPtrVRAM        = NULL;
     mBitsPerPixel   = 0;
     mBytesPerLine   = 0;
+    mPendingPtrVRAM      = NULL;
+    mPendingBytesPerLine = 0;
     mfSameSizeRequested = false;
     mfUpdates = false;
 
@@ -376,14 +378,26 @@ int Framebuffer::NotifyUpdateImage(uint32_t aX,
     return notifyUpdate(aX, aY, aWidth, aHeight);
 }
 
+/**
+ * Notification about a guest screen resize (any thread).
+ *
+ * @param   pvVRAM      Where the guest screen is in VRAM, if the framebuffer should
+ *                      show it directly instead of a copy made by the VGA device
+ *                      (VBVA and VMSVGA screens).  NULL for the copy.
+ * @param   cBits       Bits per pixel of the screen in VRAM.
+ * @param   cbLine      Bytes per line of the screen in VRAM.
+ */
 int Framebuffer::notifyChange(uint32_t aScreenId,
                               uint32_t aXOrigin,
                               uint32_t aYOrigin,
                               uint32_t aWidth,
-                              uint32_t aHeight)
+                              uint32_t aHeight,
+                              void *pvVRAM /*= NULL*/,
+                              uint32_t cBits /*= 0*/,
+                              uint32_t cbLine /*= 0*/)
 {
-    LogRel(("NotifyChange: %d %d,%d %dx%d\n",
-            aScreenId, aXOrigin, aYOrigin, aWidth, aHeight));
+    LogRel(("NotifyChange: %d %d,%d %dx%d%s\n",
+            aScreenId, aXOrigin, aYOrigin, aWidth, aHeight, pvVRAM ? " (VRAM)" : ""));
 
     RTCritSectEnter(&mUpdateLock);
 
@@ -395,6 +409,18 @@ int Framebuffer::notifyChange(uint32_t aScreenId,
     mPtrVRAM     = NULL;
     mBitsPerPixel = 0;
     mBytesPerLine = 0;
+
+    /* Only the 32bpp layout the SDL surface uses can be shown directly. */
+    if (pvVRAM && cBits == 32 && cbLine >= aWidth * 4)
+    {
+        mPendingPtrVRAM      = (uint8_t *)pvVRAM;
+        mPendingBytesPerLine = cbLine;
+    }
+    else
+    {
+        mPendingPtrVRAM      = NULL;
+        mPendingBytesPerLine = 0;
+    }
 
     RTCritSectLeave(&mUpdateLock);
 
@@ -420,15 +446,45 @@ void Framebuffer::notifyChange(uint32_t aScreenId)
     /* Disable screen updates. */
     RTCritSectEnter(&mUpdateLock);
 
-    mPtrVRAM      = NULL;
+    mPtrVRAM      = mPendingPtrVRAM; /* Show the guest VRAM directly if possible, see resizeGuest(). */
     mBitsPerPixel = 32;
-    mBytesPerLine = mGuestXRes * 4;
+    mBytesPerLine = mPendingPtrVRAM ? mPendingBytesPerLine : mGuestXRes * 4;
+
+    /* Still holding the lock, so the surface gets the size that goes with the
+       pointer even if the guest changes the mode again meanwhile. */
+    resizeGuest();
+    void * const pvInUse = mPtrVRAM;
 
     RTCritSectLeave(&mUpdateLock);
 
-    resizeGuest();
+    /* Buffers of earlier modes the surface no longer shows. */
+    m_pDisplay->i_freeRetiredShadows(pvInUse);
 
     m_pDisplay->i_invalidateAndUpdateScreen(aScreenId);
+
+    /* Show the new surface (the guest VRAM, or what i_invalidateAndUpdateScreen copied). */
+    repaint();
+}
+
+
+/**
+ * Points the framebuffer at a new location of the guest screen in VRAM, after the
+ * guest flipped pages with an unchanged layout (any thread).  Only matters if
+ * the framebuffer shows the guest VRAM directly.
+ */
+void Framebuffer::setVRAMPointer(void *pvVRAM)
+{
+    RTCritSectEnter(&mUpdateLock);
+    if (mPendingPtrVRAM)
+        mPendingPtrVRAM = (uint8_t *)pvVRAM;
+    if (mPtrVRAM && mSurfVRAM)
+    {
+        /* The surface was made with SDL_CreateRGBSurfaceFrom (SDL_PREALLOC), so the
+           pixel pointer is ours to change. */
+        mPtrVRAM = (uint8_t *)pvVRAM;
+        mSurfVRAM->pixels = pvVRAM;
+    }
+    RTCritSectLeave(&mUpdateLock);
 }
 
 /**

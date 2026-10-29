@@ -94,7 +94,11 @@ public:
     uint8_t  *getPixelData();
 
     int      notifyUpdate(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-    int      notifyChange(uint32_t idScreen, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+    int      notifyChange(uint32_t idScreen, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                          void *pvVRAM = NULL, uint32_t cBits = 0, uint32_t cbLine = 0);
+    void     setVRAMPointer(void *pvVRAM);
+    /** Whether the framebuffer shows the guest VRAM directly (SDL thread only). */
+    bool     usesGuestVRAM() { return mPtrVRAM != NULL; }
 
     int      NotifyUpdateImage(uint32_t aX,
                                uint32_t aY,
@@ -182,6 +186,10 @@ private:
     uint8_t *mPtrVRAM;
     uint32_t mBitsPerPixel;
     uint32_t mBytesPerLine;
+    /** The guest VRAM layout from the last notifyChange, applied by the SDL thread
+     * (mPendingPtrVRAM is NULL if the screen can't be shown directly). */
+    uint8_t *mPendingPtrVRAM;
+    uint32_t mPendingBytesPerLine;
     bool mfSameSizeRequested;
     Display *m_pDisplay;
 };
