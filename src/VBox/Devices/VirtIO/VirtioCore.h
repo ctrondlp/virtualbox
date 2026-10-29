@@ -326,6 +326,7 @@ typedef enum VIRTIOVMSTATECHANGED
 #define VIRTIO_PCI_CAP_ISR_CFG                          3        /**< ISR PCI capability id                     */
 #define VIRTIO_PCI_CAP_DEVICE_CFG                       4        /**< Device-specific PCI cfg capability ID     */
 #define VIRTIO_PCI_CAP_PCI_CFG                          5        /**< PCI CFG capability ID                     */
+#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG                8        /**< Shared memory region (VirtIO 1.2, 4.1.4.7) */
 
 #define VIRTIO_PCI_CAP_ID_VENDOR                     0x09        /**< Vendor-specific PCI CFG Device Cap. ID    */
 
@@ -406,6 +407,20 @@ typedef struct virtio_pci_cfg_cap
     struct virtio_pci_cap pciCap;                                /**< Cap. defines the BAR/off/len to access    */
     uint8_t uPciCfgData[4];                                      /**< I/O buf for above cap.                    */
 } VIRTIO_PCI_CFG_CAP_T, *PVIRTIO_PCI_CFG_CAP_T;
+
+/**
+ * 64-bit capability, used for VIRTIO_PCI_CAP_SHARED_MEMORY_CFG (VirtIO 1.2, 4.1.4.7).
+ * The shared memory region ID ('id' in the spec) is pciCap.uPadding[0].
+ */
+typedef struct virtio_pci_cap64
+{
+    struct virtio_pci_cap pciCap;                                /**< uOffset/uLength hold the low 32 bits      */
+    uint32_t uOffsetHi;                                          /**< High 32 bits of the offset (L.E.)         */
+    uint32_t uLengthHi;                                          /**< High 32 bits of the length (L.E.)         */
+} VIRTIO_PCI_CAP64_T, *PVIRTIO_PCI_CAP64_T;
+
+/** Maximum number of shared memory regions a device can describe. */
+#define VIRTIO_SHM_REGIONS_MAX              2
 
 /**
  * PCI capability data locations (PCI CFG and MMIO).
@@ -578,6 +593,25 @@ typedef struct VIRTIOCORER3
     bool                                fGenUpdatePending;         /**< If set, update cfg gen after driver reads */
     char                                szMmioName[MAX_NAME];      /**< MMIO mapping name                         */
     char                                szPortIoName[MAX_NAME];    /**< PORT mapping name                         */
+
+    /** @name Shared memory regions (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG).
+     * Filled by the device before calling virtioCoreR3Init, which adds one
+     * capability per region (PCI transport only).  The device creates the BARs
+     * itself, after virtioCoreR3Init.
+     * @{ */
+    /** Number of valid entries in aShmRegions. */
+    uint8_t                             cShmRegions;
+    /** The regions. */
+    struct
+    {
+        uint8_t                         idShm;                     /**< Device specific shared memory region ID   */
+        uint8_t                         iBar;                      /**< BAR holding the region (0..5)             */
+        uint64_t                        off;                       /**< Offset of the region within the BAR       */
+        uint64_t                        cb;                        /**< Size of the region                        */
+    }                                   aShmRegions[VIRTIO_SHM_REGIONS_MAX];
+    /** Offsets of the capabilities in PCI config space, set by virtioCoreR3Init. */
+    uint8_t                             aoffShmCaps[VIRTIO_SHM_REGIONS_MAX];
+    /** @} */
 } VIRTIOCORER3;
 
 /**
@@ -785,6 +819,16 @@ DECLHIDDEN(void) virtioCorePrintDeviceFeatures(VIRTIOCORE *pVirtio, PCDBGFINFOHL
  * @param   pszArgs     Arguments to function
  */
 DECLHIDDEN(void) virtioCoreR3VirtqInfo(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, PVIRTIOCORE pVirtio, const char *pszArgs, int uVirtqNbr);
+
+/**
+ * Displays the shared memory regions (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) of the
+ * device, for use by device info handlers.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pHlp        Pointer to the debug info hlp struct
+ * @param   pVirtioCC   Pointer to the ring-3 virtio state.
+ */
+DECLHIDDEN(void) virtioCoreR3ShmRegionsInfo(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, PVIRTIOCORECC pVirtioCC);
 
 /**
  * Returns the number of avail bufs in the virtq.
