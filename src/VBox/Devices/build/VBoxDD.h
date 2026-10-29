@@ -101,6 +101,9 @@ extern const PDMDEVREG g_DeviceNVMe;
 #ifdef VBOX_WITH_VIRTIO_SCSI
 extern const PDMDEVREG g_DeviceVirtioSCSI;
 #endif
+#ifdef VBOX_WITH_VIRTIO_GPU
+extern const PDMDEVREG g_DeviceVirtioGpu;
+#endif
 #ifdef VBOX_WITH_EFI
 extern const PDMDEVREG g_DeviceEFI;
 #endif
