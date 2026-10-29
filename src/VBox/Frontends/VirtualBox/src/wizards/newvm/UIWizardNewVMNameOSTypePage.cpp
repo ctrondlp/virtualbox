@@ -114,6 +114,18 @@ static const osTypePattern gs_OSTypePattern[] =
     { QRegularExpression("((Sol.*10.*U[1-7])|(Sol.*10)).*32",                        QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X86("Solaris") }, // Solaris 10U7 (5/09) or earlier
     { QRegularExpression("((Sol.*11)|(Sol.*)).*64",                                  QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("Solaris11") },
 
+    /* macOS 10.14 and later: Must come before OS/2 ("macOS26" vs. "OS2") and the older Mac OS X patterns.
+     * The version must directly follow "macOS" / "Mac OS (X)", so that neither "macOS 10.11" is taken
+     * for macOS 11 nor e.g. "Debian machine 12" for macOS 12. */
+    { QRegularExpression( "(\\bmac[ _-]*os[ _-]*x?[ _-]*26(?![0-9]))|(Tahoe)",        QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS26") },
+    { QRegularExpression( "(\\bmac[ _-]*os[ _-]*x?[ _-]*15(?![0-9]))|(Sequoia)",      QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS15") },
+    { QRegularExpression( "(\\bmac[ _-]*os[ _-]*x?[ _-]*14(?![0-9]))|(Sonoma)",       QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS14") },
+    { QRegularExpression( "(\\bmac[ _-]*os[ _-]*x?[ _-]*13(?![0-9]))|(Ventura)",      QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS13") },
+    { QRegularExpression( "(\\bmac[ _-]*os[ _-]*x?[ _-]*12(?![0-9]))|(Monterey)",     QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS12") },
+    { QRegularExpression( "(\\bmac[ _-]*os[ _-]*x?[ _-]*11(?![0-9]))|(Big[ ]*Sur)",   QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS11") },
+    { QRegularExpression( "(mac.*10[.,]{0,1}15)|(os.*x.*10[.,]{0,1}15)|(Catalina)",   QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS1015") },
+    { QRegularExpression( "(mac.*10[.,]{0,1}14)|(os.*x.*10[.,]{0,1}14)|(Mojave)",     QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X64("MacOS1014") },
+
     /* OS/2: */
     { QRegularExpression("OS[/|!-]{,1}2.*W.*4.?5", QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X86("OS2Warp45") },
     { QRegularExpression("OS[/|!-]{,1}2.*W.*4",    QRegularExpression::CaseInsensitiveOption), GUEST_OS_ID_STR_X86("OS2Warp4") },

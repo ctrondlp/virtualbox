@@ -549,6 +549,14 @@ UIIconPoolGeneral::UIIconPoolGeneral()
     m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS1011"),             ":/os_macosx.png");
     m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS1012"),             ":/os_macosx.png");
     m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS1013"),             ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS1014"),             ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS1015"),             ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS11"),               ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS12"),               ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS13"),               ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS14"),               ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS15"),               ":/os_macosx.png");
+    m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("MacOS26"),               ":/os_macosx.png");
     m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X86("JRockitVE"),             ":/os_jrockitve.png");
     m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X64("VBoxBS"),                ":/os_other.png");
     m_guestOSTypeIconNames.insert(GUEST_OS_ID_STR_X86("Cloud"),                 ":/os_cloud.png");

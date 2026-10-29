@@ -78,7 +78,9 @@ RT_C_DECLS_BEGIN
  * 0xff the major release of that distro in most cases.  While for most other
  * families 0xf000 is used for identifying major OS releases (Windows is out of
  * space with Windows 11, so will have to think of something new there when/if
- * the next major release is out).
+ * the next major release is out).  Windows Server 2025 and macOS 15 and later
+ * continue in the low byte, so VBOXOSTYPE_OsTypeMask no longer tells them apart
+ * from their 0xf000 predecessor.
  *
  * @note    Do NOT use bit 11 (0x800) for anything. It is currently only used by
  *          VBOXOSTYPE_WinNT3x and we'd like to keep it that way in case we ever
@@ -362,6 +364,15 @@ typedef enum VBOXOSTYPE
     VBOXOSTYPE_MacOS1011_x64    = 0xB7100,
     VBOXOSTYPE_MacOS1012_x64    = 0xB8100,
     VBOXOSTYPE_MacOS1013_x64    = 0xB9100,
+    VBOXOSTYPE_MacOS1014_x64    = 0xBA100,
+    VBOXOSTYPE_MacOS1015_x64    = 0xBB100,
+    VBOXOSTYPE_MacOS11_x64      = 0xBC100,
+    VBOXOSTYPE_MacOS12_x64      = 0xBD100,
+    VBOXOSTYPE_MacOS13_x64      = 0xBE100,
+    VBOXOSTYPE_MacOS14_x64      = 0xBF100,
+    /* Out of 0xf000 major version space here, continue in the low byte like for Win2k25. */
+    VBOXOSTYPE_MacOS15_x64      = 0xBF101,
+    VBOXOSTYPE_MacOS26_x64      = 0xBF102,
     /** @} */
     /** @name Other OSes and stuff
      * @{ */

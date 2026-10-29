@@ -87,6 +87,17 @@ Rules for adding a changelog entry to make them look more uniform:
           will be removed in a future version of VirtualBox.</para>
       </listitem>
 
+      <listitem>
+        <para>macOS guests: Added guest OS types for macOS 10.14 Mojave up to
+          macOS 26 Tahoe (Intel). VMs of these types present a supported Mac
+          model in the DMI tables, a CPU model known to macOS on hosts with a
+          CPU model macOS does not know, and APFS and large BaseSystem support in
+          the firmware. All macOS guest types now warn when the SMC device key is
+          missing or the CPU is not an Intel one; the new types also warn about
+          an unknown CPU model and, for macOS 13 and later, missing instruction
+          set extensions (experimental)</para>
+      </listitem>
+
     </itemizedlist>
 
     <para>In addition, the following items were fixed or added:</para>
