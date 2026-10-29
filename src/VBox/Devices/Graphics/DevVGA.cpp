@@ -6860,6 +6860,7 @@ static DECLCALLBACK(int)   vgaR3Construct(PPDMDEVINS pDevIns, int iInstance, PCF
                                             "|VMSVGA2dGBO"
                                             "|VMSVGA3dGraphicsMemSizeGB"
                                             "|VMSVGA3dVideoAcceleration"
+                                            "|VMSVGA3dAdapter" /* Host GPU selection, read by the D3D11 backend. */
 # endif
                                             "|SuppressNewYearSplash"
                                             "|3DEnabled";

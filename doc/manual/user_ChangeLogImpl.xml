@@ -118,6 +118,14 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VMSVGA: On Windows hosts with more than one GPU the 3D device is
+          now created on the high performance GPU instead of the system default.
+          The host GPU can be chosen with the VBoxInternal/Devices/vga/0/Config/VMSVGA3dAdapter
+          extra data value (HighPerformance, MinimumPower, Default or part of the
+          adapter name); the available adapters are listed in VBox.log</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 
