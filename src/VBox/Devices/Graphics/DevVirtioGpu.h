@@ -315,6 +315,180 @@ typedef struct VIRTIOGPURESPEDID
 AssertCompileSize(VIRTIOGPURESPEDID, 24 + 8 + 1024);
 typedef VIRTIOGPURESPEDID *PVIRTIOGPURESPEDID;
 
+/** @name Capability set ids (VIRTIO_GPU_CAPSET_XXX).
+ * @{ */
+#define VIRTIOGPU_CAPSET_VIRGL                  1
+#define VIRTIOGPU_CAPSET_VIRGL2                 2
+#define VIRTIOGPU_CAPSET_GFXSTREAM              3
+/** Venus: Vulkan command serialization (the only one this device implements). */
+#define VIRTIOGPU_CAPSET_VENUS                  4
+#define VIRTIOGPU_CAPSET_CROSS_DOMAIN           5
+#define VIRTIOGPU_CAPSET_DRM                    6
+/** @} */
+
+/** Shared memory region id of the host visible memory window (VIRTIO_GPU_SHM_ID_HOST_VISIBLE). */
+#define VIRTIOGPU_SHM_ID_HOST_VISIBLE           1
+
+/** The capset id part of VIRTIOGPUCTXCREATE::fContextInit (VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK). */
+#define VIRTIOGPU_CONTEXT_INIT_CAPSET_ID_MASK   UINT32_C(0x000000ff)
+
+/** @name Blob memory types (VIRTIOGPURESOURCECREATEBLOB::uBlobMem).
+ * @{ */
+/** Guest memory only. */
+#define VIRTIOGPU_BLOB_MEM_GUEST                UINT32_C(0x0001)
+/** Host 3D memory only, created by a context from blob_id. */
+#define VIRTIOGPU_BLOB_MEM_HOST3D               UINT32_C(0x0002)
+/** Host 3D memory with guest memory backing. */
+#define VIRTIOGPU_BLOB_MEM_HOST3D_GUEST         UINT32_C(0x0003)
+/** @} */
+
+/** @name Blob flags (VIRTIOGPURESOURCECREATEBLOB::fBlobFlags).
+ * @{ */
+#define VIRTIOGPU_BLOB_FLAG_USE_MAPPABLE        UINT32_C(0x0001)
+#define VIRTIOGPU_BLOB_FLAG_USE_SHAREABLE       UINT32_C(0x0002)
+#define VIRTIOGPU_BLOB_FLAG_USE_CROSS_DEVICE    UINT32_C(0x0004)
+/** All defined blob flags. */
+#define VIRTIOGPU_BLOB_FLAG_VALID_MASK          UINT32_C(0x0007)
+/** @} */
+
+/** @name Caching type of a mapped blob (VIRTIOGPURESPMAPINFO::fMapInfo).
+ * @{ */
+#define VIRTIOGPU_MAP_CACHE_MASK                UINT32_C(0x0f)
+#define VIRTIOGPU_MAP_CACHE_NONE                UINT32_C(0x00)
+#define VIRTIOGPU_MAP_CACHE_CACHED              UINT32_C(0x01)
+#define VIRTIOGPU_MAP_CACHE_UNCACHED            UINT32_C(0x02)
+#define VIRTIOGPU_MAP_CACHE_WC                  UINT32_C(0x03)
+/** @} */
+
+/** VIRTIOGPU_CMD_GET_CAPSET_INFO (struct virtio_gpu_get_capset_info). */
+typedef struct VIRTIOGPUGETCAPSETINFO
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** Index of the capset, below VIRTIOGPUCONFIG::cCapsets. */
+    uint32_t            iCapset;
+    uint32_t            uPadding;
+} VIRTIOGPUGETCAPSETINFO;
+AssertCompileSize(VIRTIOGPUGETCAPSETINFO, 32);
+typedef const VIRTIOGPUGETCAPSETINFO *PCVIRTIOGPUGETCAPSETINFO;
+
+/** VIRTIOGPU_CMD_GET_CAPSET_INFO response (struct virtio_gpu_resp_capset_info). */
+typedef struct VIRTIOGPURESPCAPSETINFO
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** The capset id (VIRTIOGPU_CAPSET_XXX). */
+    uint32_t            idCapset;
+    /** The highest capset version supported. */
+    uint32_t            uCapsetMaxVersion;
+    /** The size of the capset data in bytes. */
+    uint32_t            cbCapsetMax;
+    uint32_t            uPadding;
+} VIRTIOGPURESPCAPSETINFO;
+AssertCompileSize(VIRTIOGPURESPCAPSETINFO, 40);
+typedef VIRTIOGPURESPCAPSETINFO *PVIRTIOGPURESPCAPSETINFO;
+
+/** VIRTIOGPU_CMD_GET_CAPSET (struct virtio_gpu_get_capset).  The response
+ * (struct virtio_gpu_resp_capset) is the header followed by the capset data. */
+typedef struct VIRTIOGPUGETCAPSET
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** The capset id (VIRTIOGPU_CAPSET_XXX). */
+    uint32_t            idCapset;
+    /** The capset version wanted. */
+    uint32_t            uCapsetVersion;
+} VIRTIOGPUGETCAPSET;
+AssertCompileSize(VIRTIOGPUGETCAPSET, 32);
+typedef const VIRTIOGPUGETCAPSET *PCVIRTIOGPUGETCAPSET;
+
+/** VIRTIOGPU_CMD_CTX_CREATE (struct virtio_gpu_ctx_create); the context id is in the header. */
+typedef struct VIRTIOGPUCTXCREATE
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** Number of valid bytes in achDebugName (not terminated). */
+    uint32_t            cchDebugName;
+    /** Capset id (VIRTIOGPU_CONTEXT_INIT_CAPSET_ID_MASK), VIRTIOGPU_F_CONTEXT_INIT only. */
+    uint32_t            fContextInit;
+    /** Debug name, guest supplied, neither terminated nor validated. */
+    char                achDebugName[64];
+} VIRTIOGPUCTXCREATE;
+AssertCompileSize(VIRTIOGPUCTXCREATE, 96);
+typedef const VIRTIOGPUCTXCREATE *PCVIRTIOGPUCTXCREATE;
+
+/* VIRTIOGPU_CMD_CTX_DESTROY (struct virtio_gpu_ctx_destroy) is just the header. */
+
+/** VIRTIOGPU_CMD_CTX_ATTACH_RESOURCE / VIRTIOGPU_CMD_CTX_DETACH_RESOURCE (struct virtio_gpu_ctx_resource). */
+typedef struct VIRTIOGPUCTXRESOURCE
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    uint32_t            idResource;
+    uint32_t            uPadding;
+} VIRTIOGPUCTXRESOURCE;
+AssertCompileSize(VIRTIOGPUCTXRESOURCE, 32);
+typedef const VIRTIOGPUCTXRESOURCE *PCVIRTIOGPUCTXRESOURCE;
+
+/** VIRTIOGPU_CMD_SUBMIT_3D (struct virtio_gpu_cmd_submit), followed by cbData bytes of commands. */
+typedef struct VIRTIOGPUCMDSUBMIT
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** Size of the command data in bytes. */
+    uint32_t            cbData;
+    uint32_t            uPadding;
+} VIRTIOGPUCMDSUBMIT;
+AssertCompileSize(VIRTIOGPUCMDSUBMIT, 32);
+typedef const VIRTIOGPUCMDSUBMIT *PCVIRTIOGPUCMDSUBMIT;
+
+/** VIRTIOGPU_CMD_RESOURCE_CREATE_BLOB (struct virtio_gpu_resource_create_blob), followed by
+ * cEntries VIRTIOGPUMEMENTRY structures; the creating context id is in the header. */
+typedef struct VIRTIOGPURESOURCECREATEBLOB
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    uint32_t            idResource;
+    /** VIRTIOGPU_BLOB_MEM_XXX. */
+    uint32_t            uBlobMem;
+    /** VIRTIOGPU_BLOB_FLAG_XXX. */
+    uint32_t            fBlobFlags;
+    /** Number of guest memory entries following the request. */
+    uint32_t            cEntries;
+    /** Context specific blob id (VIRTIOGPU_BLOB_MEM_HOST3D*). */
+    uint64_t            idBlob;
+    /** Size of the blob in bytes. */
+    uint64_t            cbBlob;
+} VIRTIOGPURESOURCECREATEBLOB;
+AssertCompileSize(VIRTIOGPURESOURCECREATEBLOB, 56);
+typedef const VIRTIOGPURESOURCECREATEBLOB *PCVIRTIOGPURESOURCECREATEBLOB;
+
+/** VIRTIOGPU_CMD_RESOURCE_MAP_BLOB (struct virtio_gpu_resource_map_blob). */
+typedef struct VIRTIOGPURESOURCEMAPBLOB
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    uint32_t            idResource;
+    uint32_t            uPadding;
+    /** Offset into the host visible memory region (VIRTIOGPU_SHM_ID_HOST_VISIBLE). */
+    uint64_t            offRegion;
+} VIRTIOGPURESOURCEMAPBLOB;
+AssertCompileSize(VIRTIOGPURESOURCEMAPBLOB, 40);
+typedef const VIRTIOGPURESOURCEMAPBLOB *PCVIRTIOGPURESOURCEMAPBLOB;
+
+/** VIRTIOGPU_CMD_RESOURCE_MAP_BLOB response (struct virtio_gpu_resp_map_info). */
+typedef struct VIRTIOGPURESPMAPINFO
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** VIRTIOGPU_MAP_CACHE_XXX. */
+    uint32_t            fMapInfo;
+    uint32_t            uPadding;
+} VIRTIOGPURESPMAPINFO;
+AssertCompileSize(VIRTIOGPURESPMAPINFO, 32);
+typedef VIRTIOGPURESPMAPINFO *PVIRTIOGPURESPMAPINFO;
+
+/** VIRTIOGPU_CMD_RESOURCE_UNMAP_BLOB (struct virtio_gpu_resource_unmap_blob). */
+typedef struct VIRTIOGPURESOURCEUNMAPBLOB
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    uint32_t            idResource;
+    uint32_t            uPadding;
+} VIRTIOGPURESOURCEUNMAPBLOB;
+AssertCompileSize(VIRTIOGPURESOURCEUNMAPBLOB, 32);
+typedef const VIRTIOGPURESOURCEUNMAPBLOB *PCVIRTIOGPURESOURCEUNMAPBLOB;
+
 /** VIRTIOGPU_CMD_UPDATE_CURSOR / VIRTIOGPU_CMD_MOVE_CURSOR (struct virtio_gpu_update_cursor). */
 typedef struct VIRTIOGPUUPDATECURSOR
 {
