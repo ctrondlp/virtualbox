@@ -4998,6 +4998,39 @@ static int pgmR3PhysMmio2UnmapHostRangeLocked(PVM pVM, PGMR3MMIO2UNMAPHOSTRANGEA
         pHostWindow->auPages[iFirstPage + i] = 0;
     Assert(pHostWindow->cBackedPages >= cPages);
     pHostWindow->cBackedPages -= cPages;
+
+    /*
+     * Flush the dangling pointers to guest paging structures.  Each vCPU keeps
+     * host pointers to its top level page tables (CR3, the PAE PDPT and its page
+     * directories, EPT) between instructions, and the guest may have pointed
+     * them into this window.  They come from the deprecated page mapping API
+     * which isn't covered by the page lock check above, so forget them all, the
+     * same way chunk unmapping does.  We're in a rendezvous or the guest isn't
+     * running, so nobody is using them right now.
+     */
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+    {
+# ifdef VBOX_VMM_TARGET_X86
+        PPGMCPU pPGM = &pVM->apCpusR3[idCpu]->pgm.s;
+
+        pPGM->pGst32BitPdR3    = NULL;
+        pPGM->pGstPaePdptR3    = NULL;
+        pPGM->pGstAmd64Pml4R3  = NULL;
+        pPGM->pGstEptPml4R3    = NULL;
+        pPGM->pGst32BitPdR0    = NIL_RTR0PTR;
+        pPGM->pGstPaePdptR0    = NIL_RTR0PTR;
+        pPGM->pGstAmd64Pml4R0  = NIL_RTR0PTR;
+        pPGM->pGstEptPml4R0    = NIL_RTR0PTR;
+        for (unsigned i = 0; i < RT_ELEMENTS(pPGM->apGstPaePDsR3); i++)
+        {
+            pPGM->apGstPaePDsR3[i] = NULL;
+            pPGM->apGstPaePDsR0[i] = NIL_RTR0PTR;
+        }
+# endif
+
+        /* Flush the TLBs of the other execution engines. */
+        CPUMSetChangedFlags(pVM->apCpusR3[idCpu], CPUM_CHANGED_GLOBAL_TLB_FLUSH);
+    }
     pgmPhysInvalidatePageMapTLB(pVM, false /*fInRendezvous*/);
 
     Log(("PGMR3PhysMmio2UnmapHostRange: %s: %#RGp LB %#RGp\n", pRamRange->pszDesc, pArgs->offRegion, pArgs->cb));
@@ -5090,7 +5123,40 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2UnmapHostRange(PVM pVM, PPDMDEVINS pDevIns, PG
                               ("PGMR3PhysMmio2UnmapHostRange: called from a non-EMT in state %s\n",
                                VMR3GetStateName(enmState)),
                               VERR_VM_INVALID_VM_STATE);
-        rc = VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, pgmR3PhysMmio2UnmapHostRangeRendezvous, &Args);
+        /* In the suspend, power off and similar transitions all EMTs are parked in the
+           rendezvous that drives the transition and cannot service another one, while
+           EMT0 may be waiting for this very thread to finish (PDM device suspend and
+           power off notifications).  Guest code isn't executing in these states (the
+           state changes only after all EMTs have entered the transition rendezvous),
+           so take the lock and do the work right here. */
+        bool fGuestStopped;
+        switch (enmState)
+        {
+            case VMSTATE_SUSPENDING:
+            case VMSTATE_SUSPENDING_LS:
+            case VMSTATE_SUSPENDING_EXT_LS:
+            case VMSTATE_SUSPENDED:
+            case VMSTATE_SUSPENDED_LS:
+            case VMSTATE_SUSPENDED_EXT_LS:
+            case VMSTATE_SAVING:
+            case VMSTATE_POWERING_OFF:
+            case VMSTATE_POWERING_OFF_LS:
+            case VMSTATE_OFF:
+            case VMSTATE_OFF_LS:
+                fGuestStopped = true;
+                break;
+            default:
+                fGuestStopped = false;
+                break;
+        }
+        if (fGuestStopped)
+        {
+            PGM_LOCK_VOID(pVM);
+            rc = pgmR3PhysMmio2UnmapHostRangeLocked(pVM, &Args);
+            PGM_UNLOCK(pVM);
+        }
+        else
+            rc = VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, pgmR3PhysMmio2UnmapHostRangeRendezvous, &Args);
     }
     return rc;
 }

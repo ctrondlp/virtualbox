@@ -6683,11 +6683,14 @@ VMMR3_INT_DECL(bool) NEMR3IsMmio2DirtyPageTrackingSupported(PVM pVM)
  * Unmaps a guest physical range inside an MMIO2 host window from Hyper-V.
  *
  * The range may hold any mix of host ranges mapped in one go, individually
- * (lazily) mapped pages and holes.  WHvUnmapGpaRange accepts holes; should it
- * fail anyway we unmap page by page, ignoring the failures as they are expected
- * for the holes.
+ * (lazily) mapped pages and holes.  WHvUnmapGpaRange succeeds for holes and for
+ * ranges that were never mapped (measured), so a failure is a real failure.
+ * Should the whole range call fail we retry page by page, but any page that
+ * still fails makes this fail, as the guest may then still reach the host
+ * memory and the caller must not free it.
  *
- * @returns VBox status code.
+ * @returns VBox status code, VERR_NEM_UNMAP_PAGES_FAILED if any page could not
+ *          be unmapped.
  * @param   pVM         The cross context VM structure.
  * @param   GCPhys      The start of the range (page aligned).
  * @param   cb          The size of the range (page aligned).
@@ -6702,15 +6705,25 @@ static int nemR3WinUnmapHostWindowRange(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb)
 
     LogRel2(("nemR3WinUnmapHostWindowRange: %RGp LB %RGp -> %Rhrc (%#x) Last=%#x/%u; unmapping page by page\n",
              GCPhys, cb, hrc, hrc, RTNtLastStatusValue(), RTNtLastErrorValue()));
-    uint64_t cFailed = 0;
+    uint64_t cFailed  = 0;
+    HRESULT  hrcFirst = S_OK;
     for (RTGCPHYS off = 0; off < cb; off += X86_PAGE_SIZE)
     {
         hrc = WHvUnmapGpaRange(pVM->nem.s.hPartition, GCPhys + off, X86_PAGE_SIZE);
         if (FAILED(hrc))
+        {
+            if (!cFailed)
+                hrcFirst = hrc;
             cFailed++;
+        }
     }
-    LogRel2(("nemR3WinUnmapHostWindowRange: %RGp LB %RGp: %RU64 of %RU64 pages were not mapped\n",
-             GCPhys, cb, cFailed, cb >> X86_PAGE_SHIFT));
+    if (cFailed)
+    {
+        LogRel(("nemR3WinUnmapHostWindowRange: %RGp LB %RGp: %RU64 of %RU64 pages could not be unmapped (first %Rhrc)\n",
+                GCPhys, cb, cFailed, cb >> X86_PAGE_SHIFT, hrcFirst));
+        return VERR_NEM_UNMAP_PAGES_FAILED;
+    }
+    LogRel2(("nemR3WinUnmapHostWindowRange: %RGp LB %RGp unmapped page by page\n", GCPhys, cb));
     return VINF_SUCCESS;
 }
 
