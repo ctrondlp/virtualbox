@@ -61,6 +61,7 @@
 #include <VBox/vmm/pdm.h>
 #include <VBox/vmm/dbgf.h>
 #include <VBox/vmm/dbgftrace.h>
+#include <VBox/vmm/gim.h>
 #include "NEMInternal.h"
 #include <VBox/vmm/vmcc.h>
 
@@ -2295,10 +2296,8 @@ DECLHIDDEN(int) nemR3NativeInitAfterCPUM(PVM pVM)
                           "Failed to set WHvPartitionPropertyCodeProcessorClFlushSize to %u: %Rhrc (Last=%#x/%u)",
                           pVM->nem.s.cCacheLineFlushShift, hrc, RTNtLastStatusValue(), RTNtLastErrorValue());
 
-    /* Intercept #DB, #BP and #UD exceptions.  #DB is only needed for debugging
-       and is dropped once the partition is set up (nemR3NativeInitCompletedRing3);
-       before Windows 10 19H2 the bitmap can't be changed after setup, so it
-       stays intercepted there. */
+    /* Intercept #DB, #BP and #UD exceptions.  This is narrowed down in
+       nemR3NativeInitCompletedRing3 once GIM has been configured. */
     RT_ZERO(Property);
     Property.ExceptionExitBitmap = RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault)
                                  | RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap)
@@ -2480,18 +2479,32 @@ DECLHIDDEN(int) nemR3NativeInitCompletedRing3(PVM pVM)
     //AssertLogRel(fRet);
 
     /*
-     * Stop intercepting #DB: the guest handles its own debug exceptions, and
-     * nemHCWinRunGC intercepts them again once the debugger needs them.  If
-     * Hyper-V doesn't accept the change (before Windows 10 19H2), we keep
-     * intercepting #DB.
+     * Narrow down the exception intercepts now that GIM is configured:
+     *  - #BP stays intercepted: the debugger arms int3 breakpoints without
+     *    stopping the vCPUs, so a lazily enabled #BP intercept could hand one of
+     *    its breakpoints to the guest.
+     *  - #DB is only intercepted while debugging: nemHCWinRunGC turns it on in
+     *    an EMT rendezvous when the debugger needs it (nemR3WinEnableDbExitsRendezvous).
+     *    The guest's own debug exceptions are delivered by Hyper-V, and one that
+     *    a canceled run leaves pending is delivered with IEM, see
+     *    nemR3WinIsDbPendingAfterExit.
+     *  - #UD is only needed when the GIM provider offers hypercalls (VMCALL and
+     *    VMMCALL raise #UD in the partition, see nemR3WinHandleExitException).
+     *  - #GP is only needed for the mesa driver workaround.
      */
-    HRESULT const hrc = nemR3WinSetXcptExitBitmap(pVM,   pVM->nem.s.fXcptExitBitmap
-                                                       & ~RT_BIT_64(WHvX64ExceptionTypeDebugTrapOrFault));
-    if (SUCCEEDED(hrc))
-        LogRel(("NEM: Exception exit bitmap: %#RX64 (#DB only while debugging)\n", pVM->nem.s.fXcptExitBitmap));
-    else
-        LogRel(("NEM: Exception exit bitmap: %#RX64 (keeping #DB, changing it after setup failed: %Rhrc)\n",
-                pVM->nem.s.fXcptExitBitmap, hrc));
+    GIMPROVIDERID const enmGimProvider = GIMGetProvider(pVM);
+    uint64_t fXcptExitBitmap = RT_BIT_64(WHvX64ExceptionTypeBreakpointTrap);
+    if (   enmGimProvider == GIMPROVIDERID_HYPERV
+        || enmGimProvider == GIMPROVIDERID_KVM
+        || pVM->apCpusR3[0]->nem.s.fGIMTrapXcptUD)
+        fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeInvalidOpcodeFault);
+    if (pVM->apCpusR3[0]->nem.s.fTrapXcptGpForLovelyMesaDrv)
+        fXcptExitBitmap |= RT_BIT_64(WHvX64ExceptionTypeGeneralProtectionFault);
+    if (fXcptExitBitmap != pVM->nem.s.fXcptExitBitmap)
+    {
+        HRESULT const hrc = nemR3WinSetXcptExitBitmap(pVM, fXcptExitBitmap);
+        LogRel(("NEM: Exception exit bitmap: %#RX64 (%Rhrc)\n", pVM->nem.s.fXcptExitBitmap, hrc)); RT_NOREF(hrc);
+    }
     return VINF_SUCCESS;
 }
 

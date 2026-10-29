@@ -124,6 +124,11 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>Windows hosts: Improved performance when running VMs with the
+          Hyper-V execution engine by intercepting fewer guest exceptions</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 
