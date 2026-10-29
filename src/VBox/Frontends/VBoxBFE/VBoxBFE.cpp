@@ -943,6 +943,88 @@ static DECLCALLBACK(void *) vboxbfeVmm2User_QueryGenericObject(PCVMM2USERMETHODS
 }
 
 
+/**
+ * Development aid for testing VMM state handling: resets the VM and/or saves the
+ * running VM and loads that state straight back into it, at given times.
+ *
+ * Environment:
+ *  - VBOXBFE_TEST_RESET_AT=<seconds>: VMR3Reset once after that many seconds.
+ *  - VBOXBFE_TEST_SAVE_RESTORE_AT=<seconds>: VMR3Save (suspending the VM), then
+ *    VMR3LoadFromFile and VMR3Resume, once after that many seconds.
+ *  - VBOXBFE_TEST_STATE_FILE=<path>: the state file (default bfe-test.sav).
+ *  - VBOXBFE_TEST_SAVE_AT=<seconds>: VMR3Save (suspending the VM) once after that
+ *    many seconds, leaving the VM off (for loading it in a new process).
+ *  - VBOXBFE_TEST_LOAD_STATE=<path>: start the VM from this state file instead of
+ *    powering it on (see vboxbfeVMPowerUpThread).
+ */
+static DECLCALLBACK(int) vboxbfeTestHookThread(RTTHREAD hThread, void *pvUser)
+{
+    RT_NOREF(hThread, pvUser);
+    char szValue[RTPATH_MAX];
+    uint32_t cSecsReset = 0, cSecsSaveRestore = 0, cSecsSave = 0;
+    if (RT_SUCCESS(RTEnvGetEx(RTENV_DEFAULT, "VBOXBFE_TEST_RESET_AT", szValue, sizeof(szValue), NULL)))
+        cSecsReset = RTStrToUInt32(szValue);
+    if (RT_SUCCESS(RTEnvGetEx(RTENV_DEFAULT, "VBOXBFE_TEST_SAVE_RESTORE_AT", szValue, sizeof(szValue), NULL)))
+        cSecsSaveRestore = RTStrToUInt32(szValue);
+    if (RT_SUCCESS(RTEnvGetEx(RTENV_DEFAULT, "VBOXBFE_TEST_SAVE_AT", szValue, sizeof(szValue), NULL)))
+        cSecsSave = RTStrToUInt32(szValue);
+    char szStateFile[RTPATH_MAX];
+    if (RT_FAILURE(RTEnvGetEx(RTENV_DEFAULT, "VBOXBFE_TEST_STATE_FILE", szStateFile, sizeof(szStateFile), NULL)))
+        RTStrCopy(szStateFile, sizeof(szStateFile), "bfe-test.sav");
+
+    uint64_t const msStart = RTTimeMilliTS();
+    while (cSecsReset || cSecsSaveRestore || cSecsSave)
+    {
+        RTThreadSleep(100);
+        uint64_t const cSecs = (RTTimeMilliTS() - msStart) / RT_MS_1SEC;
+        if (cSecsReset && cSecs >= cSecsReset)
+        {
+            cSecsReset = 0;
+            int rc = g_pVMM->pfnVMR3Reset(g_pUVM);
+            LogRel(("VBoxBFE: test hook: VMR3Reset -> %Rrc\n", rc));
+        }
+        if (cSecsSaveRestore && cSecs >= cSecsSaveRestore)
+        {
+            cSecsSaveRestore = 0;
+            /* Suspend first, so it's a plain save and not a live save racing the guest. */
+            int rc = g_pVMM->pfnVMR3Suspend(g_pUVM, VMSUSPENDREASON_USER);
+            LogRel(("VBoxBFE: test hook: VMR3Suspend -> %Rrc\n", rc));
+            bool fSuspended = false;
+            if (RT_SUCCESS(rc))
+            {
+                rc = g_pVMM->pfnVMR3Save(g_pUVM, szStateFile, NULL /*pStreamOps*/, NULL /*pvStreamOpsUser*/,
+                                         false /*fContinueAfterwards*/, NULL /*pfnProgress*/, NULL /*pvUser*/, &fSuspended);
+                LogRel(("VBoxBFE: test hook: VMR3Save('%s') -> %Rrc (fSuspended=%RTbool)\n", szStateFile, rc, fSuspended));
+            }
+            if (RT_SUCCESS(rc))
+            {
+                rc = g_pVMM->pfnVMR3LoadFromFile(g_pUVM, szStateFile, NULL /*pfnProgress*/, NULL /*pvUser*/);
+                LogRel(("VBoxBFE: test hook: VMR3LoadFromFile -> %Rrc\n", rc));
+                if (RT_SUCCESS(rc))
+                {
+                    rc = g_pVMM->pfnVMR3Resume(g_pUVM, VMRESUMEREASON_STATE_RESTORED);
+                    LogRel(("VBoxBFE: test hook: VMR3Resume -> %Rrc\n", rc));
+                }
+            }
+        }
+        if (cSecsSave && cSecs >= cSecsSave)
+        {
+            cSecsSave = 0;
+            int rc = g_pVMM->pfnVMR3Suspend(g_pUVM, VMSUSPENDREASON_USER);
+            LogRel(("VBoxBFE: test hook: VMR3Suspend -> %Rrc\n", rc));
+            if (RT_SUCCESS(rc))
+            {
+                bool fSuspended = false;
+                rc = g_pVMM->pfnVMR3Save(g_pUVM, szStateFile, NULL /*pStreamOps*/, NULL /*pvStreamOpsUser*/,
+                                         false /*fContinueAfterwards*/, NULL /*pfnProgress*/, NULL /*pvUser*/, &fSuspended);
+                LogRel(("VBoxBFE: test hook: VMR3Save('%s') -> %Rrc, VM stays off\n", szStateFile, rc));
+            }
+        }
+    }
+    return VINF_SUCCESS;
+}
+
+
 /** VM asynchronous operations thread */
 DECLCALLBACK(int) vboxbfeVMPowerUpThread(RTTHREAD hThread, void *pvUser)
 {
@@ -1045,9 +1127,34 @@ DECLCALLBACK(int) vboxbfeVMPowerUpThread(RTTHREAD hThread, void *pvUser)
         else
 #endif
         {
-            rc = g_pVMM->pfnVMR3PowerOn(g_pUVM);
-            if (RT_FAILURE(rc))
-                AssertMsgFailed(("VMR3PowerOn failed, rc=%Rrc\n", rc));
+            /* Test hook: start from a saved state (see vboxbfeTestHookThread). */
+            char szLoadState[RTPATH_MAX];
+            if (RT_SUCCESS(RTEnvGetEx(RTENV_DEFAULT, "VBOXBFE_TEST_LOAD_STATE", szLoadState, sizeof(szLoadState), NULL)))
+            {
+                rc = g_pVMM->pfnVMR3LoadFromFile(g_pUVM, szLoadState, NULL /*pfnProgress*/, NULL /*pvUser*/);
+                LogRel(("VBoxBFE: test hook: VMR3LoadFromFile('%s') -> %Rrc\n", szLoadState, rc));
+                if (RT_SUCCESS(rc))
+                {
+                    rc = g_pVMM->pfnVMR3Resume(g_pUVM, VMRESUMEREASON_STATE_RESTORED);
+                    LogRel(("VBoxBFE: test hook: VMR3Resume -> %Rrc\n", rc));
+                }
+            }
+            else
+            {
+                rc = g_pVMM->pfnVMR3PowerOn(g_pUVM);
+                if (RT_FAILURE(rc))
+                    AssertMsgFailed(("VMR3PowerOn failed, rc=%Rrc\n", rc));
+            }
+        }
+
+        /* Optional reset / save+restore test hook (see vboxbfeTestHookThread). */
+        if (   RT_SUCCESS(rc)
+            && (   RTEnvExist("VBOXBFE_TEST_RESET_AT")
+                || RTEnvExist("VBOXBFE_TEST_SAVE_RESTORE_AT")
+                || RTEnvExist("VBOXBFE_TEST_SAVE_AT")))
+        {
+            int const rcThread = RTThreadCreate(NULL, vboxbfeTestHookThread, NULL, 0, RTTHREADTYPE_DEFAULT, 0, "BfeTestHook");
+            AssertLogRelRC(rcThread);
         }
     }
 
