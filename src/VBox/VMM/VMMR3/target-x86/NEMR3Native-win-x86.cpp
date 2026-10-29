@@ -1889,9 +1889,19 @@ static int nemR3WinInitCreatePartition(PVM pVM, PRTERRINFO pErrInfo)
              * for best performance.
              */
             PCFGMNODE pCfgmApic = CFGMR3GetChild(CFGMR3GetRoot(pVM), "/Devices/apic");
+
+            /** @cfgm{/NEM/HyperVApic, bool, false}
+             * Whether to use Hyper-V's local APIC emulation instead of VirtualBox's.
+             * Guest APIC accesses (EOIs, IPIs, timer) then no longer cause VM exits,
+             * which are expensive with many vCPUs.  Off by default since the Hyper-V
+             * APIC backend is not considered ready yet. */
+            bool fHyperVApic = false;
+            int rc2 = CFGMR3QueryBoolDef(CFGMR3GetChild(CFGMR3GetRoot(pVM), "NEM"), "HyperVApic", &fHyperVApic, false);
+            if (RT_FAILURE(rc2))
+                fHyperVApic = false;
             if (   pCfgmApic
                 && pVM->nem.s.fLocalApicEmulation
-                && 0) /** @todo Fix issues in Hyper-V APIC backend before activating. */
+                && fHyperVApic) /** @todo Fix issues in Hyper-V APIC backend before enabling it by default. */
             {
                 /* If setting this fails log an error but continue. */
                 RT_ZERO(Property);
@@ -2151,7 +2161,49 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                      */
                     VM_SET_MAIN_EXECUTION_ENGINE(pVM, VM_EXEC_ENGINE_NATIVE_API);
                     Log(("NEM: Marked active!\n"));
-                    nemR3WinDisableX2Apic(pVM);
+
+                    /** @cfgm{/NEM/AllowX2Apic, bool, true}
+                     * Whether to keep the X2APIC mode when VirtualBox emulates the APIC.
+                     * Guest x2APIC accesses then exit as MSR accesses, which are much
+                     * cheaper to handle than the MMIO accesses of the xAPIC mode (those
+                     * go through IEM and PGM).  The Hyper-V APIC emulation doesn't do
+                     * x2APIC, so it's disabled with that regardless. */
+                    bool fAllowX2Apic = true;
+                    int rc2 = CFGMR3QueryBoolDef(CFGMR3GetChild(CFGMR3GetRoot(pVM), "NEM"), "AllowX2Apic", &fAllowX2Apic, true);
+                    /* Hyper-V handles APIC base MSR writes itself by default, so our APIC
+                       would miss the guest switching to x2APIC mode.  That needs the APIC
+                       base MSR write exit, which older Windows versions don't offer. */
+                    WHV_CAPABILITY MsrExitCaps;
+                    RT_ZERO(MsrExitCaps);
+                    HRESULT hrcCap = WHvGetCapabilityWrapper(WHvCapabilityCodeX64MsrExitBitmap, &MsrExitCaps, sizeof(MsrExitCaps));
+                    if (RT_FAILURE(rc2) || !fAllowX2Apic || pVM->nem.s.fLocalApicEmulation)
+                        nemR3WinDisableX2Apic(pVM);
+                    else if (   FAILED(hrcCap)
+                             || !MsrExitCaps.X64MsrExitBitmap.UnhandledMsrs
+                             || !MsrExitCaps.X64MsrExitBitmap.ApicBaseMsrWrite)
+                    {
+                        LogRel(("NEM: No APIC base MSR write exits (%Rhrc, %#RX64), disabling X2APIC\n",
+                                hrcCap, MsrExitCaps.X64MsrExitBitmap.AsUINT64));
+                        nemR3WinDisableX2Apic(pVM);
+                    }
+                    else
+                    {
+                        WHV_PARTITION_PROPERTY Property;
+                        RT_ZERO(Property);
+                        Property.X64MsrExitBitmap.UnhandledMsrs    = 1;
+                        Property.X64MsrExitBitmap.ApicBaseMsrWrite = 1;
+                        HRESULT hrc = WHvSetPartitionProperty(pVM->nem.s.hPartition, WHvPartitionPropertyCodeX64MsrExitBitmap,
+                                                              &Property, sizeof(Property));
+                        if (SUCCEEDED(hrc))
+                            LogRel(("NEM: Keeping the X2APIC mode (/NEM/AllowX2Apic)\n"));
+                        else
+                        {
+                            LogRel(("NEM: Failed to enable APIC base MSR write exits: %Rhrc (Last=%#x/%u)\n",
+                                    hrc, RTNtLastStatusValue(), RTNtLastErrorValue()));
+                            nemR3WinDisableX2Apic(pVM);
+                        }
+                    }
+
                     nemR3DisableCpuIsaExt(pVM, "MONITOR"); /* MONITOR is not supported by Hyper-V (MWAIT is sometimes). */
                     PGMR3EnableNemMode(pVM);
                     rc = DBGFR3InfoRegisterInternalEx(pVM, "nem", "Dumps NEM info.", nemR3WinInfo, DBGFINFO_FLAGS_ALL_EMTS);

@@ -98,6 +98,8 @@ VMMR3_INT_DECL(int) NEMR3InitConfig(PVM pVM)
                                   "|LovelyMesaDrvWorkaround"
 #ifdef RT_OS_WINDOWS
                                   "|UseRing0Runloop"
+                                  "|HyperVApic"
+                                  "|AllowX2Apic"
 #elif defined(RT_OS_DARWIN)
                                   "|VmxPleGap"
                                   "|VmxPleWindow"

@@ -413,8 +413,22 @@ static int apicR3LoadVMData(PPDMDEVINS pDevIns, PVM pVM, PSSMHANDLE pSSM)
     rc = pHlp->pfnSSMGetU32(pSSM, &uSavedMaxApicMode);
     AssertRCReturn(rc, rc);
     if (uSavedMaxApicMode != (uint32_t)pApic->enmMaxMode)
-        return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS, N_("Config mismatch - uApicMode: saved=%u config=%u"),
-                                       uSavedMaxApicMode, pApic->enmMaxMode);
+    {
+        /* Older VirtualBox versions always turned X2APIC into APIC mode when running
+           on Hyper-V (NEM), so their saved states have the lower mode.  The guest
+           never saw X2APIC (the restored CPUID leaves don't offer it either), so
+           just continue with the saved mode. */
+        if (   uSavedMaxApicMode == PDMAPICMODE_APIC
+            && pApic->enmMaxMode == PDMAPICMODE_X2APIC
+            && VM_IS_NEM_ENABLED(pVM))
+        {
+            LogRel(("APIC: Saved state is from APIC mode, continuing in that mode instead of X2APIC\n"));
+            pApic->enmMaxMode = PDMAPICMODE_APIC;
+        }
+        else
+            return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS, N_("Config mismatch - uApicMode: saved=%u config=%u"),
+                                           uSavedMaxApicMode, pApic->enmMaxMode);
+    }
     return VINF_SUCCESS;
 }
 

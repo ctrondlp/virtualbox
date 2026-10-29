@@ -118,6 +118,12 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>Windows hosts: VMs running with the Hyper-V execution engine can now
+          use the x2APIC. This can be turned off with the
+          VBoxInternal/NEM/AllowX2Apic extra data value</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 
