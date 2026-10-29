@@ -1245,7 +1245,7 @@ DECLINLINE(void) virtioCoreR3VirtqBufDrain(PVIRTIOCORE pVirtio, PVIRTQBUF pVirtq
     }
     LogFunc(("Drained %d/%d bytes from %s buffer, head idx: %u (%d bytes left)\n",
              cb - cbLim, cb, VIRTQNAME(pVirtio, pVirtqBuf->uVirtq),
-             pVirtqBuf->uHeadIdx, virtioCoreGCPhysChainCalcLengthLeft(pVirtqBuf->pSgPhysReturn)));
+             pVirtqBuf->uHeadIdx, pVirtqBuf->pSgPhysReturn ? virtioCoreGCPhysChainCalcLengthLeft(pVirtqBuf->pSgPhysReturn) : 0));
 }
 
 #undef VIRTQNAME

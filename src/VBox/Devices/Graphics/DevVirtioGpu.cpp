@@ -2545,6 +2545,13 @@ static DECLCALLBACK(int) vgpuR3WorkerThread(PPDMDEVINS pDevIns, PPDMTHREAD pThre
 
     while (pThread->enmState == PDMTHREADSTATE_RUNNING)
     {
+        /* Count ourselves as active before checking fQuiescing, so the quiesce
+           code either sees us or we see it.  This includes the teardown below: it
+           unmaps host windows, which needs the EMTs, so a suspend or power off
+           must wait for it to finish rather than give up on this thread. */
+        bool fProcessed = false;
+        ASMAtomicIncU32(&pThis->cActiveCmds);
+
         /* After a device reset the control worker, which owns the resources and
            the 3D state, frees them. */
         if (   uVirtq == VIRTIOGPU_VIRTQ_CONTROL
@@ -2554,10 +2561,6 @@ static DECLCALLBACK(int) vgpuR3WorkerThread(PPDMDEVINS pDevIns, PPDMTHREAD pThre
             vgpuR3ResourcesDestroyAll(pDevIns, pThis, pThisCC);
         }
 
-        /* Count ourselves as active before checking fQuiescing, so the quiesce
-           code either sees us or we see it. */
-        bool fProcessed = false;
-        ASMAtomicIncU32(&pThis->cActiveCmds);
         if (vgpuR3IsVirtqReady(pThis, uVirtq))
         {
             /* Complete the fenced commands whose fence retired.  The flag is only
