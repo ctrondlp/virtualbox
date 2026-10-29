@@ -98,6 +98,7 @@ VMMR3_INT_DECL(int) NEMR3InitConfig(PVM pVM)
                                   "|LovelyMesaDrvWorkaround"
 #ifdef RT_OS_WINDOWS
                                   "|UseRing0Runloop"
+                                  "|InjectIntViaHv"
 #elif defined(RT_OS_DARWIN)
                                   "|VmxPleGap"
                                   "|VmxPleWindow"
@@ -492,6 +493,25 @@ VMMR3_INT_DECL(bool) NEMR3NeedSpecialWaitMethod(PVM pVM)
     RT_NOREF(pVM);
 #endif
     return false;
+}
+
+
+/**
+ * Checks whether NEM delivers pending APIC and PIC interrupts itself when it
+ * resumes guest execution, so EM should leave them pending instead of
+ * injecting them with IEM.
+ *
+ * @returns true if so, false if not.
+ * @param   pVM     The cross context VM structure.
+ */
+VMMR3_INT_DECL(bool) NEMR3DeliversInterrupts(PVM pVM)
+{
+#if defined(VBOX_WITH_NATIVE_NEM) && defined(RT_OS_WINDOWS) && defined(VBOX_VMM_TARGET_X86)
+    return VM_IS_NEM_ENABLED(pVM) && pVM->nem.s.fInjectIntViaHv;
+#else
+    RT_NOREF(pVM);
+    return false;
+#endif
 }
 
 

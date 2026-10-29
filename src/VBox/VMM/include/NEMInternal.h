@@ -274,6 +274,9 @@ typedef struct NEM
     bool                        fXsaveSupported: 1;
     /** Flag whether the compacting form of XSAVE is used. */
     bool                        fXsaveComp: 1;
+    /** Whether Hyper-V delivers the APIC and PIC interrupts (as pending
+     *  interruptions) instead of IEM (/NEM/InjectIntViaHv). */
+    bool                        fInjectIntViaHv : 1;
 #  ifdef NEM_WIN_WITH_A20
     /** Set if we've started more than one CPU and cannot mess with A20. */
     bool                        fA20Fixed : 1;
@@ -546,6 +549,13 @@ typedef struct NEMCPU
     /** Whether debug breakpoints / events are armed or if single-stepping is active
      *  (can be removed later when dedicated debug loop is implemented). */
     bool                        fGuestDebug : 1;
+    /** Whether the interrupt uIntInjectVector was handed to Hyper-V for delivery
+     *  and hasn't been delivered yet (NEM::fInjectIntViaHv). */
+    bool                        fIntInjectPending : 1;
+    /** Whether the last exit reported a pending interruption in Hyper-V. */
+    bool                        fLastExitIntPending : 1;
+    /** The vector of the interrupt pending delivery by Hyper-V (fIntInjectPending). */
+    uint8_t                     uIntInjectVector;
 #  ifdef _WINHVAPIDEFS_H_
     WHV_RUN_VP_EXIT_REASON      enmExitReason;
 #  else
@@ -608,6 +618,10 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatImportOnReturn;
     STAMCOUNTER                 StatImportOnReturnSkipped;
     STAMCOUNTER                 StatQueryCpuTick;
+# ifdef VBOX_VMM_TARGET_X86
+    STAMCOUNTER                 StatIntInjectViaHv;
+    STAMCOUNTER                 StatIntInjectViaIem;
+# endif
     /** @} */
 
 #elif defined(RT_OS_DARWIN) && defined(VBOX_WITH_NATIVE_NEM)

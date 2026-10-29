@@ -73,6 +73,7 @@ VMMR3_INT_DECL(bool) NEMR3SetSingleInstruction(PVM pVM, PVMCPU pVCpu, bool fEnab
 VMMR3_INT_DECL(void) NEMR3NotifyFF(PVM pVM, PVMCPU pVCpu, uint32_t fFlags);
 VMMR3_INT_DECL(int)  NEMR3Halt(PVM pVM, PVMCPU pVCpu);
 VMMR3_INT_DECL(bool) NEMR3NeedSpecialWaitMethod(PVM pVM);
+VMMR3_INT_DECL(bool) NEMR3DeliversInterrupts(PVM pVM);
 #ifdef RT_ARCH_AMD64
 VMMR3_INT_DECL(int)  NEMR3QueryHostHwvirtMsrs(PVM pVM, PSUPHWVIRTMSRS pMsrs);
 #endif

@@ -94,6 +94,12 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Improved the performance of guests with several virtual CPUs on
+          Windows hosts using Hyper-V by letting Hyper-V deliver their interrupts
+          (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
