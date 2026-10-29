@@ -1055,6 +1055,7 @@ typedef struct CPUMCPUIDCONFIG
     uint32_t        uMaxExtLeaf;
     uint32_t        uMaxCentaurLeaf;
     uint32_t        uMaxIntelFamilyModelStep;
+    bool            fForceIntelFamilyModelStep;
     char            szCpuName[128];
 } CPUMCPUIDCONFIG;
 /** Pointer to CPUID config (from CFGM). */
@@ -1064,7 +1065,8 @@ typedef CPUMCPUIDCONFIG *PCPUMCPUIDCONFIG;
 /**
  * Mini CPU selection support for making Mac OS X happy.
  *
- * Executes the  /CPUM/MaxIntelFamilyModelStep config.
+ * Executes the  /CPUM/MaxIntelFamilyModelStep and
+ * /CPUM/ForceIntelFamilyModelStep config.
  *
  * @param   pCpum       The CPUM instance data.
  * @param   pConfig     The CPUID configuration we've read from CFGM.
@@ -1079,7 +1081,10 @@ static void cpumR3CpuIdLimitIntelFamModStep(PCPUM pCpum, PCPUMCPUIDCONFIG pConfi
                                                                 RTX86GetCpuFamily(pStdFeatureLeaf->uEax),
                                                                 0);
         uint32_t uMaxIntelFamilyModelStep = pConfig->uMaxIntelFamilyModelStep;
-        if (pConfig->uMaxIntelFamilyModelStep < uCurIntelFamilyModelStep)
+        if (   uMaxIntelFamilyModelStep < uCurIntelFamilyModelStep
+            || (   pConfig->fForceIntelFamilyModelStep
+                && uMaxIntelFamilyModelStep != UINT32_MAX
+                && uMaxIntelFamilyModelStep != uCurIntelFamilyModelStep))
         {
             uint32_t uNew = pStdFeatureLeaf->uEax & UINT32_C(0xf0003000);
             uNew |= RT_BYTE1(uMaxIntelFamilyModelStep) & 0xf; /* stepping */
@@ -2861,6 +2866,13 @@ static int cpumR3CpuIdReadConfig(PVM pVM, PCPUMCPUIDCONFIG pConfig, PCFGMNODE pC
      * number and the 3rd byte value is the family, and the 4th value must be zero.
      */
     rc = CFGMR3QueryU32Def(pCpumCfg, "MaxIntelFamilyModelStep", &pConfig->uMaxIntelFamilyModelStep, UINT32_MAX);
+    AssertLogRelRCReturn(rc, rc);
+
+    /** @cfgm{/CPUM/ForceIntelFamilyModelStep, boolean, false}
+     * Report the /CPUM/MaxIntelFamilyModelStep family+model+stepping even when
+     * the CPU reports a lower one.  Main uses this for macOS guests on hosts with
+     * a CPU model the macOS kernel doesn't know (it panics on those). */
+    rc = CFGMR3QueryBoolDef(pCpumCfg, "ForceIntelFamilyModelStep", &pConfig->fForceIntelFamilyModelStep, false);
     AssertLogRelRCReturn(rc, rc);
 
     /** @cfgm{/CPUM/MaxStdLeaf, uint32_t, 0x00000016}
