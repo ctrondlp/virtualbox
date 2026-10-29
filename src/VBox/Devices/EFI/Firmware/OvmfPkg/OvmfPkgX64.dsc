@@ -1055,6 +1055,7 @@
  VBoxPkg/VBoxSysTables/VBoxSysTables.inf
  VBoxPkg/VBoxAppleSim/VBoxAppleSim.inf
  VBoxPkg/VBoxApfsJmpStartDxe/VBoxApfsJmpStartDxe.inf
+  OvmfPkg/VirtioGpuDxe/VirtioGpu.inf
 !endif
 
 

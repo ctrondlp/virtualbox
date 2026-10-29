@@ -389,6 +389,8 @@ INF  MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
 INF  OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
 INF  OvmfPkg/QemuRamfbDxe/QemuRamfbDxe.inf
 INF  OvmfPkg/VirtioGpuDxe/VirtioGpu.inf
+!else
+INF  OvmfPkg/VirtioGpuDxe/VirtioGpu.inf
 !endif
 INF  OvmfPkg/PlatformDxe/Platform.inf
 INF  OvmfPkg/IoMmuDxe/IoMmuDxe.inf
