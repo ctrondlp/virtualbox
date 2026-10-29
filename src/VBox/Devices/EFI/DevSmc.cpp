@@ -41,6 +41,10 @@
 #include <VBox/err.h>
 #include <iprt/assert.h>
 #include <iprt/string.h>
+#ifdef IN_RING3
+# include <iprt/x86.h>
+# include <iprt/x86-helpers.h>
+#endif
 #if defined(IN_RING0) && (defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86))
 # include <iprt/asm-amd64-x86.h>
 # include <iprt/once.h>
@@ -1521,6 +1525,159 @@ static DECLCALLBACK(int) smcR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uint
 
 
 /**
+ * Checks the device key (OSK0 + OSK1) and complains loudly if it is missing or
+ * looks bogus.
+ *
+ * macOS needs the key to decrypt protected system binaries and will not get
+ * very far without it, which is otherwise hard to diagnose.  VirtualBox does not
+ * and must not know the value, it has to be provided by the user.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The SMC instance data.
+ */
+static void smcR3CheckDeviceKey(PPDMDEVINS pDevIns, PDEVSMC pThis)
+{
+    size_t const cchKey = strlen(pThis->szOsk0And1);
+    if (!cchKey)
+    {
+        LogRel(("SMC: Warning! No SMC device key (OSK0/OSK1) is configured. macOS guests need it for decrypting protected\n"
+                "SMC:          system binaries and will fail to start their user interface without it. Set the\n"
+                "SMC:          VBoxInternal2/SmcDeviceKey extra data value of the VM to the key of the Apple hardware the\n"
+                "SMC:          guest is licensed to run on.\n"));
+        PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "MacOSGuestSmcDeviceKeyMissing",
+                                   N_("No SMC device key is configured for this macOS guest. macOS needs it for decrypting "
+                                      "protected system binaries and will fail to start its user interface without it. Set the "
+                                      "VBoxInternal2/SmcDeviceKey extra data value of the VM to the 64 character key of the Apple "
+                                      "hardware this guest is licensed to run on (see the user manual)"));
+    }
+    else if (cchKey != 64)
+    {
+        LogRel(("SMC: Warning! The SMC device key has %zu characters instead of 64 (OSK0 + OSK1, 32 characters each)\n", cchKey));
+        PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "MacOSGuestSmcDeviceKeyInvalid",
+                                   N_("The SMC device key configured for this macOS guest has %u characters instead of 64. "
+                                      "Check the VBoxInternal2/SmcDeviceKey extra data value of the VM"), (unsigned)cchKey);
+    }
+}
+
+
+/**
+ * Checks the guest CPU against what the macOS kernel is known to require and
+ * complains loudly about things that are known to prevent the guest from booting.
+ *
+ * This is done here as the SMC is only configured for macOS guests.
+ *
+ * @param   pDevIns         The device instance.
+ * @param   fCheckModel     Whether to check that the CPU model is known to the
+ *                          kernel (the model list is for macOS 10.14 and later).
+ * @param   fNeedX86_64h    Whether the guest OS requires the x86_64h (Haswell)
+ *                          instruction set, i.e. is macOS 13 or later.
+ */
+static void smcR3CheckGuestCpu(PPDMDEVINS pDevIns, bool fCheckModel, bool fNeedX86_64h)
+{
+    uint32_t uEax, uEbx, uEcx, uEdx;
+    PDMDevHlpGetCpuId(pDevIns, 0, &uEax, &uEbx, &uEcx, &uEdx);
+    uint32_t const uMaxStdLeaf = uEax;
+    if (!RTX86IsIntelCpu(uEbx, uEcx, uEdx))
+    {
+        LogRel(("SMC: Warning! The guest CPU vendor is not Intel, the macOS kernel will panic with 'Unsupported CPU'.\n"));
+        PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "MacOSGuestCpuNotIntel",
+                                   N_("The guest CPU vendor is not Intel. The macOS kernel only supports Intel CPUs and will "
+                                      "most likely panic with 'Unsupported CPU'"));
+        return;
+    }
+
+    /*
+     * The macOS kernel panics with 'Unsupported CPU' if it does not know the CPU
+     * model.  These are the family 6 models known to it (CPUID_MODEL_XXX in the
+     * osfmk/i386/cpuid.h file of the xnu sources, macOS 10.14 thru 26).  Keep in
+     * sync with isIntelCpuModelKnownToMacOS in ConsoleImplConfigX86.cpp.
+     */
+    static uint8_t const s_abKnownModels[] =
+    {
+        0x17, 0x1a, 0x1e, 0x1f, 0x25, 0x2a, 0x2c, 0x2d, 0x2e, 0x2f, 0x3a, 0x3c, 0x3d, 0x3e, 0x3f,
+        0x45, 0x46, 0x47, 0x4e, 0x55, 0x5e, 0x7d, 0x7e, 0x8e, 0x9e, 0x9f, 0xa5
+    };
+    PDMDevHlpGetCpuId(pDevIns, 1, &uEax, &uEbx, &uEcx, &uEdx);
+    uint32_t const uFamily  = RTX86GetCpuFamily(uEax);
+    uint32_t const uModel   = RTX86GetCpuModelIntel(uEax);
+    uint32_t const fStd1Ecx = uEcx;
+    bool fKnownModel = false;
+    if (uFamily == 6)
+        for (size_t i = 0; i < RT_ELEMENTS(s_abKnownModels) && !fKnownModel; i++)
+            fKnownModel = s_abKnownModels[i] == uModel;
+    if (fCheckModel && !fKnownModel)
+    {
+        LogRel(("SMC: Warning! The guest CPU (family %u, model %#x) is not known to the macOS kernel, it will most likely\n"
+                "SMC:          panic with 'Unsupported CPU'. Select the 'host' CPU profile, or set the\n"
+                "SMC:          VBoxInternal/CPUM/MaxIntelFamilyModelStep extra data value to a known model\n"
+                "SMC:          (e.g. 0x00069E0D) and VBoxInternal/CPUM/ForceIntelFamilyModelStep to 1.\n", uFamily, uModel));
+        PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "MacOSGuestCpuModelUnknown",
+                                   N_("The guest CPU (family %u, model %#x) is not known to the macOS kernel, which will most "
+                                      "likely panic with 'Unsupported CPU'. Select the 'host' CPU profile, or set the "
+                                      "VBoxInternal/CPUM/MaxIntelFamilyModelStep extra data value to a known model "
+                                      "(e.g. 0x00069E0D) and VBoxInternal/CPUM/ForceIntelFamilyModelStep to 1"), uFamily, uModel);
+    }
+
+    /*
+     * macOS 13 and later only ship the x86_64h (Haswell and later) variant of
+     * the dyld shared cache, so the guest fails to start launchd ("Library not
+     * loaded: /usr/lib/libSystem.B.dylib") if the kernel doesn't consider the
+     * CPU x86_64h capable.  The kernel checks the CPUID_X86_64_H_FEATURE_SUBSET,
+     * CPUID_X86_64_H_EXTFEATURE_SUBSET and CPUID_X86_64_H_LEAF7_FEATURE_SUBSET
+     * bits for this (osfmk/i386/cpuid.c in the xnu sources).
+     */
+    if (fNeedX86_64h)
+    {
+        uint32_t fStd7Ebx = 0;
+        if (uMaxStdLeaf >= 7)
+            PDMDevHlpGetCpuId(pDevIns, 7, &uEax, &fStd7Ebx, &uEcx, &uEdx);
+        uint32_t fExt1Ecx = 0;
+        PDMDevHlpGetCpuId(pDevIns, UINT32_C(0x80000000), &uEax, &uEbx, &uEcx, &uEdx);
+        if (uEax >= UINT32_C(0x80000001) && uEax <= UINT32_C(0x800000ff))
+            PDMDevHlpGetCpuId(pDevIns, UINT32_C(0x80000001), &uEax, &uEbx, &fExt1Ecx, &uEdx);
+
+        static const struct
+        {
+            uint8_t     iReg;       /**< 0 = leaf 1 ECX, 1 = leaf 0x80000001 ECX, 2 = leaf 7 EBX. */
+            uint32_t    fBit;       /**< The feature bit. */
+            const char *pszName;    /**< The feature name. */
+        } s_aFeatures[] =
+        {
+            { 0, X86_CPUID_FEATURE_ECX_FMA,          "FMA"    },
+            { 0, X86_CPUID_FEATURE_ECX_SSE4_2,       "SSE4.2" },
+            { 0, X86_CPUID_FEATURE_ECX_MOVBE,        "MOVBE"  },
+            { 0, X86_CPUID_FEATURE_ECX_POPCNT,       "POPCNT" },
+            { 0, X86_CPUID_FEATURE_ECX_AVX,          "AVX"    },
+            { 1, X86_CPUID_AMD_FEATURE_ECX_ABM,      "LZCNT"  },
+            { 2, X86_CPUID_STEXT_FEATURE_EBX_BMI1,   "BMI1"   },
+            { 2, X86_CPUID_STEXT_FEATURE_EBX_AVX2,   "AVX2"   },
+            { 2, X86_CPUID_STEXT_FEATURE_EBX_BMI2,   "BMI2"   },
+        };
+        uint32_t const afRegs[3] = { fStd1Ecx, fExt1Ecx, fStd7Ebx };
+        char           szMissing[80];
+        size_t         offMissing = 0;
+        szMissing[0] = '\0';
+        for (size_t i = 0; i < RT_ELEMENTS(s_aFeatures); i++)
+            if (!(afRegs[s_aFeatures[i].iReg] & s_aFeatures[i].fBit))
+                offMissing += RTStrPrintf(&szMissing[offMissing], sizeof(szMissing) - offMissing, "%s%s",
+                                          offMissing ? " " : "", s_aFeatures[i].pszName);
+        if (offMissing)
+        {
+            LogRel(("SMC: Warning! The guest CPU lacks features required by macOS 13 and later: %s\n"
+                    "SMC:          The guest will fail with 'Library not loaded: /usr/lib/libSystem.B.dylib'.\n", szMissing));
+            PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "MacOSGuestCpuNoX86_64h",
+                                       N_("The guest CPU lacks instruction set extensions required by macOS 13 and later (%s). "
+                                          "The guest will fail to start with 'Library not loaded: /usr/lib/libSystem.B.dylib'. "
+                                          "Make sure hardware virtualization is used and check the CPU profile and the CPUID "
+                                          "portability level of the VM"), szMissing);
+        }
+        else
+            LogRel(("SMC: The guest CPU has the x86_64h features required by macOS 13 and later\n"));
+    }
+}
+
+
+/**
  * @interface_method_impl{PDMDEVREG,pfnConstruct}
  */
 static DECLCALLBACK(int) smcR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFGMNODE pCfg)
@@ -1548,14 +1705,34 @@ static DECLCALLBACK(int) smcR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFGM
     /*
      * Validate configuration.
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "DeviceKey|GetKeyFromRealSMC", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "DeviceKey|GetKeyFromRealSMC|CheckCpuModel|CheckX86_64h", "");
 
     /*
      * Read configuration.
      */
 
+    /** @cfgm{/Devices/smc/0/Config/CheckCpuModel, bool, false}
+     * Whether to check that the guest CPU model is known to the macOS 10.14 and
+     * later kernel.  Set by Main for the respective guest OS types.  This is a
+     * diagnostics only setting. */
+    bool fCheckCpuModel;
+    int rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "CheckCpuModel", &fCheckCpuModel, false);
+    if (RT_FAILURE(rc))
+        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                   N_("Configuration error: Querying \"CheckCpuModel\" as a boolean failed"));
+
+    /** @cfgm{/Devices/smc/0/Config/CheckX86_64h, bool, false}
+     * Whether to check that the guest CPU is x86_64h (Haswell) capable, as
+     * required by macOS 13 and later.  Set by Main for the respective guest OS
+     * types.  This is a diagnostics only setting. */
+    bool fCheckX86_64h;
+    rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "CheckX86_64h", &fCheckX86_64h, false);
+    if (RT_FAILURE(rc))
+        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                   N_("Configuration error: Querying \"CheckX86_64h\" as a boolean failed"));
+
     /* The DeviceKey sets OSK0 and OSK1. */
-    int rc = pHlp->pfnCFGMQueryStringDef(pCfg, "DeviceKey", pThis->szOsk0And1, sizeof(pThis->szOsk0And1), "");
+    rc = pHlp->pfnCFGMQueryStringDef(pCfg, "DeviceKey", pThis->szOsk0And1, sizeof(pThis->szOsk0And1), "");
     if (RT_FAILURE(rc))
         return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                    N_("Configuration error: Querying \"DeviceKey\" as a string failed"));
@@ -1588,6 +1765,12 @@ static DECLCALLBACK(int) smcR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFGM
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Failed to query SMC value from the host"));
     }
+
+    /*
+     * Make problems which are known to prevent macOS from booting obvious.
+     */
+    smcR3CheckDeviceKey(pDevIns, pThis);
+    smcR3CheckGuestCpu(pDevIns, fCheckCpuModel, fCheckX86_64h);
 
     /*
      * Register I/O Ports
