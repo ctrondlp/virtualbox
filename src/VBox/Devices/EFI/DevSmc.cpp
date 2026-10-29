@@ -244,6 +244,9 @@ typedef struct DEVSMC
     uint8_t                 bDollaryNumber;
     /** MSSD - shutdown reason. */
     uint8_t                 bShutdownReason;
+    /** MSSP - sleep/shutdown related value written by the guest (exact semantics
+     *  unknown, QEMU and VirtualSMC also just store it). */
+    uint8_t                 bShutdownPhase;
     /** NATJ - Ninja action timer job. */
     uint8_t                 bNinjaActionTimerJob;
     /** @} */
@@ -324,6 +327,8 @@ static FNDEVSMCKEYPUTTER scmKeyPutDollarNumber;
 #endif
 static FNDEVSMCKEYGETTER scmKeyGetShutdownReason;
 static FNDEVSMCKEYPUTTER scmKeyPutShutdownReason;
+static FNDEVSMCKEYGETTER scmKeyGetShutdownPhase;
+static FNDEVSMCKEYPUTTER scmKeyPutShutdownPhase;
 static FNDEVSMCKEYGETTER scmKeyGetNinjaTimerAction;
 static FNDEVSMCKEYPUTTER scmKeyPutNinjaTimerAction;
 static FNDEVSMCKEYGETTER scmKeyGetOne;
@@ -335,6 +340,11 @@ static FNDEVSMCKEYGETTER scmKeyGetZero;
 *********************************************************************************************************************************/
 /**
  * Apple SMC key descriptor table.
+ *
+ * The enumerable keys (SMC_KEYIDX_FIRST_ENUM and up) must be sorted by their
+ * name (big endian value) like on real hardware, as the guest may look them up
+ * by index.  The non-enumerable keys before SMC_KEYIDX_FIRST_ENUM can only be
+ * accessed by name and do not count towards \#KEY.
  */
 static const DEVSMCKEYDESC g_aSmcKeys[] =
 {
@@ -352,13 +362,16 @@ static const DEVSMCKEYDESC g_aSmcKeys[] =
     { SMC4CH('L','S','O','F'), SMC4CH('f','l','a','g'), scmKeyGetZero,                NULL,                       1, SMC_KEY_ATTR_READ },
 # endif
     { SMC4CH('M','S','S','D'), SMC4CH('s','i','8',' '), scmKeyGetShutdownReason,      scmKeyPutShutdownReason,    1, SMC_KEY_ATTR_READ | SMC_KEY_ATTR_WRITE | SMC_KEY_ATTR_PRIVATE },
+    { SMC4CH('M','S','S','P'), SMC4CH('s','i','8',' '), scmKeyGetShutdownPhase,       scmKeyPutShutdownPhase,     1, SMC_KEY_ATTR_READ | SMC_KEY_ATTR_WRITE },
     /* MSDS is not present on MacPro3,1 nor MacBookPro10,1, so returning not found is fine. */
 # ifdef VBOX_WITH_SMC_2_x
     { SMC4CH('M','S','T','f'), SMC4CH('u','i','8',' '), scmKeyGetZero,                NULL,                       1, SMC_KEY_ATTR_READ },
 # endif
     { SMC4CH('N','A','T','J'), SMC4CH('u','i','8',' '), scmKeyGetNinjaTimerAction,    scmKeyPutNinjaTimerAction,  1, SMC_KEY_ATTR_READ | SMC_KEY_ATTR_WRITE | SMC_KEY_ATTR_PRIVATE },
     { SMC4CH('R','E','V',' '), SMC4CH('{','r','e','v'), scmKeyGetRevision,            NULL,                       6, SMC_KEY_ATTR_READ },
-/** @todo MSSP, NTOK and more. */
+/** @todo NTOK, RGEN and more.  Keys which are not listed here are answered
+ *        with SMC_STATUS_CD_KEY_NOT_FOUND, which macOS handles fine (QEMU's
+ *        Apple SMC emulation implements even fewer keys). */
 };
 
 #if defined(IN_RING0) && (defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86))
@@ -684,6 +697,25 @@ static DECLCALLBACK(uint8_t) scmKeyPutShutdownReason(PDEVSMC pThis, PCDEVSMCCURK
 }
 
 
+/** @callback_method_impl{FNDEVSMCKEYGETTER, MSSP - Sleep/shutdown phase(?).} */
+static DECLCALLBACK(uint8_t) scmKeyGetShutdownPhase(PDEVSMC pThis, PDEVSMCCURKEY pCurKey, uint8_t bCmd, PCDEVSMCKEYDESC pKeyDesc)
+{
+    RT_NOREF2(bCmd, pKeyDesc);
+    pCurKey->Value.ab[0] = pThis->bShutdownPhase;
+    return SMC_STATUS_CD_SUCCESS;
+}
+
+
+/** @callback_method_impl{FNDEVSMCKEYPUTTER, MSSP - Sleep/shutdown phase(?).} */
+static DECLCALLBACK(uint8_t) scmKeyPutShutdownPhase(PDEVSMC pThis, PCDEVSMCCURKEY pCurKey, uint8_t bCmd, PCDEVSMCKEYDESC pKeyDesc)
+{
+    RT_NOREF2(bCmd, pKeyDesc);
+    Log(("scmKeyPutShutdownPhase: %#x -> %#x\n", pThis->bShutdownPhase, pCurKey->Value.ab[0]));
+    pThis->bShutdownPhase = pCurKey->Value.ab[0];
+    return SMC_STATUS_CD_SUCCESS;
+}
+
+
 /** @callback_method_impl{FNDEVSMCKEYGETTER, MSSD - Ninja timer action job.} */
 static DECLCALLBACK(uint8_t)
 scmKeyGetNinjaTimerAction(PDEVSMC pThis, PDEVSMCCURKEY pCurKey, uint8_t bCmd, PCDEVSMCKEYDESC pKeyDesc)
@@ -811,19 +843,22 @@ static uint8_t smcKeyGetByIndex(PDEVSMC pThis)
     uint32_t iKey = RT_BE2H_U32(pThis->CurKey.Key.u32);
     if (iKey < RT_ELEMENTS(g_aSmcKeys) - SMC_KEYIDX_FIRST_ENUM)
     {
+        /* The index is relative to the first enumerable key, the ones before it
+           (OSK0, OSK1) are hidden.  This must match what #KEY reports. */
+        iKey += SMC_KEYIDX_FIRST_ENUM;
         pThis->CurKey.Key     = g_aSmcKeys[iKey].Key;
         pThis->CurKey.Type    = g_aSmcKeys[iKey].Type;
         pThis->CurKey.fAttr   = g_aSmcKeys[iKey].fAttr;
         pThis->CurKey.cbValue = g_aSmcKeys[iKey].cbValue;
         RT_ZERO(pThis->CurKey.Value);
-        Log(("smcKeyGetByIndex: %#x -> %c%c%c%c\n", iKey,
-             pThis->CurKey.Key.ab[3], pThis->CurKey.Key.ab[2], pThis->CurKey.Key.ab[1], pThis->CurKey.Key.ab[0]));
+        Log(("smcKeyGetByIndex: %#x -> %c%c%c%c\n", iKey - SMC_KEYIDX_FIRST_ENUM,
+             pThis->CurKey.Key.ab[0], pThis->CurKey.Key.ab[1], pThis->CurKey.Key.ab[2], pThis->CurKey.Key.ab[3]));
         bRc = SMC_STATUS_CD_SUCCESS;
     }
     else
     {
         Log(("smcKeyGetByIndex: Key out or range: %#x, max %#x\n", iKey, RT_ELEMENTS(g_aSmcKeys) - SMC_KEYIDX_FIRST_ENUM));
-        bRc = SMC_STATUS_CD_KEY_NOT_FOUND;
+        bRc = SMC_STATUS_CD_KEY_INDEX_RANGE_ERROR; /* The dedicated status for this (QEMU: APPLESMC_ST_1E_BAD_INDEX). */
     }
     return bRc;
 }
@@ -872,16 +907,65 @@ static uint8_t smcKeyGetAttrByName(PDEVSMC pThis)
 }
 
 
+/**
+ * Prepares putting (writing) a key value after the guest has written the key
+ * name and value size.
+ *
+ * This checks that the key exists, is writable and that the value size
+ * matches, so the guest gets the proper status code instead of having its
+ * write silently ignored.
+ *
+ * @returns Apple SMC Status Code.
+ * @param   pThis       The SMC instance data.
+ */
 static uint8_t smcKeyPutPrepare(PDEVSMC pThis)
 {
-    RT_NOREF1(pThis);
-    return 0;
+#ifdef LOG_ENABLED
+    uint32_t const uKeyValueLog = RT_H2LE_U32(pThis->CurKey.Key.u32);
+#endif
+    uint32_t const iKey = smcKeyLookup(pThis->CurKey.Key.u32);
+    if (iKey == UINT32_MAX)
+    {
+        Log(("smcKeyPutPrepare: Key not found! key=%4.4s size=%#x\n", &uKeyValueLog, pThis->CurKey.cbValue));
+        return SMC_STATUS_CD_KEY_NOT_FOUND;
+    }
+    if (   !g_aSmcKeys[iKey].pfnPut
+        || !(g_aSmcKeys[iKey].fAttr & SMC_KEY_ATTR_WRITE))
+    {
+        Log(("smcKeyPutPrepare: key=%4.4s is not writable!\n", &uKeyValueLog));
+        return SMC_STATUS_CD_KEY_NOT_WRITABLE;
+    }
+    if (   g_aSmcKeys[iKey].cbValue != pThis->CurKey.cbValue
+        && g_aSmcKeys[iKey].cbValue)
+    {
+        Log(("smcKeyPutPrepare: Wrong value size; user=%#x smc=%#x key=%4.4s !\n",
+             pThis->CurKey.cbValue, g_aSmcKeys[iKey].cbValue, &uKeyValueLog));
+        return SMC_STATUS_CD_KEY_SIZE_MISMATCH;
+    }
+
+    pThis->CurKey.Type  = g_aSmcKeys[iKey].Type;
+    pThis->CurKey.fAttr = g_aSmcKeys[iKey].fAttr;
+    RT_ZERO(pThis->CurKey.Value);
+    return SMC_STATUS_CD_SUCCESS;
 }
 
+
+/**
+ * Hands the value the guest has written to the putter of the current key.
+ *
+ * @returns Apple SMC Status Code.
+ * @param   pThis       The SMC instance data.
+ */
 static uint8_t smcKeyPutValue(PDEVSMC pThis)
 {
-    RT_NOREF1(pThis);
-    return 0;
+    /* Note! The guest cannot get here without smcKeyPutPrepare succeeding, but
+             we check again rather than asserting on guest controlled input. */
+    uint32_t const iKey = smcKeyLookup(pThis->CurKey.Key.u32);
+    if (iKey == UINT32_MAX)
+        return SMC_STATUS_CD_KEY_NOT_FOUND;
+    if (!g_aSmcKeys[iKey].pfnPut)
+        return SMC_STATUS_CD_KEY_NOT_WRITABLE;
+    return g_aSmcKeys[iKey].pfnPut(pThis, &pThis->CurKey, pThis->bCmd, &g_aSmcKeys[iKey]);
 }
 
 
@@ -1028,6 +1112,7 @@ static VBOXSTRICTRC smcRegData_w(PDEVSMC pThis, uint8_t uReg, uint8_t bValue)
                 }
             }
             else if (   pThis->bCmd == SMC_CMD_PUT_KEY
+                     && pThis->u.s.bState == 0x05 /* smcKeyPutPrepare succeeded */
                      && pThis->offValue < pThis->CurKey.cbValue)
             {
                 /* More value bytes for put key action. */
@@ -1044,7 +1129,10 @@ static VBOXSTRICTRC smcRegData_w(PDEVSMC pThis, uint8_t uReg, uint8_t bValue)
             {
                 Log(("smcRegData_w: Writing too much data on %s command!\n", pThis->bCmd == SMC_CMD_PUT_KEY ? "put" : "get"));
                 pThis->u.s.bState = 0x00;
-                pThis->u.s.bStatusCode = SMC_STATUS_CD_SPURIOUS_DATA;
+                /* Keep the first error, e.g. the one from smcKeyPutPrepare when the
+                   guest sends all the value bytes before checking the status. */
+                if (pThis->u.s.bStatusCode == SMC_STATUS_CD_SUCCESS)
+                    pThis->u.s.bStatusCode = SMC_STATUS_CD_SPURIOUS_DATA;
             }
             break;
 
@@ -1448,6 +1536,14 @@ static DECLCALLBACK(int) smcR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFGM
      */
     pThis->bDollaryNumber  = 1;
     pThis->bShutdownReason = 3; /* STOP_CAUSE_POWERKEY_GOOD_CODE */
+    pThis->bShutdownPhase  = 0; /* Same as QEMU. */
+
+#ifdef VBOX_STRICT
+    /* The enumerable keys must be sorted, see g_aSmcKeys. */
+    for (uint32_t iKey = SMC_KEYIDX_FIRST_ENUM + 1; iKey < RT_ELEMENTS(g_aSmcKeys); iKey++)
+        AssertMsg(RT_BE2H_U32(g_aSmcKeys[iKey - 1].Key.u32) < RT_BE2H_U32(g_aSmcKeys[iKey].Key.u32),
+                  ("%.4s vs %.4s\n", (const char *)&g_aSmcKeys[iKey - 1].Key.ab[0], (const char *)&g_aSmcKeys[iKey].Key.ab[0]));
+#endif
 
     /*
      * Validate configuration.

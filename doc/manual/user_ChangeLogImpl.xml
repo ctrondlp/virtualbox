@@ -118,6 +118,11 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>Apple SMC: Fixed enumerating keys by index and writing key values,
+          and added the MSSP key</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 
