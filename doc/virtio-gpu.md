@@ -95,6 +95,25 @@ rings one doorbell per kick. Measurements are in `vbox-devtools/testkit/gpu-2026
 - Anything that looks like a vulnerability found while working on this (in this code or in existing VirtualBox
   code) is deliberately not described here; see the reporting rules at the top of this section.
 
+## Independent review (2026-10-29)
+
+Four read-only reviews of the code (memory window, device, renderer wrapper, Main/VirtioCore/firmware config) were
+done after the first build. Confirmed problems were fixed in follow-up commits (stale cached paging-structure
+pointers after a window unmap, fail-open Hyper-V unmap, a deadlock when a device thread unmaps during suspend or
+power off, an unbounded wait on a stuck renderer call, `VIRGL_DISABLE_MT`, a debug-log NULL dereference).
+Findings that were judged low priority and are NOT fixed:
+
+- The display copy is not serialized with Main's resize at power-down (needs a dedicated display lock held across
+  the resize and the copy and taken in `pfnSetRenderVRAM`).
+- Completions of commands in flight across a guest driver reset can land on the new used ring (needs a reset
+  generation counter); only the guest itself is affected, but strict builds assert.
+- Other vCPUs may keep a stale IEM instruction buffer after a window unmap; only relevant if IEM_WITH_CODE_TLB is
+  defined (arm64 builds only).
+- Blob memory is not released when its creating context is destroyed; this is safe only if the renderer keeps blob
+  memory alive independently of the context, which must be checked against the real library.
+- A synchronous Cleanup request to a hung library can still block forever (calls other than the lock acquisition are
+  not bounded).
+
 ## What is left
 
 1. Install the build (`vbox-switch.ps1 -To Dev`, UAC) and regression-test existing VMs, then the 2D device again.
