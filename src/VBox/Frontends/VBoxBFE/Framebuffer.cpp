@@ -69,7 +69,6 @@ int PushSDLEventForSure(SDL_Event *event)
     return -1;
 }
 
-#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
 /**
  * Special SDL_PushEvent function for NotifyUpdate events. These events may occur in bursts
  * so make sure they don't flood the SDL event queue.
@@ -84,6 +83,8 @@ void PushNotifyUpdateEvent(SDL_Event *event)
     /* A global counter is faster than SDL_PeepEvents() */
     if (fSuccess)
         ASMAtomicIncS32(&g_cNotifyUpdateEventsPending);
+    else
+        RTMemFree(event->user.data1); /* The update rectangle, the event handler would have freed it. */
     /* In order to not flood the SDL event queue, yield the CPU or (if there are already many
      * events queued) even sleep */
     if (g_cNotifyUpdateEventsPending > 96)
@@ -96,7 +97,6 @@ void PushNotifyUpdateEvent(SDL_Event *event)
     else
         RTThreadYield();
 }
-#endif /* VBOXSDL_WITH_X11 */
 
 
 //
@@ -310,12 +310,13 @@ int Framebuffer::notifyUpdate(uint32_t x, uint32_t y,
     LogFlow(("Framebuffer::notifyUpdate: x = %d, y = %d, w = %d, h = %d\n",
              x, y, w, h));
 
-#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
     /*
      * SDL does not allow us to make this call from any other thread than
      * the main SDL thread (which initialized the video mode). So we have
      * to send an event to the main SDL thread and process it there. For
      * sake of simplicity, we encode all information in the event parameters.
+     * This applies to Windows as well: the SDL renderer (Direct3D there) must
+     * only be used on the thread which created it.
      */
     SDL_Event event;
     event.type       = SDL_USEREVENT;
@@ -332,9 +333,6 @@ int Framebuffer::notifyUpdate(uint32_t x, uint32_t y,
 
     event.user.data2 = NULL;
     PushNotifyUpdateEvent(&event);
-#else /* !VBOXSDL_WITH_X11 */
-    update(x, y, w, h, true /* fGuestRelative */);
-#endif /* !VBOXSDL_WITH_X11 */
 
     return VINF_SUCCESS;
 }
@@ -615,7 +613,7 @@ void Framebuffer::resizeSDL(void)
  * Update specified framebuffer area. The coordinates can either be
  * relative to the guest framebuffer or relative to the screen.
  *
- * @remarks Must be called from the SDL thread on Linux!
+ * @remarks Must be called from the SDL thread!
  * @param   x              left column
  * @param   y              top row
  * @param   w              width in pixels
@@ -624,9 +622,7 @@ void Framebuffer::resizeSDL(void)
  */
 void Framebuffer::update(int x, int y, int w, int h, bool fGuestRelative)
 {
-#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
     AssertMsg(gSdlNativeThread == RTThreadNativeSelf(), ("Wrong thread! SDL is not threadsafe!\n"));
-#endif
     RTCritSectEnter(&mUpdateLock);
     Log3Func(("mfUpdates=%RTbool %d,%d %dx%d\n", mfUpdates, x, y, w, h));
     if (!mfUpdates)

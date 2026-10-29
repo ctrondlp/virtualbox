@@ -66,9 +66,7 @@
 #define VBOXSDL_TERM_ABEND              1
 /** @} */
 
-#if defined(VBOXSDL_WITH_X11) || defined(RT_OS_DARWIN)
 void PushNotifyUpdateEvent(SDL_Event *event);
-#endif
 int  PushSDLEventForSure(SDL_Event *event);
 
 class Display;
