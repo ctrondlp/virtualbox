@@ -702,6 +702,8 @@ static int pgmR3PrepMmio2Pages(PVM pVM)
         PPGMREGMMIO2RANGE const pRegMmio2 = &pVM->pgm.s.aMmio2Ranges[idx];
         PPGMRAMRANGE const      pRamRange = pVM->pgm.s.apMmio2RamRanges[idx];
         uint32_t const          cPages    = pRamRange->cb >> GUEST_PAGE_SHIFT;
+        if (pRegMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+            continue; /* Host memory owned by the device, not part of the saved state. */
         PGM_UNLOCK(pVM);
 
         PPGMLIVESAVEMMIO2PAGE paLSPages = (PPGMLIVESAVEMMIO2PAGE)MMR3HeapAllocZ(pVM, MM_TAG_PGM,
@@ -947,6 +949,8 @@ static void pgmR3ScanMmio2Pages(PVM pVM, uint32_t uPass)
         PPGMREGMMIO2RANGE const pRegMmio2 = &pVM->pgm.s.aMmio2Ranges[idx];
         PPGMLIVESAVEMMIO2PAGE   paLSPages = pRegMmio2->paLSPages;
         uint32_t                cPages    = pVM->pgm.s.apMmio2RamRanges[idx]->cb >> GUEST_PAGE_SHIFT;
+        if (pRegMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+            continue; /* Not saved, see pgmR3PrepMmio2Pages. */
         PGM_UNLOCK(pVM);
 
         for (uint32_t iPage = 0; iPage < cPages; iPage++)
@@ -992,6 +996,8 @@ static int pgmR3SaveMmio2Pages(PVM pVM, PSSMHANDLE pSSM, bool fLiveSave, uint32_
             uint32_t const              cPages    = pRamRange->cb >> GUEST_PAGE_SHIFT;
             uint8_t const              *pbPage    = pRamRange->pbR3;
             uint32_t                    iPageLast = cPages;
+            if (pRegMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+                continue; /* Not saved, see pgmR3PrepMmio2Pages. */
             for (uint32_t iPage = 0; iPage < cPages; iPage++, pbPage += GUEST_PAGE_SIZE)
             {
                 uint8_t u8Type;
@@ -1050,6 +1056,8 @@ static int pgmR3SaveMmio2Pages(PVM pVM, PSSMHANDLE pSSM, bool fLiveSave, uint32_
             uint32_t const              cPages    = pRamRange->cb >> GUEST_PAGE_SHIFT;
             uint8_t const              *pbPage    = pRamRange->pbR3;
             uint32_t                    iPageLast = cPages;
+            if (pRegMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+                continue; /* Not saved, see pgmR3PrepMmio2Pages. */
             PGM_UNLOCK(pVM);
 
             for (uint32_t iPage = 0; iPage < cPages; iPage++, pbPage += GUEST_PAGE_SIZE)
@@ -2929,6 +2937,19 @@ static int pgmR3LoadMemory(PVM pVM, PSSMHANDLE pSSM, uint32_t uVersion, uint32_t
                 AssertLogRelMsgReturn(iPage < (pMmio2RamRange->cb >> GUEST_PAGE_SHIFT),
                                       ("iPage=%#x cb=%RGp %s\n", iPage, pMmio2RamRange->cb, pMmio2RamRange->pszDesc),
                                       VERR_PGM_SAVED_MMIO2_PAGE_NOT_FOUND);
+                if (pRegMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+                {
+                    /* Host windows have no backing of their own and are never saved;
+                       skip whatever a (foreign) saved state has for one. */
+                    if ((u8 & ~PGM_STATE_REC_FLAG_ADDR) == PGM_STATE_REC_MMIO2_RAW)
+                    {
+                        rc = SSMR3Skip(pSSM, GUEST_PAGE_SIZE);
+                        if (RT_FAILURE(rc))
+                            return rc;
+                    }
+                    GCPhys = NIL_RTGCPHYS;
+                    break;
+                }
                 void * const pvDstPage = &pMmio2RamRange->pbR3[(size_t)iPage << GUEST_PAGE_SHIFT];
 
                 /*

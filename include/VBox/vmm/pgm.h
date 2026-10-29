@@ -1511,8 +1511,33 @@ VMMR3_INT_DECL(int) PGMR3PhysMmioUnmap(PVM pVM, PVMCPU pVCpu, RTGCPHYS GCPhys, R
 #define PGMPHYS_MMIO2_FLAGS_TRACK_DIRTY_PAGES       RT_BIT_32(0)
 /** Use the pointer supplied in ppv as the backing storage. */
 #define PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING    RT_BIT_32(1)
+/** Sparse host window: no backing memory is allocated for the region.  Parts
+ * of it are backed at runtime by caller provided host memory using
+ * PGMR3PhysMmio2MapHostRange() and PGMR3PhysMmio2UnmapHostRange().  Pages that
+ * are not backed share a private sink page, so the guest only ever sees data it
+ * wrote itself there.  The ring-3 mapping returned on registration is NULL.
+ * Only supported in NEM mode without ring-0 support (driverless) and with a NEM
+ * backend that implements NEMR3NotifyPhysHostRangeMap().  Cannot be combined
+ * with the other flags, and the region must fit in a single chunk. */
+#define PGMPHYS_MMIO2_FLAGS_HOST_WINDOW             RT_BIT_32(2)
 /** Valid flags. */
-#define PGMPHYS_MMIO2_FLAGS_VALID_MASK              UINT32_C(0x00000003)
+#define PGMPHYS_MMIO2_FLAGS_VALID_MASK              UINT32_C(0x00000007)
+/** @} */
+
+/** @name PGMPHYS_MMIO2_HOST_RANGE_F_XXX - Flags for PGMR3PhysMmio2MapHostRange.
+ * @see PGMR3PhysMmio2MapHostRange, PDMDevHlpMmio2MapHostRange
+ * @{ */
+/** Map the range read-only for the guest.
+ * @note Not implemented yet, PGMR3PhysMmio2MapHostRange returns
+ *       VERR_NOT_SUPPORTED when this is specified. */
+#define PGMPHYS_MMIO2_HOST_RANGE_F_READ_ONLY        RT_BIT_32(0)
+/** Do not grant execute access when the range is mapped into the hypervisor.
+ * Best effort only: pages remapped lazily after a hypervisor side unmap may get
+ * execute access again, and instructions may still be emulated from the range.
+ * This is not a host protection measure. */
+#define PGMPHYS_MMIO2_HOST_RANGE_F_NO_EXEC          RT_BIT_32(1)
+/** Valid flags. */
+#define PGMPHYS_MMIO2_HOST_RANGE_F_VALID_MASK       UINT32_C(0x00000003)
 /** @} */
 
 #ifdef IN_RING3
@@ -1528,6 +1553,10 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2ChangeRegionNo(PVM pVM, PPDMDEVINS pDevIns, PG
 VMMR3_INT_DECL(int) PGMR3PhysMmio2QueryAndResetDirtyBitmap(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2,
                                                            void *pvBitmap, size_t cbBitmap);
 VMMR3_INT_DECL(int) PGMR3PhysMmio2ControlDirtyPageTracking(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, bool fEnabled);
+VMMR3_INT_DECL(int) PGMR3PhysMmio2MapHostRange(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion,
+                                               void *pvHost, RTGCPHYS cb, uint32_t fFlags);
+VMMR3_INT_DECL(int) PGMR3PhysMmio2UnmapHostRange(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion,
+                                                 RTGCPHYS cb);
 #endif /* IN_RING3 */
 
 /** @name PGMPHYS_ROM_FLAGS_XXX - ROM registration flags.

@@ -1570,6 +1570,40 @@ typedef struct PGMLIVESAVEMMIO2PAGE
 typedef PGMLIVESAVEMMIO2PAGE *PPGMLIVESAVEMMIO2PAGE;
 
 /**
+ * Ring-3 tracking of an MMIO2 host window (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW).
+ *
+ * A host window has no backing of its own.  Each page is either backed by caller
+ * provided host memory (PGMR3PhysMmio2MapHostRange) or by the private sink page.
+ * The array is only modified while owning the PGM lock, and backed entries are
+ * only removed inside an EMT rendezvous (or with no guest code executing), so
+ * no EMT can be using a stale host address when PGMR3PhysMmio2UnmapHostRange
+ * returns.
+ */
+typedef struct PGMMMIO2HOSTWINDOW
+{
+    /** Private, zero initialized page shared by all pages without host backing. */
+    R3PTRTYPE(uint8_t *)                pbSink;
+    /** Number of pages in the window. */
+    uint32_t                            cPages;
+    /** Number of pages currently backed by host memory. */
+    uint32_t                            cBackedPages;
+    /** Per page host address (page aligned) or'ed with
+     * PGMMMIO2HOSTWINDOW_PAGE_F_XXX, zero if not backed. */
+    RTR3UINTPTR                         auPages[1];
+} PGMMMIO2HOSTWINDOW;
+/** Pointer to MMIO2 host window tracking. */
+typedef PGMMMIO2HOSTWINDOW *PPGMMMIO2HOSTWINDOW;
+
+/** @name PGMMMIO2HOSTWINDOW_PAGE_F_XXX - Flags kept in the low bits of
+ *        PGMMMIO2HOSTWINDOW::auPages entries.
+ * @{ */
+/** Do not grant execute access in the hypervisor mapping. */
+#define PGMMMIO2HOSTWINDOW_PAGE_F_NO_EXEC       UINT32_C(0x00000001)
+/** Mask of the flags. */
+#define PGMMMIO2HOSTWINDOW_PAGE_F_MASK          UINT32_C(0x00000001)
+/** @} */
+
+/**
  * A registered MMIO2 (= Device RAM) range.
  *
  * There are a few reason why we need to keep track of these registrations.  One
@@ -1616,7 +1650,9 @@ typedef struct PGMREGMMIO2RANGE
     R3PTRTYPE(PPGMPHYSHANDLER)          pPhysHandlerR3;
     /** Live save per page tracking data for MMIO2. */
     R3PTRTYPE(PPGMLIVESAVEMMIO2PAGE)    paLSPages;
-    RTR3PTR                             R3PtrPadding;
+    /** Host window tracking (PGMREGMMIO2RANGE_F_HOST_WINDOW), NULL otherwise.
+     * Host windows always consist of a single chunk. */
+    R3PTRTYPE(PPGMMMIO2HOSTWINDOW)      pHostWindowR3;
 } PGMREGMMIO2RANGE;
 /** Pointer to a MMIO2 or pre-registered MMIO range. */
 typedef PGMREGMMIO2RANGE *PPGMREGMMIO2RANGE;
@@ -1639,6 +1675,12 @@ typedef PGMREGMMIO2RANGE *PPGMREGMMIO2RANGE;
 #define PGMREGMMIO2RANGE_F_TRACKING_ENABLED     UINT16_C(0x0040)
 /** Set if there are dirty pages in the range.   */
 #define PGMREGMMIO2RANGE_F_IS_DIRTY             UINT16_C(0x0080)
+/** Set if the backing memory was supplied by the caller
+ * (PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING) and must not be freed by PGM. */
+#define PGMREGMMIO2RANGE_F_EXISTING_BACKING     UINT16_C(0x0100)
+/** Set if this is a host window (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW), see
+ * PGMREGMMIO2RANGE::pHostWindowR3.  There is no backing (pbR3 is NULL). */
+#define PGMREGMMIO2RANGE_F_HOST_WINDOW          UINT16_C(0x0200)
 /** @} */
 
 
@@ -3993,6 +4035,9 @@ DECLHIDDEN(int) pgmPhysMmio2RegisterWorkerExisting(PVMCC pVM, uint32_t const cGu
                                                    const iSubDev, uint8_t const iRegion, uint32_t const fFlags,
                                                    R3PTRTYPE(uint8_t *)pbR3);
 DECLHIDDEN(int) pgmPhysMmio2DeregisterWorker(PVMCC pVM, uint8_t idMmio2, uint8_t cChunks, PPDMDEVINSR3 pDevIns);
+#ifdef IN_RING3
+DECLHIDDEN(uint8_t *) pgmPhysMmio2HostWindowPagePtr(PVMCC pVM, PCPGMPAGE pPage, uint32_t *pfPageFlags);
+#endif
 int             pgmPhysFreePage(PVM pVM, PGMMFREEPAGESREQ pReq, uint32_t *pcPendingPages, PPGMPAGE pPage, RTGCPHYS GCPhys,
                                 PGMPAGETYPE enmNewType);
 #ifdef VBOX_STRICT

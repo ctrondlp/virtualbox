@@ -6679,6 +6679,100 @@ VMMR3_INT_DECL(bool) NEMR3IsMmio2DirtyPageTrackingSupported(PVM pVM)
 }
 
 
+/**
+ * Unmaps a guest physical range inside an MMIO2 host window from Hyper-V.
+ *
+ * The range may hold any mix of host ranges mapped in one go, individually
+ * (lazily) mapped pages and holes.  WHvUnmapGpaRange accepts holes; should it
+ * fail anyway we unmap page by page, ignoring the failures as they are expected
+ * for the holes.
+ *
+ * @returns VBox status code.
+ * @param   pVM         The cross context VM structure.
+ * @param   GCPhys      The start of the range (page aligned).
+ * @param   cb          The size of the range (page aligned).
+ */
+static int nemR3WinUnmapHostWindowRange(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb)
+{
+    STAM_REL_PROFILE_START(&pVM->nem.s.StatProfUnmapGpaRange, a);
+    HRESULT hrc = WHvUnmapGpaRange(pVM->nem.s.hPartition, GCPhys, cb);
+    STAM_REL_PROFILE_STOP(&pVM->nem.s.StatProfUnmapGpaRange, a);
+    if (SUCCEEDED(hrc))
+        return VINF_SUCCESS;
+
+    LogRel2(("nemR3WinUnmapHostWindowRange: %RGp LB %RGp -> %Rhrc (%#x) Last=%#x/%u; unmapping page by page\n",
+             GCPhys, cb, hrc, hrc, RTNtLastStatusValue(), RTNtLastErrorValue()));
+    uint64_t cFailed = 0;
+    for (RTGCPHYS off = 0; off < cb; off += X86_PAGE_SIZE)
+    {
+        hrc = WHvUnmapGpaRange(pVM->nem.s.hPartition, GCPhys + off, X86_PAGE_SIZE);
+        if (FAILED(hrc))
+            cFailed++;
+    }
+    LogRel2(("nemR3WinUnmapHostWindowRange: %RGp LB %RGp: %RU64 of %RU64 pages were not mapped\n",
+             GCPhys, cb, cFailed, cb >> X86_PAGE_SHIFT));
+    return VINF_SUCCESS;
+}
+
+
+VMMR3_INT_DECL(bool) NEMR3IsHostRangeMappingSupported(PVM pVM)
+{
+    RT_NOREF(pVM);
+    return true;
+}
+
+
+VMMR3_INT_DECL(int) NEMR3NotifyPhysHostRangeMap(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, void *pvHost, uint32_t fProt,
+                                                uint8_t *pu2State)
+{
+    Log5(("NEMR3NotifyPhysHostRangeMap: %RGp LB %RGp pvHost=%p fProt=%#x\n", GCPhys, cb, pvHost, fProt));
+    *pu2State = UINT8_MAX;
+    AssertReturn(fProt & NEM_PAGE_PROT_READ, VERR_INVALID_PARAMETER);
+    AssertReturn(cb && !(cb & X86_PAGE_OFFSET_MASK) && !(GCPhys & X86_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(!((uintptr_t)pvHost & X86_PAGE_OFFSET_MASK), VERR_INVALID_POINTER);
+
+    /*
+     * Hyper-V wants the range unmapped before it can be mapped with a new backing,
+     * so get rid of whatever is there (lazily mapped sink pages).
+     */
+    int rc = nemR3WinUnmapHostWindowRange(pVM, GCPhys, cb);
+    AssertRCReturn(rc, rc);
+    *pu2State = NEM_WIN_PAGE_STATE_UNMAPPED;
+
+    WHV_MAP_GPA_RANGE_FLAGS fWHvFlags = WHvMapGpaRangeFlagRead;
+    if (fProt & NEM_PAGE_PROT_WRITE)
+        fWHvFlags |= WHvMapGpaRangeFlagWrite;
+    if (fProt & NEM_PAGE_PROT_EXECUTE)
+        fWHvFlags |= WHvMapGpaRangeFlagExecute;
+    STAM_REL_PROFILE_START(&pVM->nem.s.StatProfMapGpaRange, a);
+    HRESULT hrc = WHvMapGpaRange(pVM->nem.s.hPartition, pvHost, GCPhys, cb, fWHvFlags);
+    STAM_REL_PROFILE_STOP(&pVM->nem.s.StatProfMapGpaRange, a);
+    if (SUCCEEDED(hrc))
+    {
+        *pu2State = fProt & NEM_PAGE_PROT_WRITE ? NEM_WIN_PAGE_STATE_WRITABLE : NEM_WIN_PAGE_STATE_READABLE;
+        return VINF_SUCCESS;
+    }
+
+    LogRel(("NEMR3NotifyPhysHostRangeMap: GCPhys=%RGp LB %RGp pvHost=%p fWHvFlags=%#x -> hrc=%Rhrc (%#x) Last=%#x/%u\n",
+            GCPhys, cb, pvHost, fWHvFlags, hrc, hrc, RTNtLastStatusValue(), RTNtLastErrorValue()));
+    STAM_REL_COUNTER_INC(&pVM->nem.s.StatMapPageFailed);
+    return VERR_NEM_MAP_PAGES_FAILED;
+}
+
+
+VMMR3_INT_DECL(int) NEMR3NotifyPhysHostRangeUnmap(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, uint8_t *pu2State)
+{
+    Log5(("NEMR3NotifyPhysHostRangeUnmap: %RGp LB %RGp\n", GCPhys, cb));
+    *pu2State = UINT8_MAX;
+    AssertReturn(cb && !(cb & X86_PAGE_OFFSET_MASK) && !(GCPhys & X86_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+
+    int rc = nemR3WinUnmapHostWindowRange(pVM, GCPhys, cb);
+    if (RT_SUCCESS(rc))
+        *pu2State = NEM_WIN_PAGE_STATE_UNMAPPED;
+    return rc;
+}
+
+
 VMMR3_INT_DECL(int) NEMR3NotifyPhysMmioExMapEarly(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, uint32_t fFlags,
                                                   void *pvRam, void *pvMmio2, uint8_t *pu2State, uint32_t *puNemRange)
 {
@@ -6732,7 +6826,10 @@ VMMR3_INT_DECL(int) NEMR3NotifyPhysMmioExMapEarly(PVM pVM, RTGCPHYS GCPhys, RTGC
     }
     else
     {
-        Assert(!(fFlags & NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2));
+        /* MMIO, or an MMIO2 host window whose backed parts PGM maps separately
+           (NEMR3NotifyPhysHostRangeMap) and the rest is mapped lazily on access. */
+        Assert(   !(fFlags & NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2)
+               || (fFlags & NEM_NOTIFY_PHYS_MMIO_EX_F_HOST_WINDOW));
         *pu2State = NEM_WIN_PAGE_STATE_UNMAPPED;
     }
     RT_NOREF(pvRam);
@@ -6760,7 +6857,14 @@ VMMR3_INT_DECL(int) NEMR3NotifyPhysMmioExUnmap(PVM pVM, RTGCPHYS GCPhys, RTGCPHY
      */
     /** @todo If we implement aliasing (MMIO2 page aliased into MMIO range),
      *        we may have more stuff to unmap even in case of pure MMIO... */
-    if (fFlags & NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2)
+    if (fFlags & NEM_NOTIFY_PHYS_MMIO_EX_F_HOST_WINDOW)
+    {
+        /* A host window is a patchwork of eagerly mapped host ranges, lazily
+           mapped pages and holes. */
+        Assert(fFlags & NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2);
+        rc = nemR3WinUnmapHostWindowRange(pVM, GCPhys, cb);
+    }
+    else if (fFlags & NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2)
     {
         STAM_REL_PROFILE_START(&pVM->nem.s.StatProfUnmapGpaRange, a);
         HRESULT hrc = WHvUnmapGpaRange(pVM->nem.s.hPartition, GCPhys, cb);

@@ -1363,6 +1363,10 @@ static int pgmPhysMmio2RegisterWorkerCommon(PVMCC pVM, uint32_t const cGuestPage
             pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_LAST_CHUNK;
         if (fFlags & PGMPHYS_MMIO2_FLAGS_TRACK_DIRTY_PAGES)
             pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_TRACK_DIRTY_PAGES;
+        if (fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING)
+            pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_EXISTING_BACKING;
+        if (fFlags & PGMPHYS_MMIO2_FLAGS_HOST_WINDOW)
+            pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_HOST_WINDOW; /* The caller sets up pHostWindowR3. */
 
         pMmio2->iSubDev         = iSubDev;
         pMmio2->iRegion         = iRegion;
@@ -1374,6 +1378,7 @@ static int pgmPhysMmio2RegisterWorkerCommon(PVMCC pVM, uint32_t const cGuestPage
         pMmio2->cbReal          = (RTGCPHYS)cPagesTrackedByChunk << GUEST_PAGE_SHIFT;
         pMmio2->pPhysHandlerR3  = NIL_RTR3PTR; /* Pre-alloc is done by ring-3 caller. */
         pMmio2->paLSPages       = NIL_RTR3PTR;
+        pMmio2->pHostWindowR3   = NIL_RTR3PTR;
 
 #if defined(IN_RING0) && !defined(VBOX_WITH_LINEAR_HOST_PHYS_MEM)
         pVM->pgmr0.s.apbMmio2Backing[idx] = &pbMmio2BackingR0[offMmio2Backing];
@@ -1615,6 +1620,8 @@ VMMR0_INT_DECL(int) PGMR0PhysMmio2RegisterReq(PGVM pGVM, PPGMPHYSMMIO2REGISTERRE
     AssertReturn(pReq->cGuestPages <= (MM_MMIO_64_MAX >> GUEST_PAGE_SHIFT), VERR_OUT_OF_RANGE);
 
     AssertMsgReturn(!(pReq->fFlags & ~PGMPHYS_MMIO2_FLAGS_VALID_MASK), ("fFlags=%#x\n", pReq->fFlags), VERR_INVALID_FLAGS);
+    /* Host windows are ring-3 only (driverless NEM mode). */
+    AssertMsgReturn(!(pReq->fFlags & PGMPHYS_MMIO2_FLAGS_HOST_WINDOW), ("fFlags=%#x\n", pReq->fFlags), VERR_INVALID_FLAGS);
 
     AssertMsgReturn(   pReq->cChunks >  0
                     && pReq->cChunks <  PGM_MAX_MMIO2_RANGES
@@ -1714,8 +1721,10 @@ DECLHIDDEN(int) pgmPhysMmio2DeregisterWorker(PVMCC pVM, uint8_t idMmio2, uint8_t
      * in reverse so that we can reduce the max RAM range ID when possible.
      */
 #ifdef IN_RING3
-    uint8_t * const pbMmio2Backing = pVM->pgm.s.aMmio2Ranges[idxFirst].pbR3;
-    RTGCPHYS const  cbMmio2Backing = RT_ALIGN_T((RTGCPHYS)cGuestPages << GUEST_PAGE_SHIFT, HOST_PAGE_SIZE_DYNAMIC, RTGCPHYS);
+    uint8_t * const           pbMmio2Backing = pVM->pgm.s.aMmio2Ranges[idxFirst].pbR3;
+    RTGCPHYS const            cbMmio2Backing = RT_ALIGN_T((RTGCPHYS)cGuestPages << GUEST_PAGE_SHIFT, HOST_PAGE_SIZE_DYNAMIC, RTGCPHYS);
+    uint16_t const            fFirstFlags    = pVM->pgm.s.aMmio2Ranges[idxFirst].fFlags;
+    PPGMMMIO2HOSTWINDOW const pHostWindow    = pVM->pgm.s.aMmio2Ranges[idxFirst].pHostWindowR3;
 #endif
 
     int      rc     = VINF_SUCCESS;
@@ -1743,6 +1752,7 @@ DECLHIDDEN(int) pgmPhysMmio2DeregisterWorker(PVMCC pVM, uint8_t idMmio2, uint8_t
         pVM->pgm.s.aMmio2Ranges[idx].cbReal         = 0;
         pVM->pgm.s.aMmio2Ranges[idx].pPhysHandlerR3 = NIL_RTR3PTR;
         pVM->pgm.s.aMmio2Ranges[idx].paLSPages      = NIL_RTR3PTR;
+        pVM->pgm.s.aMmio2Ranges[idx].pHostWindowR3  = NIL_RTR3PTR;
 
         /* Free the RAM range. */
         int rc2 = pgmPhysRamRangeFree(pVM, pRamRange);
@@ -1754,9 +1764,30 @@ DECLHIDDEN(int) pgmPhysMmio2DeregisterWorker(PVMCC pVM, uint8_t idMmio2, uint8_t
      * Final removal frees up the backing memory.
      */
 #ifdef IN_RING3
-    int const rcBacking = SUPR3PageFree(pbMmio2Backing, cbMmio2Backing >> HOST_PAGE_SHIFT_DYNAMIC);
-    AssertLogRelMsgStmt(RT_SUCCESS(rcBacking), ("rc=%Rrc %p LB %#zx\n", rcBacking, pbMmio2Backing, cbMmio2Backing),
-                        rc = RT_SUCCESS(rc) ? rcBacking : rc);
+    if (fFirstFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+    {
+        /* No backing, just the sink page and the tracking structure.  The caller
+           made sure the window isn't mapped, so the hypervisor no longer
+           references any of the host memory. */
+        Assert(!pbMmio2Backing);
+        if (pHostWindow)
+        {
+            AssertLogRelMsg(pHostWindow->cBackedPages == 0, ("cBackedPages=%#x\n", pHostWindow->cBackedPages));
+            if (pHostWindow->pbSink)
+            {
+                int const rcSink = SUPR3PageFree(pHostWindow->pbSink, 1);
+                AssertLogRelRC(rcSink);
+                pHostWindow->pbSink = NULL;
+            }
+            MMR3HeapFree(pHostWindow);
+        }
+    }
+    else if (!(fFirstFlags & PGMREGMMIO2RANGE_F_EXISTING_BACKING)) /* The owner frees memory it provided. */
+    {
+        int const rcBacking = SUPR3PageFree(pbMmio2Backing, cbMmio2Backing >> HOST_PAGE_SHIFT_DYNAMIC);
+        AssertLogRelMsgStmt(RT_SUCCESS(rcBacking), ("rc=%Rrc %p LB %#zx\n", rcBacking, pbMmio2Backing, cbMmio2Backing),
+                            rc = RT_SUCCESS(rc) ? rcBacking : rc);
+    }
 #else
     int rcBacking = RTR0MemObjFree(pVM->pgmr0.s.ahMmio2MapObjs[idxFirst], true /*fFreeMappings*/);
     AssertLogRelMsgStmt(RT_SUCCESS(rcBacking),
@@ -2803,6 +2834,51 @@ int pgmPhysPageMapByPageID(PVMCC pVM, uint32_t idPage, RTHCPHYS HCPhys, void **p
 }
 #endif /* unused */
 
+#ifdef IN_RING3
+/**
+ * Gets the ring-3 address of an MMIO2 page belonging to a host window region
+ * (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW).
+ *
+ * @returns The page aligned host address backing the page (the sink page if the
+ *          page has no host memory), or NULL if @a pPage isn't a host window
+ *          page.
+ * @param   pVM             The cross context VM structure.
+ * @param   pPage           The page.  Any type.
+ * @param   pfPageFlags     Where to return the PGMMMIO2HOSTWINDOW_PAGE_F_XXX
+ *                          flags of the page.  Optional.
+ *
+ * @remarks The caller must own the PGM lock or be an EMT using the result for a
+ *          single access whose TLB entry is invalidated when the page changes
+ *          (the IEM and PGM lockless TLBs are flushed on every change).
+ */
+DECLHIDDEN(uint8_t *) pgmPhysMmio2HostWindowPagePtr(PVMCC pVM, PCPGMPAGE pPage, uint32_t *pfPageFlags)
+{
+    if (pfPageFlags)
+        *pfPageFlags = 0;
+    if (PGM_PAGE_GET_TYPE(pPage) != PGMPAGETYPE_MMIO2)
+        return NULL;
+
+    uint32_t const idPage  = PGM_PAGE_GET_PAGEID(pPage);
+    uint8_t const  idMmio2 = PGM_MMIO2_PAGEID_GET_MMIO2_ID(idPage);
+    uint32_t const iPage   = PGM_MMIO2_PAGEID_GET_IDX(idPage);
+    if ((uint8_t)(idMmio2 - 1U) >= RT_ELEMENTS(pVM->pgm.s.aMmio2Ranges))
+        return NULL;
+    PPGMREGMMIO2RANGE const pMmio2 = &pVM->pgm.s.aMmio2Ranges[idMmio2 - 1];
+    if (!(pMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW))
+        return NULL;
+
+    PPGMMMIO2HOSTWINDOW const pHostWindow = pMmio2->pHostWindowR3;
+    AssertPtrReturn(pHostWindow, NULL);
+    AssertReturn(iPage < pHostWindow->cPages, pHostWindow->pbSink);
+    RTR3UINTPTR const uEntry = *(RTR3UINTPTR const volatile *)&pHostWindow->auPages[iPage]; /* (aligned, natural size) */
+    if (!uEntry)
+        return pHostWindow->pbSink;
+    if (pfPageFlags)
+        *pfPageFlags = (uint32_t)(uEntry & PGMMMIO2HOSTWINDOW_PAGE_F_MASK);
+    return (uint8_t *)(uEntry & ~(RTR3UINTPTR)GUEST_PAGE_OFFSET_MASK);
+}
+#endif /* IN_RING3 */
+
 /**
  * Maps a page into the current virtual address space so it can be accessed.
  *
@@ -2849,7 +2925,16 @@ static int pgmPhysPageMapCommon(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPhys, PPPG
         PPGMRAMRANGE const      pRamRange   = pVM->CTX_EXPR(pgm, pgmr0, pgm).s.apRamRanges[idRamRange];
         AssertLogRelReturn(pRamRange, VERR_PGM_PHYS_PAGE_MAP_MMIO2_IPE);
         AssertLogRelReturn(iPage < (pRamRange->cb >> GUEST_PAGE_SHIFT), VERR_PGM_PHYS_PAGE_MAP_MMIO2_IPE);
-        *ppv = pMmio2Range->pbR3 + ((uintptr_t)iPage << GUEST_PAGE_SHIFT);
+        if (RT_LIKELY(!(pMmio2Range->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)))
+            *ppv = pMmio2Range->pbR3 + ((uintptr_t)iPage << GUEST_PAGE_SHIFT);
+        else
+        {
+            /* Host window: per page host memory or the sink page.  The page map TLB
+               is flushed whenever an entry changes, see PGMR3PhysMmio2MapHostRange. */
+            uint8_t * const pb = pgmPhysMmio2HostWindowPagePtr(pVM, pPage, NULL);
+            AssertLogRelReturn(pb, VERR_PGM_PHYS_PAGE_MAP_MMIO2_IPE);
+            *ppv = pb;
+        }
         return VINF_SUCCESS;
 
 #else /* IN_RING0 */
@@ -3886,7 +3971,16 @@ int pgmPhysGCPhys2CCPtrLockless(PVMCPUCC pVCpu, RTGCPHYS GCPhys, void **ppv)
         uint8_t *pb;
 #ifdef IN_RING3
         if (PGM_IS_IN_NEM_MODE(pVM))
-            pb = &pRam->pbR3[(RTGCPHYS)(uintptr_t)(pPage - &pRam->aPages[0]) << GUEST_PAGE_SHIFT];
+        {
+            if (RT_LIKELY(pRam->pbR3))
+                pb = &pRam->pbR3[(RTGCPHYS)(uintptr_t)(pPage - &pRam->aPages[0]) << GUEST_PAGE_SHIFT];
+            else
+            {
+                /* MMIO2 host window (no linear backing). */
+                pb = pgmPhysMmio2HostWindowPagePtr(pVM, (PCPGMPAGE)pPage, NULL);
+                AssertReturn(pb, VERR_PGM_PHYS_PAGE_RESERVED);
+            }
+        }
         else
 #endif
         {
@@ -5310,7 +5404,17 @@ pgmPhyIemGCphys2PtrNoLockReturnReadOnly(PVMCC pVM, PVMCPUCC pVCpu, uint64_t uTlb
 
 #ifdef IN_RING3
     if (PGM_IS_IN_NEM_MODE(pVM))
-        *ppb = &pRam->pbR3[(RTGCPHYS)(uintptr_t)(pPage - &pRam->aPages[0]) << GUEST_PAGE_SHIFT];
+    {
+        if (RT_LIKELY(pRam->pbR3))
+            *ppb = &pRam->pbR3[(RTGCPHYS)(uintptr_t)(pPage - &pRam->aPages[0]) << GUEST_PAGE_SHIFT];
+        else
+        {
+            /* MMIO2 host window (no linear backing).  The IEM TLBs are flushed
+               whenever a page of the window changes backing. */
+            *ppb = pgmPhysMmio2HostWindowPagePtr(pVM, pPageCopy, NULL);
+            AssertReturn(*ppb, VERR_PGM_PHYS_PAGE_RESERVED);
+        }
+    }
     else
 #endif
     {
@@ -5349,7 +5453,17 @@ pgmPhyIemGCphys2PtrNoLockReturnReadWrite(PVMCC pVM, PVMCPUCC pVCpu, uint64_t uTl
 
 #ifdef IN_RING3
     if (PGM_IS_IN_NEM_MODE(pVM))
-        *ppb = &pRam->pbR3[(RTGCPHYS)(uintptr_t)(pPage - &pRam->aPages[0]) << GUEST_PAGE_SHIFT];
+    {
+        if (RT_LIKELY(pRam->pbR3))
+            *ppb = &pRam->pbR3[(RTGCPHYS)(uintptr_t)(pPage - &pRam->aPages[0]) << GUEST_PAGE_SHIFT];
+        else
+        {
+            /* MMIO2 host window (no linear backing).  The IEM TLBs are flushed
+               whenever a page of the window changes backing. */
+            *ppb = pgmPhysMmio2HostWindowPagePtr(pVM, pPageCopy, NULL);
+            AssertReturn(*ppb, VERR_PGM_PHYS_PAGE_RESERVED);
+        }
+    }
     else
 #endif
     {
