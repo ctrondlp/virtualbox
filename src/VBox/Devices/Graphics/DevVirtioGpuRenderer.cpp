@@ -62,12 +62,14 @@
 #include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/critsect.h>
+#include <iprt/env.h>
 #include <iprt/errcore.h>
 #include <iprt/ldr.h>
 #include <iprt/mem.h>
 #include <iprt/semaphore.h>
 #include <iprt/string.h>
 #include <iprt/thread.h>
+#include <iprt/time.h>
 
 #include "DevVirtioGpu.h"
 #include "DevVirtioGpuRenderer.h"
@@ -84,7 +86,10 @@
  * @todo verify against src/virglrenderer.h of the built fork whenever the
  *       library is rebuilt: these were copied from the source tree, the
  *       binary is not checked.  vgpuR3RendererExecInit() sanity checks the
- *       Venus capset at run time and falls back to 2D if it looks wrong.
+ *       Venus capset at run time and falls back to 2D if it looks wrong.  That
+ *       check cannot tell whether the render server or the host Vulkan driver
+ *       work: the capset is built from tables compiled into the library, the
+ *       server only initializes Vulkan when the first context is created.
  */
 
 /** @name virgl_renderer_init() flags (virglrenderer.h:110-155).
@@ -289,6 +294,10 @@ static const struct
 #define VGPURENDERER_THREAD_STACK_SIZE          (4 * _1M)
 /** How long the destructor waits for the renderer thread. */
 #define VGPURENDERER_TERM_TIMEOUT_MS            RT_MS_30SEC
+/** How long a caller waits for the call lock.  Only one thread calls into the
+ * renderer at a time, so waiting longer than this means a call into the library
+ * is stuck: the renderer is then declared dead and the library is leaked. */
+#define VGPURENDERER_CALL_LOCK_TIMEOUT_MS       RT_MS_30SEC
 
 
 /*********************************************************************************************************************************
@@ -373,6 +382,12 @@ typedef struct VGPURENDERER
     uint32_t                    u32Magic;
     /** Set by the destructor to stop the renderer thread. */
     bool volatile               fTerminate;
+    /** Set by the destructor before it tears anything down: the fence callback
+     * stops calling the device, which may be gone while library threads of
+     * contexts we could not destroy still run. */
+    bool volatile               fNoFence;
+    /** Set when a call into the library is stuck: no further calls are made. */
+    bool volatile               fDead;
     /** Set while virgl_renderer_init() succeeded and no cleanup happened
      * (renderer thread only, read by others after joining it). */
     bool                        fInitialized;
@@ -427,6 +442,8 @@ static DECLCALLBACK(void) vgpuR3VirglWriteContextFence(void *pvCookie, uint32_t 
 {
     PVGPURENDERER pThis = (PVGPURENDERER)pvCookie;
     AssertReturnVoid(RT_VALID_PTR(pThis) && pThis->u32Magic == VGPURENDERER_MAGIC);
+    if (ASMAtomicReadBool(&pThis->fNoFence))
+        return;
     pThis->pfnFence(pThis->pvFenceUser, idCtx, uRingIdx, uFenceId);
 }
 
@@ -477,7 +494,7 @@ static int vgpuR3RendererExecInit(PVGPURENDERER pThis)
     }
     pThis->fInitialized = true;
 
-    /* The Venus capset size depends on the init flags, so it is only queried now. */
+    /* Queried after init (the library wants proxy_initialized to be set for this). */
     uint32_t uMaxVersion = UINT32_MAX;
     uint32_t cbCapset    = UINT32_MAX;
     pThis->Fns.pfnGetCapSet(VGPU_VIRGL_CAPSET_VENUS, &uMaxVersion, &cbCapset);
@@ -499,7 +516,7 @@ static int vgpuR3RendererExecInit(PVGPURENDERER pThis)
     VGPUVENUSCAPSETHDR const *pHdr = (VGPUVENUSCAPSETHDR const *)pbCapset;
     if (!pHdr->uWireFormatVersion || !pHdr->uVkXmlVersion)
     {
-        LogRel(("VirtioGpu: The Venus capset is empty (wire format %RU32, vk.xml %#RX32); is the render server working?\n",
+        LogRel(("VirtioGpu: The Venus capset is empty (wire format %RU32, vk.xml %#RX32); is this the right library?\n",
                 pHdr->uWireFormatVersion, pHdr->uVkXmlVersion));
         RTMemFree(pbCapset);
         return VERR_NOT_SUPPORTED;
@@ -654,11 +671,27 @@ static DECLCALLBACK(int) vgpuR3RendererThread(RTTHREAD hThreadSelf, void *pvUser
 static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
 {
     AssertReturn(pThis->hThread != NIL_RTTHREAD, VERR_INVALID_STATE);
-    AssertReturn(RTThreadSelf() != pThis->hThread, VERR_DEADLOCK); /* E.g. from the fence callback. */
+    AssertReturn(RTThreadSelf() != pThis->hThread, VERR_DEADLOCK); /* The renderer thread must not wait for itself. */
     pReq->rc       = VERR_INTERNAL_ERROR_2;
     pReq->iVirglRc = 0;
+    if (ASMAtomicReadBool(&pThis->fDead))
+        return VERR_INVALID_STATE;
 
-    RTCritSectEnter(&pThis->CritSectCall);
+    /* Only one thread calls into the renderer at a time, so not getting the lock
+       in time means that a call into the library is stuck.  Give up on the library
+       rather than hanging the caller (and with it power off) for ever.  Our own
+       request is not posted yet, so nothing refers to the caller's stack. */
+    uint64_t const msDeadline = RTTimeMilliTS() + VGPURENDERER_CALL_LOCK_TIMEOUT_MS;
+    while (RTCritSectTryEnter(&pThis->CritSectCall) != VINF_SUCCESS)
+    {
+        if (RTTimeMilliTS() >= msDeadline || ASMAtomicReadBool(&pThis->fDead))
+        {
+            ASMAtomicWriteBool(&pThis->fDead, true);
+            LogRel(("VirtioGpu: A call into the renderer library is stuck, giving up on it\n"));
+            return VERR_TIMEOUT;
+        }
+        RTThreadSleep(10);
+    }
     Assert(!pThis->pReqPending);
     ASMAtomicWritePtr(&pThis->pReqPending, pReq);
     int rc = RTSemEventSignal(pThis->hEvtReq);
@@ -706,6 +739,16 @@ DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENC
     *ppRenderer = NULL;
     AssertPtrReturn(pszLibrary, VERR_INVALID_POINTER);
     AssertPtrReturn(pfnFence, VERR_INVALID_POINTER);
+
+    /* The library silently drops THREAD_SYNC when this is set and init still succeeds,
+       but without it nothing ever signals a fence (async fence callbacks are in use and
+       there is no polling), so every fenced command would hang the guest GPU.  Refuse. */
+    if (RTEnvExist("VIRGL_DISABLE_MT"))
+    {
+        LogRel(("VirtioGpu: VIRGL_DISABLE_MT is set in the environment, which breaks fence signalling; not using the renderer\n"));
+        RTErrInfoSet(pErrInfo, VERR_NOT_SUPPORTED, "VIRGL_DISABLE_MT is set in the environment of the VM process");
+        return VERR_NOT_SUPPORTED;
+    }
 
     PVGPURENDERER pThis = (PVGPURENDERER)RTMemAllocZ(sizeof(*pThis));
     if (!pThis)
@@ -789,14 +832,25 @@ DECLHIDDEN(void) vgpuR3RendererDestroy(PVGPURENDERER pThis, bool fCleanup)
         return;
     AssertReturnVoid(pThis->u32Magic == VGPURENDERER_MAGIC);
 
+    /* From here on the device may disappear at any time, so the library's fence
+       threads must not call it any more (they may outlive us if we have to leak
+       a stuck library). */
+    ASMAtomicWriteBool(&pThis->fNoFence, true);
+
     if (pThis->hThread != NIL_RTTHREAD)
     {
-        if (fCleanup)
+        if (fCleanup && !ASMAtomicReadBool(&pThis->fDead))
         {
             VGPURENDERREQ Req;
             RT_ZERO(Req);
             Req.enmType = kVGpuRenderReq_Cleanup;
             vgpuR3RendererCall(pThis, &Req);
+        }
+        if (ASMAtomicReadBool(&pThis->fDead))
+        {
+            /* A call is stuck inside the library and the thread still references the instance. */
+            LogRel(("VirtioGpu: Leaving the stuck renderer behind\n"));
+            return;
         }
 
         ASMAtomicWriteBool(&pThis->fTerminate, true);
