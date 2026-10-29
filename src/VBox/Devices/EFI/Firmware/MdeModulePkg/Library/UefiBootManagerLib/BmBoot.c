@@ -1058,6 +1058,117 @@ BmExpandPartitionDevicePath (
 }
 
 #ifdef VBOX
+/** The macOS OS loader location relative to a system volume (HFS+ and pre-Catalina APFS). */
+# define VBOX_EFI_APPLE_MEDIA_FILE_NAME             L"\\System\\Library\\CoreServices\\boot.efi"
+/** Directory only present on macOS 10.15+ system volumes, which must be booted via Preboot. */
+# define VBOX_EFI_APPLE_SYSTEM_VOLUMES_DIR          L"\\System\\Volumes"
+/** The macOS OS loader location used by the installer for macOS 10.15 and older. */
+# define VBOX_EFI_APPLE_INSTALL_DATA_FILE_NAME      L"\\macOS Install Data\\Locked Files\\Boot Files\\boot.efi"
+
+/**
+ * Checks whether the given file exists on the volume.
+ */
+STATIC BOOLEAN VBoxBmFileExists(EFI_FILE_PROTOCOL *pRoot, CHAR16 *pwszPath)
+{
+  EFI_FILE_PROTOCOL *pFile  = NULL;
+  EFI_STATUS         Status = pRoot->Open(pRoot, &pFile, pwszPath, EFI_FILE_MODE_READ, 0);
+  if (EFI_ERROR(Status))
+    return FALSE;
+  pFile->Close(pFile);
+  return TRUE;
+}
+
+/**
+ * Checks whether the given filename looks like a UUID (8-4-4-4-12 hex digits),
+ * which is how the APFS Preboot volume names the per system volume directories.
+ */
+STATIC BOOLEAN VBoxBmIsUuidName(CONST CHAR16 *pwszName)
+{
+  UINTN i;
+
+  if (StrLen(pwszName) != 36)
+    return FALSE;
+  for (i = 0; i < 36; i++)
+  {
+    CHAR16 wc = pwszName[i];
+    if (i == 8 || i == 13 || i == 18 || i == 23)
+    {
+      if (wc != L'-')
+        return FALSE;
+    }
+    else if (!(   (wc >= L'0' && wc <= L'9')
+               || (wc >= L'a' && wc <= L'f')
+               || (wc >= L'A' && wc <= L'F')))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+/**
+ * Builds "\<pwszDir><pwszSuffix>" in a newly allocated buffer and returns it if
+ * the file exists, otherwise frees it and returns NULL.
+ */
+STATIC CHAR16 *VBoxBmTryDirFile(EFI_FILE_PROTOCOL *pRoot, CONST CHAR16 *pwszDir, CONST CHAR16 *pwszSuffix)
+{
+  UINTN   cwc     = 1 + StrLen(pwszDir) + StrLen(pwszSuffix) + 1;
+  CHAR16 *pwszPath = AllocateZeroPool(cwc * sizeof(CHAR16));
+  if (pwszPath == NULL)
+    return NULL;
+  StrCpyS(pwszPath, cwc, L"\\");
+  StrCatS(pwszPath, cwc, pwszDir);
+  StrCatS(pwszPath, cwc, pwszSuffix);
+  if (VBoxBmFileExists(pRoot, pwszPath))
+    return pwszPath;
+  FreePool(pwszPath);
+  return NULL;
+}
+
+/**
+ * Looks for a macOS OS loader on an APFS Preboot volume.
+ *
+ * macOS 10.13+ on APFS keeps the loader used for booting in the Preboot volume
+ * under a directory named after the system volume UUID.  For the sealed system
+ * volume layout of macOS 11+ this is the only way to boot, as the kernel
+ * collections live there as well.  While an installation is in progress the
+ * installer stages its own loader in com.apple.installer, which takes
+ * precedence, like the firmware of a real Mac would do after the installer
+ * blessed it.
+ *
+ * @returns Allocated path of the loader on success, NULL if not a Preboot volume.
+ */
+STATIC CHAR16 *VBoxBmFindApplePrebootLoader(EFI_FILE_PROTOCOL *pRoot)
+{
+  CHAR16        *pwszFound = NULL;
+  UINTN          cbBuf     = SIZE_OF_EFI_FILE_INFO + 512 * sizeof(CHAR16);
+  EFI_FILE_INFO *pInfo     = AllocatePool(cbBuf);
+  if (pInfo == NULL)
+    return NULL;
+
+  if (!EFI_ERROR(pRoot->SetPosition(pRoot, 0)))
+  {
+    for (;;)
+    {
+      UINTN      cbRead = cbBuf;
+      EFI_STATUS Status = pRoot->Read(pRoot, &cbRead, pInfo);
+      if (EFI_ERROR(Status) || cbRead == 0)
+        break;
+      if (   (pInfo->Attribute & EFI_FILE_DIRECTORY)
+          && VBoxBmIsUuidName(pInfo->FileName))
+      {
+        pwszFound = VBoxBmTryDirFile(pRoot, pInfo->FileName, L"\\com.apple.installer\\boot.efi");
+        if (pwszFound == NULL)
+          pwszFound = VBoxBmTryDirFile(pRoot, pInfo->FileName, VBOX_EFI_APPLE_MEDIA_FILE_NAME);
+        if (pwszFound != NULL)
+          break;
+      }
+    }
+    pRoot->SetPosition(pRoot, 0);
+  }
+
+  FreePool(pInfo);
+  return pwszFound;
+}
+
 /**
  * Checks which filename to try loading by inspecting what is existing on the provided
  * simple filesystem protocol provider.
@@ -1079,21 +1190,11 @@ EFI_STATUS VBoxBmQueryMediaFileNameForSFs(EFI_HANDLE hSFs, CHAR16 **ppwszFileNam
     Status = pSFs->OpenVolume(pSFs, &pRoot);
     if (!EFI_ERROR(Status))
     {
-#if 0
-# define VBOX_EFI_APPLE_MEDIA_FILE_NAME L"\\System\\Library\\CoreServices\\boot.efi"
-       EFI_FILE_PROTOCOL *pFile = NULL;
-
-       Status = pRoot->Open(pRoot, &pFile, VBOX_EFI_APPLE_MEDIA_FILE_NAME, EFI_FILE_MODE_READ,
-                            EFI_FILE_READ_ONLY | EFI_FILE_HIDDEN | EFI_FILE_SYSTEM);
-       if (!EFI_ERROR(Status))
-       {
-         *ppwszFileName = VBOX_EFI_APPLE_MEDIA_FILE_NAME;
-         pFile->Close(pFile);
-       }
-#else /* Doesn't quite work yet. */
       VBOX_FS_BLESSED_FILE *Buffer = NULL;
       UINTN BufferSize = 0;
+      BOOLEAN fFound = FALSE;
 
+      /* Our own filesystem drivers (HFS+) know the blessed file. */
       Status = pRoot->GetInfo(pRoot, &gVBoxFsBlessedFileInfoGuid, &BufferSize, Buffer);
       if (Status == EFI_BUFFER_TOO_SMALL) {
         Buffer = AllocatePool (BufferSize);
@@ -1107,9 +1208,38 @@ EFI_STATUS VBoxBmQueryMediaFileNameForSFs(EFI_HANDLE hSFs, CHAR16 **ppwszFileNam
         {
           DEBUG ((EFI_D_INFO, "[Bds] VBoxBmQueryMediaFileNameForSFs: Got blessed file info %s\n", &Buffer->BlessedFile[0]));
           *ppwszFileName = &Buffer->BlessedFile[0];
+          fFound = TRUE;
         }
       }
-#endif
+
+      /*
+       * Apple's APFS driver (loaded from the container jumpstart) doesn't know about
+       * the blessed file info, so look for the macOS OS loader in the well known
+       * places.  The returned paths are allocated as BootServicesData, see above.
+       */
+      if (!fFound)
+      {
+        CHAR16 *pwszLoader = VBoxBmFindApplePrebootLoader(pRoot);
+        if (pwszLoader != NULL)
+          fFound = TRUE;
+        else if (VBoxBmFileExists(pRoot, VBOX_EFI_APPLE_INSTALL_DATA_FILE_NAME))
+        {
+          pwszLoader = VBOX_EFI_APPLE_INSTALL_DATA_FILE_NAME;
+          fFound = TRUE;
+        }
+        /* A system volume of macOS 10.15+ must be booted via its Preboot volume. */
+        else if (   VBoxBmFileExists(pRoot, VBOX_EFI_APPLE_MEDIA_FILE_NAME)
+                 && !VBoxBmFileExists(pRoot, VBOX_EFI_APPLE_SYSTEM_VOLUMES_DIR))
+        {
+          pwszLoader = VBOX_EFI_APPLE_MEDIA_FILE_NAME;
+          fFound = TRUE;
+        }
+        if (fFound)
+        {
+          DEBUG ((EFI_D_INFO, "[Bds] VBoxBmQueryMediaFileNameForSFs: Found macOS loader %s\n", pwszLoader));
+          *ppwszFileName = pwszLoader;
+        }
+      }
 
       pRoot->Close(pRoot);
     }
