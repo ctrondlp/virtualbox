@@ -659,6 +659,25 @@ void Framebuffer::update(int x, int y, int w, int h, bool fGuestRelative)
         h = mGuestYRes;
     }
 
+    /* Clip to the surface.  With VBVA the rectangle comes from the guest. */
+    if (x < 0)
+    {
+        w += x;
+        x = 0;
+    }
+    if (y < 0)
+    {
+        h += y;
+        y = 0;
+    }
+    if (x >= mSurfVRAM->w || y >= mSurfVRAM->h || w <= 0 || h <= 0)
+    {
+        RTCritSectLeave(&mUpdateLock);
+        return;
+    }
+    w = RT_MIN(w, mSurfVRAM->w - x);
+    h = RT_MIN(h, mSurfVRAM->h - y);
+
     SDL_Rect srcRect;
     srcRect.x = x;
     srcRect.y = y + yCutoffGuest;
