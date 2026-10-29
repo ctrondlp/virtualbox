@@ -118,6 +118,12 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>Graphics: Fixed stale screen contents with display widths above
+          2048 pixels at 32 bpp (e.g. 4K) by checking all pages touched by a
+          scanline for changes</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 

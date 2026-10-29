@@ -380,6 +380,30 @@ DECLINLINE(bool) vgaR3IsDirty(PVGASTATE pThis, RTGCPHYS offVRAM)
 
 
 /**
+ * Checks if any of the pages strictly between two VRAM pages is dirty.
+ *
+ * A scanline wider than two pages (e.g. 3840 pixels at 32 bpp = 15 KB) can touch
+ * more than three pages.  Checking only the first, second and last page misses
+ * writes to the others, and vgaR3ResetDirty clears their dirty bits afterwards,
+ * so the stale pixels would stay on screen until the next write to those pages.
+ *
+ * @returns true if dirty.
+ * @returns false if clean.
+ * @param   pThis           VGA instance data.
+ * @param   offFirstPage    The VRAM offset of the first page of the range (page aligned).
+ * @param   offLastPage     The VRAM offset of the last page of the range (page aligned).
+ */
+DECLINLINE(bool) vgaR3IsDirtyBetween(PVGASTATE pThis, uint32_t offFirstPage, uint32_t offLastPage)
+{
+    if (offLastPage > offFirstPage)
+        for (uint32_t offPage = offFirstPage + GUEST_PAGE_SIZE; offPage < offLastPage; offPage += GUEST_PAGE_SIZE)
+            if (vgaR3IsDirty(pThis, offPage))
+                return true;
+    return false;
+}
+
+
+/**
  * Reset dirty flags in a give range.
  *
  * @param   pThis           VGA instance data.
@@ -2542,14 +2566,9 @@ static int vmsvgaR3DrawGraphic(PVGASTATE pThis, PVGASTATER3 pThisCC, bool fFullU
         uint32_t offSrcLine = offSrcStart + y * cbScanline;
         uint32_t offPage0   = offSrcLine & ~(uint32_t)GUEST_PAGE_OFFSET_MASK;
         uint32_t offPage1   = (offSrcLine + cbScanline - 1) & ~(uint32_t)GUEST_PAGE_OFFSET_MASK;
-        /** @todo r=klaus this assumes that a line is fully covered by 3 pages,
-         * irrespective of alignment. Not guaranteed for high res modes, i.e.
-         * anything wider than 2050 pixels @32bpp. Need to check all pages
-         * between the first and last one. */
-        bool     fUpdate    = fFullUpdate || vgaR3IsDirty(pThis, offPage0) || vgaR3IsDirty(pThis, offPage1);
-        if (offPage1 - offPage0 > GUEST_PAGE_SIZE)
-            /* if wide line, can use another page */
-            fUpdate |= vgaR3IsDirty(pThis, offPage0 + GUEST_PAGE_SIZE);
+        /* Wide lines can span more than two pages, so check the ones in between too. */
+        bool     fUpdate    = fFullUpdate || vgaR3IsDirty(pThis, offPage0) || vgaR3IsDirty(pThis, offPage1)
+                           || vgaR3IsDirtyBetween(pThis, offPage0, offPage1);
         /* explicit invalidation for the hardware cursor */
         fUpdate |= (pThis->invalidated_y_table[y >> 5] >> (y & 0x1f)) & 1;
         if (fUpdate)
@@ -2757,15 +2776,9 @@ static int vgaR3DrawGraphic(PVGASTATE pThis, PVGASTATER3 pThisCC, bool full_upda
         addr &= pThis->vga_addr_mask;
         page0 = addr & ~(uint32_t)GUEST_PAGE_OFFSET_MASK;
         page1 = (addr + bwidth - 1) & ~(uint32_t)GUEST_PAGE_OFFSET_MASK;
-        /** @todo r=klaus this assumes that a line is fully covered by 3 pages,
-         * irrespective of alignment. Not guaranteed for high res modes, i.e.
-         * anything wider than 2050 pixels @32bpp. Need to check all pages
-         * between the first and last one. */
-        bool update = full_update || vgaR3IsDirty(pThis, page0) || vgaR3IsDirty(pThis, page1);
-        if (page1 - page0 > GUEST_PAGE_SIZE) {
-            /* if wide line, can use another page */
-            update |= vgaR3IsDirty(pThis, page0 + GUEST_PAGE_SIZE);
-        }
+        /* Wide lines can span more than two pages, so check the ones in between too. */
+        bool update = full_update || vgaR3IsDirty(pThis, page0) || vgaR3IsDirty(pThis, page1)
+                   || vgaR3IsDirtyBetween(pThis, (uint32_t)page0, (uint32_t)page1);
         /* explicit invalidation for the hardware cursor */
         update |= (pThis->invalidated_y_table[y >> 5] >> (y & 0x1f)) & 1;
         if (update) {
