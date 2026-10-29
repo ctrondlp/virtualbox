@@ -5754,7 +5754,7 @@ BEGINPROC_FASTCALL iemAImpl_vcvtps2pd_u256_u128, 16
         IEMIMPL_AVX_PROLOGUE
         SSE_AVX_LD_MXCSR A0_32
 
-        movdqu    xmm0, [A2]
+        movdqu    xmm1, [A2]
         vcvtps2pd ymm0, xmm1
         vmovdqu   [A1], ymm0
 
@@ -5799,7 +5799,7 @@ BEGINPROC_FASTCALL iemAImpl_vcvtdq2pd_u256_u128, 16
         IEMIMPL_AVX_PROLOGUE
         SSE_AVX_LD_MXCSR A0_32
 
-        movdqu    xmm0, [A2]
+        movdqu    xmm1, [A2]
         vcvtdq2pd ymm0, xmm1
         vmovdqu   [A1], ymm0
 
