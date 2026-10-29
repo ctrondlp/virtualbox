@@ -38,6 +38,7 @@
 #endif
 
 #include <VBox/log.h>
+#include <VBox/param.h>
 #include <VBox/version.h>
 #include <VBox/vmm/vmmr3vtable.h>
 #include <VBox/vmm/vmapi.h>
@@ -1000,9 +1001,32 @@ DECLCALLBACK(int) vboxbfeVMPowerUpThread(RTTHREAD hThread, void *pvUser)
     g_Vmm2UserMethods.u32EndMagic                      = VMM2USERMETHODS_MAGIC;
 
     /*
-     * Create empty VM.
+     * Create empty VM, taking the number of virtual CPUs from the configuration
+     * (VMR3Create insists that it matches the /NumCPUs value).
      */
-    rc = g_pVMM->pfnVMR3Create(1, &g_Vmm2UserMethods, 0 /*fFlags*/, vboxbfeSetVMErrorCallback, NULL, vboxbfeConfigConstructor, NULL, &g_pVM, NULL);
+    uint32_t cCpus = 1;
+    if (g_hJsonCfg != NIL_RTJSONVAL)
+    {
+        RTJSONVAL hJsonCfgm;
+        if (RT_SUCCESS(RTJsonValueQueryByName(g_hJsonCfg, "Cfgm", &hJsonCfgm)))
+        {
+            int64_t cCfgCpus = 0;
+            if (RT_SUCCESS(RTJsonValueQueryIntegerByName(hJsonCfgm, "NumCPUs", &cCfgCpus)))
+            {
+                if (cCfgCpus >= VMM_MIN_CPU_COUNT && cCfgCpus <= VMM_MAX_CPU_COUNT)
+                    cCpus = (uint32_t)cCfgCpus;
+                else
+                {
+                    RTJsonValueRelease(hJsonCfgm);
+                    RTPrintf("Error: NumCPUs %RI64 is out of range (%u..%u).\n", cCfgCpus, VMM_MIN_CPU_COUNT, VMM_MAX_CPU_COUNT);
+                    rc = VERR_OUT_OF_RANGE;
+                    goto failure;
+                }
+            }
+            RTJsonValueRelease(hJsonCfgm);
+        }
+    }
+    rc = g_pVMM->pfnVMR3Create(cCpus, &g_Vmm2UserMethods, 0 /*fFlags*/, vboxbfeSetVMErrorCallback, NULL, vboxbfeConfigConstructor, NULL, &g_pVM, NULL);
     if (RT_FAILURE(rc))
     {
         RTPrintf("Error: VM creation failed with %Rrc.\n", rc);
