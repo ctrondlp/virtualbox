@@ -4515,6 +4515,38 @@ nemR3WinHandleExitCpuId(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const
 
 
 /**
+ * Gets the guest state to import before CPUM handles an MSR access exit.
+ *
+ * Hyper-V handles most MSRs itself.  The ones that exit to us are mostly
+ * implemented by CPUM, GIM and the APIC without touching the guest context, so
+ * importing all the MSRs and control registers for them (and writing them all
+ * back on the next run) only makes the exit slower.  The exceptions, which get
+ * all the MSRs, control registers, FS and GS imported, are:
+ *  - the MSRs that CPUM keeps in the guest context;
+ *  - the P6 control register aliases;
+ *  - the APIC base, which Hyper-V and our APIC both keep.  The
+ *    CPUMCTX_EXTRN_OTHER_MSRS import and export sync it between the two, so
+ *    the import gives our APIC Hyper-V's value before the access, and a write
+ *    only reaches Hyper-V through the export that follows.
+ *
+ * @returns CPUMCTX_EXTRN_XXX mask.
+ * @param   idMsr           The MSR being accessed.
+ */
+DECLINLINE(uint64_t) nemR3WinMsrExitImportMask(uint32_t idMsr)
+{
+    if (   idMsr == MSR_IA32_APICBASE
+        || idMsr == MSR_IA32_SPEC_CTRL
+        || idMsr - MSR_IA32_SYSENTER_CS    <= MSR_IA32_SYSENTER_EIP  - MSR_IA32_SYSENTER_CS
+        || idMsr - MSR_IA32_MTRR_PHYSBASE0 <= MSR_IA32_MTRR_DEF_TYPE - MSR_IA32_MTRR_PHYSBASE0  /* MTRRs and PAT */
+        || idMsr - UINT32_C(0x00002000)    <= UINT32_C(4)                                       /* P6_CR0..P6_CR4 */
+        || idMsr - MSR_K6_EFER             <= MSR_K8_TSC_AUX         - MSR_K6_EFER)             /* EFER..TSC_AUX */
+        return CPUMCTX_EXTRN_ALL_MSRS | CPUMCTX_EXTRN_CR0 | CPUMCTX_EXTRN_CR2 | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4
+             | CPUMCTX_EXTRN_FS | CPUMCTX_EXTRN_GS;
+    return 0;
+}
+
+
+/**
  * Deals with MSR access exits (WHvRunVpExitReasonX64MsrAccess).
  *
  * @returns Strict VBox status code.
@@ -4532,19 +4564,31 @@ static VBOXSTRICTRC nemR3WinHandleExitMsr(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_
     if (pExit->VpContext.ExecutionState.Cpl == 0)
     {
         /*
-         * Get all the MSR state.  Since we're getting EFER, we also need to
-         * get CR0, CR4 and CR3.
+         * Get the state CPUM needs for this MSR, or everything IEM needs when
+         * the exit history wants the instruction executed.
          */
         PCEMEXITREC pExitRec = EMHistoryAddExit(pVCpu,
                                                   pExit->MsrAccess.AccessInfo.IsWrite
                                                 ? EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_X86_MSR_WRITE)
                                                 : EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_X86_MSR_READ),
                                                 pExit->VpContext.Rip + pExit->VpContext.Cs.Base, ASMReadTSC());
+        /*
+         * Keep x2APIC EOI writes out of the exit history's hands.  Windows guests
+         * write it at the end of every interrupt handler, and having IEM execute
+         * the following instructions costs more than the exits it saves, since
+         * that needs the whole guest state imported and written back, while the
+         * EOI itself needs no guest state at all.  (EM handles ignored records.)
+         */
+        if (   pExitRec
+            && pExit->MsrAccess.MsrNumber == MSR_IA32_X2APIC_EOI
+            && pExit->MsrAccess.AccessInfo.IsWrite)
+            pExitRec = NULL;
         nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
         rcStrict = nemHCWinImportStateIfNeededStrict(pVCpu,
-                                                     (!pExitRec ? 0 : IEM_CPUMCTX_EXTRN_MUST_MASK)
-                                                     | CPUMCTX_EXTRN_ALL_MSRS | CPUMCTX_EXTRN_CR0
-                                                     | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4,
+                                                       !pExitRec
+                                                     ? nemR3WinMsrExitImportMask(pExit->MsrAccess.MsrNumber)
+                                                     :   IEM_CPUMCTX_EXTRN_MUST_MASK | CPUMCTX_EXTRN_ALL_MSRS
+                                                       | CPUMCTX_EXTRN_CR0 | CPUMCTX_EXTRN_CR3 | CPUMCTX_EXTRN_CR4,
                                                      "MSRs");
         if (rcStrict == VINF_SUCCESS)
         {
