@@ -749,8 +749,17 @@ static PCEMEXITREC emHistoryAddOrUpdateRecord(PVMCPU pVCpu, uint16_t uFlagsAndTy
         }
 
         case EMEXITACTION_NORMAL_PROBED:
-            pExitRec->cHits += 1;
-            return NULL;
+        {
+            /* A probe only sees the one execution it happened to run, so a hot exit that
+               was judged not worth optimizing gets another look every 64K hits, a few
+               times at most. */
+            uint64_t const cHits = ++pExitRec->cHits;
+            if (   (cHits & UINT64_C(0xffff)) != 0
+                || pExitRec->cProbeAttempts >= 8)
+                return NULL;
+            pExitRec->enmAction = EMEXITACTION_EXEC_PROBE;
+            return pExitRec;
+        }
 
         default:
             pExitRec->cHits += 1;
