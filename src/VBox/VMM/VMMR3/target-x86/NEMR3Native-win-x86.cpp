@@ -5516,6 +5516,14 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     /*
      * Restore modified state associated with hypervisor breakpoints/events and/or single-stepping.
      */
+    if (pVCpu->nem.s.fGuestDebug)
+    {
+        /* The export loaded the debugger's DRx values into Hyper-V.  Make the next
+           export write the guest's values (CPUM has them) back, or the debugger's
+           breakpoints stay armed in Hyper-V after they are removed, and a later
+           import would take them for the guest's. */
+        pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_DR_MASK;
+    }
     if (CPUMIsHyperDebugStateActive(pVCpu))
     {
         CPUMR3NemActivateGuestDebugState(pVCpu);
