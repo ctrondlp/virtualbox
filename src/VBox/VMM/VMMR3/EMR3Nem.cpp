@@ -533,8 +533,20 @@ VBOXSTRICTRC emR3NemExecute(PVM pVM, PVMCPU pVCpu, bool *pfFFDone)
      *
      * Note! Not using CPUM_IMPORT_EXTRN_RET here, to prioritize an rcStrict error
      *       status over import errors.
+     *
+     * Note! On Windows the halted state (and the wake-up interrupt injection)
+     *       only needs RIP, RFLAGS and the interrupt inhibition state, which
+     *       the native code has imported.  The rest is left in Hyper-V so
+     *       idle guests don't pay for a full state import and export on every
+     *       HLT.  EM imports the full state (~CPUMCTX_EXTRN_KEEPER_MASK) before
+     *       servicing rendezvous, requests, debugger and reset forced actions.
      */
+#if defined(RT_OS_WINDOWS) && defined(VBOX_VMM_TARGET_X86)
+    if (   pVCpu->cpum.GstCtx.fExtrn
+        && rcStrict != VINF_EM_HALT)
+#else
     if (pVCpu->cpum.GstCtx.fExtrn)
+#endif
     {
         int rcImport = NEMImportStateOnDemand(pVCpu, pVCpu->cpum.GstCtx.fExtrn);
         AssertReturn(RT_SUCCESS(rcImport) || RT_FAILURE_NP(rcStrict), rcImport);

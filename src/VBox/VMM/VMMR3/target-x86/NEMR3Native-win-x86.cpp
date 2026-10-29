@@ -2215,6 +2215,7 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                         STAMR3RegisterF(pVM, &pNemCpu->StatImportOnReturn,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of state imports on loop return", "/NEM/CPU%u/ImportOnReturn", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatImportOnReturnSkipped, STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of skipped state imports on loop return", "/NEM/CPU%u/ImportOnReturnSkipped", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatQueryCpuTick,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of TSC queries",                  "/NEM/CPU%u/QueryCpuTick", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatImportOnReturnHalt,  STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of minimal state imports on HLT",  "/NEM/CPU%u/ImportOnReturnHalt", idCpu);
                     }
 
 #if defined(VBOX_WITH_R0_MODULES) && !defined(VBOX_WITH_MINIMAL_R0)
@@ -5483,8 +5484,23 @@ static VBOXSTRICTRC nemHCWinRunGC(PVMCC pVM, PVMCPUCC pVCpu)
     {
         /* Try anticipate what we might need. */
         uint64_t fImport = IEM_CPUMCTX_EXTRN_MUST_MASK | CPUMCTX_EXTRN_INHIBIT_INT | CPUMCTX_EXTRN_INHIBIT_NMI;
-        if (   (rcStrict >= VINF_EM_FIRST && rcStrict <= VINF_EM_LAST)
-            || RT_FAILURE(rcStrict))
+        if (rcStrict == VINF_EM_HALT && !pVCpu->nem.s.fGuestDebug)
+        {
+            /*
+             * Idle guests halt a lot, so keep this cheap.  EM only needs RIP,
+             * RFLAGS and the interrupt inhibition state for the halted state and
+             * for deciding whether an interrupt can be delivered (EMR3Nem.cpp
+             * skips the full import for VINF_EM_HALT).  Everything else stays in
+             * Hyper-V (fExtrn) and gets imported on demand by whoever needs it
+             * (e.g. IEM when injecting the wake-up interrupt), which also means
+             * we don't need to write it all back again when resuming.
+             */
+            fImport = CPUMCTX_EXTRN_RIP | CPUMCTX_EXTRN_RFLAGS | CPUMCTX_EXTRN_CS
+                    | CPUMCTX_EXTRN_INHIBIT_INT | CPUMCTX_EXTRN_INHIBIT_NMI;
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatImportOnReturnHalt);
+        }
+        else if (   (rcStrict >= VINF_EM_FIRST && rcStrict <= VINF_EM_LAST)
+                 || RT_FAILURE(rcStrict))
             fImport = CPUMCTX_EXTRN_ALL | (CPUMCTX_EXTRN_NEM_WIN_MASK & ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT);
         else if (VMCPU_FF_IS_ANY_SET(pVCpu, VMCPU_FF_INTERRUPT_PIC | VMCPU_FF_INTERRUPT_APIC
                                           | VMCPU_FF_INTERRUPT_NMI | VMCPU_FF_INTERRUPT_SMI))

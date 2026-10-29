@@ -118,6 +118,12 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>Windows hosts: Improved performance when running VMs with the
+          Hyper-V execution engine by skipping register transfers to Hyper-V
+          on HLT</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 

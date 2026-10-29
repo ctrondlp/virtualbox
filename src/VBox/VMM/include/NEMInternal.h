@@ -608,6 +608,9 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatImportOnReturn;
     STAMCOUNTER                 StatImportOnReturnSkipped;
     STAMCOUNTER                 StatQueryCpuTick;
+# if !defined(VBOX_VMM_TARGET_ARMV8)
+    STAMCOUNTER                 StatImportOnReturnHalt;
+# endif
     /** @} */
 
 #elif defined(RT_OS_DARWIN) && defined(VBOX_WITH_NATIVE_NEM)
