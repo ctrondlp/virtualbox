@@ -527,6 +527,11 @@ VMM_INT_DECL(VBOXSTRICTRC) EMHistoryExec(PVMCPUCC pVCpu, PCEMEXITREC pExitRec, u
 #endif
                     pExitRecUnconst->cMaxInstructionsWithoutExit = ExecStats.cMaxExitDistance + 1;
                 pExitRecUnconst->enmAction = EMEXITACTION_EXEC_WITH_MAX;
+                static uint32_t volatile s_cProbeOkLogged = 0;
+                if (ASMAtomicIncU32(&s_cProbeOkLogged) <= 64)
+                    LogRel(("EM: exit probe at %RX64 type %#x -> EXEC_WITH_MAX: cExits=%u cMaxExitDistance=%u cInstructions=%u attempts=%u hits=%RU64\n",
+                            pExitRecUnconst->uFlatPC, pExitRecUnconst->uFlagsAndType, ExecStats.cExits, ExecStats.cMaxExitDistance,
+                            ExecStats.cInstructions, pExitRecUnconst->cProbeAttempts, pExitRecUnconst->cHits));
                 LogFlow(("EMHistoryExec/EXEC_PROBE: -> EXEC_WITH_MAX %u\n", ExecStats.cMaxExitDistance));
                 STAM_REL_COUNTER_INC(&pVCpu->em.s.StatHistoryProbedExecWithMax);
             }
@@ -541,6 +546,12 @@ VMM_INT_DECL(VBOXSTRICTRC) EMHistoryExec(PVMCPUCC pVCpu, PCEMEXITREC pExitRec, u
             else
             {
                 pExitRecUnconst->cProbeAttempts += 1;
+                static uint32_t volatile s_cProbeFailLogged = 0;
+                if (ASMAtomicIncU32(&s_cProbeFailLogged) <= 256)
+                    LogRel(("EM: exit probe at %RX64 type %#x found no close exits: cExits=%u cMaxExitDistance=%u cInstructions=%u retReason=%d rc=%Rrc attempts=%u hits=%RU64\n",
+                            pExitRecUnconst->uFlatPC, pExitRecUnconst->uFlagsAndType, ExecStats.cExits, ExecStats.cMaxExitDistance,
+                            ExecStats.cInstructions, ExecStats.enmReturnReason, VBOXSTRICTRC_VAL(rcStrict),
+                            pExitRecUnconst->cProbeAttempts, pExitRecUnconst->cHits));
                 if (   ExecStats.enmReturnReason == kIemExecForExitRetReason_Normal
                     || ExecStats.enmReturnReason == kIemExecForExitRetReason_LimitMaxDistance
                     || ExecStats.enmReturnReason == kIemExecForExitRetReason_LimitMaxInstructions)
@@ -749,8 +760,17 @@ static PCEMEXITREC emHistoryAddOrUpdateRecord(PVMCPU pVCpu, uint16_t uFlagsAndTy
         }
 
         case EMEXITACTION_NORMAL_PROBED:
-            pExitRec->cHits += 1;
-            return NULL;
+        {
+            /* A probe only sees the one execution it happened to run, so a hot exit that
+               was judged not worth optimizing gets another look every 64K hits, a few
+               times at most. */
+            uint64_t const cHits = ++pExitRec->cHits;
+            if (   (cHits & UINT64_C(0xffff)) != 0
+                || pExitRec->cProbeAttempts >= 8)
+                return NULL;
+            pExitRec->enmAction = EMEXITACTION_EXEC_PROBE;
+            return pExitRec;
+        }
 
         default:
             pExitRec->cHits += 1;
