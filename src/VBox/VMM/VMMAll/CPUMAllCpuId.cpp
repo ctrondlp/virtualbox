@@ -307,8 +307,48 @@ static const CPUMMICROARCH g_aenmIntelFamily06[] =
     /*[165(0xa5)] = */ kCpumMicroarch_Intel_Core7_CometLake,    /* unconfirmed */
     /*[166(0xa6)] = */ kCpumMicroarch_Intel_Unknown,
     /*[167(0xa7)] = */ kCpumMicroarch_Intel_Core7_CypressCove, /* 14nm backport, unconfirmed */
+    /*[168(0xa8)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[169(0xa9)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[170(0xaa)] = */ kCpumMicroarch_Intel_Core7_MeteorLake,   /* Meteor Lake-H/U */
+    /*[171(0xab)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[172(0xac)] = */ kCpumMicroarch_Intel_Core7_MeteorLake,   /* Meteor Lake-S */
+    /*[173(0xad)] = */ kCpumMicroarch_Intel_Core7_GraniteRapids, /* Granite Rapids-X */
+    /*[174(0xae)] = */ kCpumMicroarch_Intel_Core7_GraniteRapids, /* Granite Rapids-D */
+    /*[175(0xaf)] = */ kCpumMicroarch_Intel_Atom_Unknown,       /* Sierra Forest (Crestmont E-cores only) */
+    /*[176(0xb0)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[177(0xb1)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[178(0xb2)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[179(0xb3)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[180(0xb4)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[181(0xb5)] = */ kCpumMicroarch_Intel_Core7_ArrowLake,    /* Arrow Lake-U */
+    /*[182(0xb6)] = */ kCpumMicroarch_Intel_Atom_Unknown,       /* Grand Ridge (Crestmont E-cores only) */
+    /*[183(0xb7)] = */ kCpumMicroarch_Intel_Core7_RaptorLake,   /* Raptor Lake-S/HX */
+    /*[184(0xb8)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[185(0xb9)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[186(0xba)] = */ kCpumMicroarch_Intel_Core7_RaptorLake,   /* Raptor Lake-P/H/U */
+    /*[187(0xbb)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[188(0xbc)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[189(0xbd)] = */ kCpumMicroarch_Intel_Core7_LunarLake,    /* Lunar Lake-M */
+    /*[190(0xbe)] = */ kCpumMicroarch_Intel_Atom_Unknown,       /* Alder Lake-N (Gracemont E-cores only) */
+    /*[191(0xbf)] = */ kCpumMicroarch_Intel_Core7_RaptorLake,   /* Raptor Lake-S (Alder Lake die) */
+    /*[192(0xc0)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[193(0xc1)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[194(0xc2)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[195(0xc3)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[196(0xc4)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[197(0xc5)] = */ kCpumMicroarch_Intel_Core7_ArrowLake,    /* Arrow Lake-H */
+    /*[198(0xc6)] = */ kCpumMicroarch_Intel_Core7_ArrowLake,    /* Arrow Lake-S, Core Ultra 7 270K Plus stepping 2 (confirmed) */
+    /*[199(0xc7)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[200(0xc8)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[201(0xc9)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[202(0xca)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[203(0xcb)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[204(0xcc)] = */ kCpumMicroarch_Intel_Core7_PantherLake,  /* Panther Lake */
+    /*[205(0xcd)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[206(0xce)] = */ kCpumMicroarch_Intel_Unknown,
+    /*[207(0xcf)] = */ kCpumMicroarch_Intel_Core7_EmeraldRapids, /* Emerald Rapids */
 };
-AssertCompile(RT_ELEMENTS(g_aenmIntelFamily06) == 0xa7+1);
+AssertCompile(RT_ELEMENTS(g_aenmIntelFamily06) == 0xcf+1);
 
 
 /**
@@ -780,6 +820,13 @@ VMMDECL(const char *) CPUMMicroarchName(CPUMMICROARCH enmMicroarch)
         CASE_RET_STR(kCpumMicroarch_Intel_Core7_TigerLake);
         CASE_RET_STR(kCpumMicroarch_Intel_Core7_AlderLake);
         CASE_RET_STR(kCpumMicroarch_Intel_Core7_SapphireRapids);
+        CASE_RET_STR(kCpumMicroarch_Intel_Core7_RaptorLake);
+        CASE_RET_STR(kCpumMicroarch_Intel_Core7_EmeraldRapids);
+        CASE_RET_STR(kCpumMicroarch_Intel_Core7_MeteorLake);
+        CASE_RET_STR(kCpumMicroarch_Intel_Core7_GraniteRapids);
+        CASE_RET_STR(kCpumMicroarch_Intel_Core7_ArrowLake);
+        CASE_RET_STR(kCpumMicroarch_Intel_Core7_LunarLake);
+        CASE_RET_STR(kCpumMicroarch_Intel_Core7_PantherLake);
 
         CASE_RET_STR(kCpumMicroarch_Intel_Atom_Bonnell);
         CASE_RET_STR(kCpumMicroarch_Intel_Atom_Lincroft);

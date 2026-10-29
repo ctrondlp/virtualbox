@@ -907,6 +907,11 @@ static int cpumR3CpuIdInstallAndExplodeLeaves(PVM pVM, PCPUM pCpum, PCPUMCPUIDLE
         pCpum->GuestInfo.uScalableBusFreq = pCpum->GuestFeatures.enmMicroarch >= kCpumMicroarch_Intel_Core7_SandyBridge
                                           ? UINT64_C(100000000)  /* 100MHz */
                                           : UINT64_C(133333333); /* 133MHz */
+    /* Goldmont and later atoms (incl. the unknown future ones, typically E-core
+       only parts of hybrid generations) use a 100MHz reference clock as well. */
+    else if (   pVM->cpum.s.GuestFeatures.enmMicroarch >= kCpumMicroarch_Intel_Atom_Goldmont
+             && pVM->cpum.s.GuestFeatures.enmMicroarch <= kCpumMicroarch_Intel_Atom_Unknown)
+        pCpum->GuestInfo.uScalableBusFreq = UINT64_C(100000000);  /* 100MHz */
 
     /*
      * Populate the legacy arrays.  Currently used for everything, later only
