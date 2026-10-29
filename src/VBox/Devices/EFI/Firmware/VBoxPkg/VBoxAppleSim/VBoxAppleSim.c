@@ -135,35 +135,40 @@ struct _APPLE_GETVAR_PROTOCOL
 /** The value of APPLE_GETVAR_PROTOCOL::u64Magic. */
 #define APPLE_GETVAR_PROTOCOL_MAGIC     0x10000
 
+/*
+ * The first three methods are the per device path property accessors of the
+ * device path property database (GetProperty, SetProperty, RemoveProperty).
+ * We only provide the flattened property buffer, so report the individual
+ * properties as not present and refuse modifications.  These used to assert,
+ * which halts the VM when boot managers like OpenCore query the database.
+ */
+
+/** GetProperty(This, DevicePath, Name, Value, Size) */
 EFI_STATUS EFIAPI
 AppleGetVar_Unknown0(IN APPLE_GETVAR_PROTOCOL *This, IN VOID *pvArg1, IN VOID *pvArg2,
                      IN VOID *pvArg3, IN VOID *pvArg4)
 {
-    CHAR8 szMsg[128];
-    AsciiSPrint(szMsg, sizeof(szMsg), "AppleGetVar_Unknown0: pvArg1=%p pvArg2=%p pvArg3=%p pvArg4=%p",
-                pvArg1, pvArg2, pvArg3, pvArg4);
-    DebugAssert(__FILE__, __LINE__, szMsg);
-    return EFI_UNSUPPORTED;
+    DEBUG((DEBUG_INFO, "AppleGetVar_Unknown0 (GetProperty): pvArg1=%p pvArg2=%p pvArg3=%p pvArg4=%p\n",
+           pvArg1, pvArg2, pvArg3, pvArg4));
+    return EFI_NOT_FOUND;
 }
 
+/** SetProperty(This, DevicePath, Name, Value, Size) */
 EFI_STATUS EFIAPI
 AppleGetVar_Unknown1(IN APPLE_GETVAR_PROTOCOL *This, IN VOID *pvArg1, IN VOID *pvArg2,
                      IN VOID *pvArg3, IN VOID *pvArg4)
 {
-    CHAR8 szMsg[128];
-    AsciiSPrint(szMsg, sizeof(szMsg), "AppleGetVar_Unknown1: pvArg1=%p pvArg2=%p pvArg3=%p pvArg4=%p",
-                pvArg1, pvArg2, pvArg3, pvArg4);
-    DebugAssert(__FILE__, __LINE__, szMsg);
+    DEBUG((DEBUG_INFO, "AppleGetVar_Unknown1 (SetProperty): pvArg1=%p pvArg2=%p pvArg3=%p pvArg4=%p\n",
+           pvArg1, pvArg2, pvArg3, pvArg4));
     return EFI_UNSUPPORTED;
 }
 
+/** RemoveProperty(This, DevicePath, Name) */
 EFI_STATUS EFIAPI
 AppleGetVar_Unknown2(IN APPLE_GETVAR_PROTOCOL *This, IN VOID *pvArg1, IN VOID *pvArg2)
 {
-    CHAR8 szMsg[80];
-    AsciiSPrint(szMsg, sizeof(szMsg), "AppleGetVar_Unknown2: pvArg1=%p pvArg2=%p", pvArg1, pvArg2);
-    DebugAssert(__FILE__, __LINE__, szMsg);
-    return EFI_UNSUPPORTED;
+    DEBUG((DEBUG_INFO, "AppleGetVar_Unknown2 (RemoveProperty): pvArg1=%p pvArg2=%p\n", pvArg1, pvArg2));
+    return EFI_NOT_FOUND;
 }
 
 
