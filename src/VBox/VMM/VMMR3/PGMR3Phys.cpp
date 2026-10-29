@@ -5052,6 +5052,32 @@ static DECLCALLBACK(VBOXSTRICTRC) pgmR3PhysMmio2UnmapHostRangeRendezvous(PVM pVM
 
 
 /**
+ * Worker for PGMR3PhysMmio2UnmapHostRange running on an EMT.
+ *
+ * Unless guest code is executing (VM reset, power off, suspend, construction,
+ * destruction, state loading: the other EMTs are then idle or waiting in the
+ * rendezvous we're part of) the work is done in an EMT rendezvous, so that no
+ * EMT can be in the middle of an emulated access using the host address.
+ *
+ * @returns VBox status code.
+ * @param   pVM         The cross context VM structure.
+ * @param   pArgs       The arguments.
+ */
+static DECLCALLBACK(int) pgmR3PhysMmio2UnmapHostRangeOnEmt(PVM pVM, PGMR3MMIO2UNMAPHOSTRANGEARGS *pArgs)
+{
+    VMSTATE const enmState = VMR3GetState(pVM);
+    if (enmState != VMSTATE_RUNNING && enmState != VMSTATE_RUNNING_LS)
+    {
+        PGM_LOCK_VOID(pVM);
+        int const rc = pgmR3PhysMmio2UnmapHostRangeLocked(pVM, pArgs);
+        PGM_UNLOCK(pVM);
+        return rc;
+    }
+    return VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, pgmR3PhysMmio2UnmapHostRangeRendezvous, pArgs);
+}
+
+
+/**
  * Removes host memory backing previously established by
  * PGMR3PhysMmio2MapHostRange from part of an MMIO2 host window.
  *
@@ -5100,65 +5126,23 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2UnmapHostRange(PVM pVM, PPDMDEVINS pDevIns, PG
     Args.offRegion = offRegion;
     Args.cb        = cb;
 
-    int           rc;
-    VMSTATE const enmState = VMR3GetState(pVM);
+    /*
+     * An EMT does the work itself.  Any other thread hands it to an EMT as a PRIORITY
+     * request: during suspend, power off and similar transitions all EMTs sit in the
+     * transition rendezvous and only EMT0's PDM async notification loop services
+     * requests, and it services priority requests only.  A normal request (which is
+     * what a rendezvous started by another thread uses) would never be picked up
+     * while EMT0 waits for this very thread to finish, and the VM would hang.
+     */
     if (VMMGetCpu(pVM) != NULL)
-    {
-        if (enmState != VMSTATE_RUNNING && enmState != VMSTATE_RUNNING_LS)
-        {
-            /* An EMT and no guest code executing: the other EMTs are either idle or
-               waiting in the rendezvous we're part of (reset, power off, ...). */
-            PGM_LOCK_VOID(pVM);
-            rc = pgmR3PhysMmio2UnmapHostRangeLocked(pVM, &Args);
-            PGM_UNLOCK(pVM);
-        }
-        else
-            rc = VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, pgmR3PhysMmio2UnmapHostRangeRendezvous, &Args);
-    }
-    else
-    {
-        /* Other threads: the EMTs must be around to do the rendezvous. */
-        AssertLogRelMsgReturn(   enmState != VMSTATE_DESTROYING
-                              && enmState != VMSTATE_TERMINATED,
-                              ("PGMR3PhysMmio2UnmapHostRange: called from a non-EMT in state %s\n",
-                               VMR3GetStateName(enmState)),
-                              VERR_VM_INVALID_VM_STATE);
-        /* In the suspend, power off and similar transitions all EMTs are parked in the
-           rendezvous that drives the transition and cannot service another one, while
-           EMT0 may be waiting for this very thread to finish (PDM device suspend and
-           power off notifications).  Guest code isn't executing in these states (the
-           state changes only after all EMTs have entered the transition rendezvous),
-           so take the lock and do the work right here. */
-        bool fGuestStopped;
-        switch (enmState)
-        {
-            case VMSTATE_SUSPENDING:
-            case VMSTATE_SUSPENDING_LS:
-            case VMSTATE_SUSPENDING_EXT_LS:
-            case VMSTATE_SUSPENDED:
-            case VMSTATE_SUSPENDED_LS:
-            case VMSTATE_SUSPENDED_EXT_LS:
-            case VMSTATE_SAVING:
-            case VMSTATE_POWERING_OFF:
-            case VMSTATE_POWERING_OFF_LS:
-            case VMSTATE_OFF:
-            case VMSTATE_OFF_LS:
-                fGuestStopped = true;
-                break;
-            default:
-                fGuestStopped = false;
-                break;
-        }
-        if (fGuestStopped)
-        {
-            PGM_LOCK_VOID(pVM);
-            rc = pgmR3PhysMmio2UnmapHostRangeLocked(pVM, &Args);
-            PGM_UNLOCK(pVM);
-        }
-        else
-            rc = VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, pgmR3PhysMmio2UnmapHostRangeRendezvous, &Args);
-    }
-    return rc;
+        return pgmR3PhysMmio2UnmapHostRangeOnEmt(pVM, &Args);
+
+    VMSTATE const enmState = VMR3GetState(pVM);
+    AssertLogRelMsgReturn(   enmState != VMSTATE_DESTROYING
+                          && enmState != VMSTATE_TERMINATED,
+                          ("PGMR3PhysMmio2UnmapHostRange: called from a non-EMT in state %s\n", VMR3GetStateName(enmState)),
+                          VERR_VM_INVALID_VM_STATE);
+    return VMR3ReqPriorityCallWait(pVM, VMCPUID_ANY, (PFNRT)pgmR3PhysMmio2UnmapHostRangeOnEmt, 2, pVM, &Args);
 }
 
 
