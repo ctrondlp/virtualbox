@@ -722,6 +722,7 @@
       <desc>Settings version "1.22", written by VirtualBox 7.3.x.</desc>
       <!--
           Machine changes: Clipboard mode is stored in Hardware/Clipboard/@mode.
+          Adds the VirtioGpu graphics controller type (Display/@controller).
       -->
     </const>
     <const name="Future" value="99999">
@@ -7411,7 +7412,7 @@
 
   <enum
     name="GraphicsControllerType"
-    uuid="e1379bad-ae01-493d-abf5-740a95c41676"
+    uuid="b14e57d8-29d5-4c4d-9602-066fe41baae0"
     >
     <desc>Graphics controller type, used with <link to="IGraphicsAdapter::graphicsControllerType" />.
     </desc>
@@ -7429,6 +7430,10 @@
     </const>
     <const name="QemuRamFB" value="4">
       <desc>QEMU RAM based framebuffer based device.</desc>
+    </const>
+    <const name="VirtioGpu" value="5">
+      <desc>virtio-gpu 2D paravirtual display device, for guests with a virtio-gpu
+        driver. It has no VGA compatibility and no 3D acceleration.</desc>
     </const>
   </enum>
 

@@ -5848,6 +5848,8 @@ void MachineConfigFile::readHardware(const xml::ElementNode &elmHardware,
                     type = GraphicsControllerType_VBoxSVGA;
                 else if (strGraphicsControllerType == "QEMURAMFB")
                     type = GraphicsControllerType_QemuRamFB;
+                else if (strGraphicsControllerType == "VIRTIOGPU")
+                    type = GraphicsControllerType_VirtioGpu;
                 else if (strGraphicsControllerType == "NONE")
                     type = GraphicsControllerType_Null;
                 else
@@ -7829,6 +7831,7 @@ void MachineConfigFile::buildHardwareXML(xml::ElementNode &elmParent,
                 case GraphicsControllerType_VMSVGA:             pcszGraphics = "VMSVGA"; break;
                 case GraphicsControllerType_VBoxSVGA:           pcszGraphics = "VBoxSVGA"; break;
                 case GraphicsControllerType_QemuRamFB:          pcszGraphics = "QemuRamFB"; break;
+                case GraphicsControllerType_VirtioGpu:          pcszGraphics = "VirtioGpu"; break;
                 default: /*case GraphicsControllerType_Null:*/  pcszGraphics = "None"; break;
             }
             pelmDisplay->setAttribute("controller", pcszGraphics);
@@ -9741,6 +9744,13 @@ void MachineConfigFile::bumpSettingsVersionIfNeeded()
         // VirtualBox 7.3 (settings v1.22) moves clipboard mode to Hardware/Clipboard/@mode.
         if (   hardwareMachine.clipboardSettings.mode != ClipboardMode_Disabled
             || hardwareMachine.clipboardSettings.fFileTransfersEnabled)
+        {
+            m->sv = SettingsVersion_v1_22;
+            return;
+        }
+
+        // VirtualBox 7.3 (settings v1.22) adds the virtio-gpu graphics controller.
+        if (hardwareMachine.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu)
         {
             m->sv = SettingsVersion_v1_22;
             return;

@@ -687,6 +687,7 @@ HRESULT PlatformProperties::getSupportedGfxControllerTypes(std::vector<GraphicsC
 #ifdef VBOX_WITH_VMSVGA
               , GraphicsControllerType_VMSVGA
 #endif
+              , GraphicsControllerType_VirtioGpu
             };
             aSupportedGraphicsControllerTypes.assign(aGraphicsControllerTypes + 1 /* Don't include _Null */,
                                                      aGraphicsControllerTypes + RT_ELEMENTS(aGraphicsControllerTypes));
@@ -861,6 +862,7 @@ int PlatformProperties::s_getSupportedGraphicsControllerFeatures(PlatformArchite
 
                 case GraphicsControllerType_VBoxVGA:
                 case GraphicsControllerType_QemuRamFB:
+                case GraphicsControllerType_VirtioGpu:
                     /* None supported. */
                     return VINF_SUCCESS;
 
@@ -953,6 +955,16 @@ HRESULT PlatformProperties::s_getSupportedVRAMRange(GraphicsControllerType_T aGr
             cbMax = 4 /* BPP in bytes */ * 16000 * 12000; /* Values taken from bochs-vbe.h. */
             /* Make the maximum value a power of two. */
             cbMax = RT_BIT_64(ASMBitLastSetU64(cbMax));
+            break;
+        }
+
+        case GraphicsControllerType_VirtioGpu:
+        {
+            /* The VRAM size is not passed to the virtio-gpu device: the guest backs its
+             * resources with guest RAM, so the value is only nominal.  The maximum is the
+             * same as the effective one of the other controllers (SchemaDefs::MaxGuestVRAM). */
+            cbMin = VGA_VRAM_MIN;
+            cbMax = _256M;
             break;
         }
 

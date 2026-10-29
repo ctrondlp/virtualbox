@@ -249,6 +249,7 @@
           <arg choice="plain">vmsvga</arg>
           <arg choice="plain">vboxsvga</arg>
           <arg choice="plain">qemuramfb</arg>
+          <arg choice="plain">virtiogpu</arg>
         </group></arg>
       <arg>--snapshot-folder=<group choice="plain">
           <arg choice="plain">default</arg>
@@ -1334,10 +1335,17 @@ it unless this changes. -->
             </para></listitem>
         </varlistentry>
         <varlistentry>
-          <term><option>--graphicscontroller=none | vboxvga | vmsvga | vboxsvga</option></term>
+          <term><option>--graphicscontroller=none | vboxvga | vmsvga | vboxsvga | virtiogpu</option></term>
           <listitem><para>
               Specifies the graphics controller type to use. See
               <xref linkend="settings-screen" />.
+            </para><para>
+              The <literal>virtiogpu</literal> controller is a 2D
+              virtio-gpu display without VGA compatibility. The guest
+              needs a virtio-gpu driver to show anything, so the VM has
+              no display output until the guest operating system loads
+              that driver. It has no 3D acceleration, and the state of a
+              VM using it cannot be saved yet.
             </para></listitem>
         </varlistentry>
         <varlistentry>
