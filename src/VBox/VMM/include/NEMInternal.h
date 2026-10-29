@@ -107,6 +107,9 @@ typedef struct NEMWINIOCTL
 # define NEM_WIN_INTW_F_PRIO_SHIFT      2
 /** @} */
 
+/** Windows: Number of register shadow slots, see NEMCPU::aShadowValues. */
+# define NEM_WIN_SHADOW_SLOTS           66
+
 #endif /* RT_OS_WINDOWS */
 
 
@@ -558,6 +561,26 @@ typedef struct NEMCPU
     RTR3PTR                     pvMsgSlotMapping;
     /** The windows thread handle. */
     RTR3PTR                     hNativeThreadHandle;
+
+    /** @name Register shadowing.
+     * The shadow slots record register values known to be loaded in Hyper-V,
+     * either because we just read them (import, exit context) or wrote them
+     * (export).  A slot is only valid while its generation matches uShadowGen,
+     * which is advanced every time the virtual processor runs.  This allows the
+     * export code to skip writing registers which Hyper-V already has.
+     * @{ */
+    /** The current shadow generation (never zero). */
+    uint32_t                    uShadowGen;
+    /** CR8 value currently loaded in Hyper-V as far as we know (UINT8_MAX if unknown).
+     * Unlike the shadow slots this is kept across runs since every exit context
+     * reports CR8. */
+    uint8_t                     uHvCr8;
+    uint8_t                     abShadowPadding[1];
+    /** The generation of each shadow slot. */
+    uint32_t                    auShadowGen[NEM_WIN_SHADOW_SLOTS];
+    /** The shadow values (WHV_REGISTER_VALUE layout). */
+    RTUINT128U                  aShadowValues[NEM_WIN_SHADOW_SLOTS];
+    /** @} */
 # elif defined(VBOX_VMM_TARGET_ARMV8)
     /** Flag whether syncing the CNTV_CTL_EL0/CNTV_CVAL_EL0 registers to Hyper-V is required. */
     bool                        fSyncCntvRegs;
@@ -608,6 +631,15 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatImportOnReturn;
     STAMCOUNTER                 StatImportOnReturnSkipped;
     STAMCOUNTER                 StatQueryCpuTick;
+# if !defined(VBOX_VMM_TARGET_ARMV8)
+    STAMCOUNTER                 StatImportCalls;
+    STAMCOUNTER                 StatImportRegs;
+    STAMCOUNTER                 StatImportXState;
+    STAMCOUNTER                 StatExportCalls;
+    STAMCOUNTER                 StatExportRegs;
+    STAMCOUNTER                 StatExportRegsSkipped;
+    STAMCOUNTER                 StatExportXState;
+# endif
     /** @} */
 
 #elif defined(RT_OS_DARWIN) && defined(VBOX_WITH_NATIVE_NEM)
