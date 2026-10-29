@@ -192,6 +192,10 @@ typedef struct DEVEFIR3
     uint64_t                cbMcfgLength;
     /** Physical address of the TPM PPI area. */
     uint64_t                u64TpmPpiBase;
+    /** The Apple (Extended)FirmwareFeatures value for the firmware. */
+    uint64_t                u64AppleFwFeatures;
+    /** The Apple (Extended)FirmwareFeaturesMask value for the firmware. */
+    uint64_t                u64AppleFwFeaturesMask;
     /** Size of the configured NVRAM device. */
     uint32_t                cbNvram;
     /** Start address of the NVRAM flash. */
@@ -272,6 +276,14 @@ typedef PDEVEFIRC PDEVEFICC;
 /** Non-volatile EFI variable. */
 #define VBOX_EFI_VARIABLE_READ_ONLY     UINT32_C(0x00000008)
 
+/** The default Apple FirmwareFeatures value: FW_FEATURE_SUPPORTS_CSM_LEGACY_MODE,
+ * FW_FEATURE_SUPPORTS_TARGET_DISK_MODE, FW_FEATURE_SUPPORTS_NET_BOOT and
+ * FW_FEATURE_DISABLE_BOOTSCRIPT_WORKAROUND.  This is what the firmware always
+ * used before it became configurable. */
+#define VBOX_EFI_APPLE_FW_FEATURES_DEFAULT       UINT64_C(0x0000000080000015)
+/** The default Apple FirmwareFeaturesMask value (bits 0 thru 9 and 31). */
+#define VBOX_EFI_APPLE_FW_FEATURES_MASK_DEFAULT  UINT64_C(0x00000000800003ff)
+
 
 /*********************************************************************************************************************************
 *   Global Variables                                                                                                             *
@@ -323,6 +335,8 @@ static uint32_t efiInfoSize(PDEVEFIR3 pThisCC)
         case EFI_INFO_INDEX_MCFG_BASE:
         case EFI_INFO_INDEX_MCFG_SIZE:
         case EFI_INFO_INDEX_TPM_PPI_BASE:
+        case EFI_INFO_INDEX_APPLE_FW_FEATURES:
+        case EFI_INFO_INDEX_APPLE_FW_FEATURES_MASK:
             return 8;
         case EFI_INFO_INDEX_APIC_MODE:
             return 1;
@@ -426,6 +440,8 @@ static uint8_t efiInfoNextByte(PDEVEFIR3 pThisCC)
         case EFI_INFO_INDEX_MCFG_SIZE:          return efiInfoNextByteU64(pThisCC, pThisCC->cbMcfgLength);
         case EFI_INFO_INDEX_APIC_MODE:          return efiInfoNextByteU8(pThisCC, pThisCC->u8APIC);
         case EFI_INFO_INDEX_TPM_PPI_BASE:       return efiInfoNextByteU64(pThisCC, pThisCC->u64TpmPpiBase);
+        case EFI_INFO_INDEX_APPLE_FW_FEATURES:      return efiInfoNextByteU64(pThisCC, pThisCC->u64AppleFwFeatures);
+        case EFI_INFO_INDEX_APPLE_FW_FEATURES_MASK: return efiInfoNextByteU64(pThisCC, pThisCC->u64AppleFwFeaturesMask);
 
         default:
             PDMDevHlpDBGFStop(pThisCC->pDevIns, RT_SRC_POS, "%#x", pThisCC->iInfoSelector);
@@ -1571,7 +1587,9 @@ static DECLCALLBACK(int)  efiConstruct(PPDMDEVINS pDevIns, int iInstance, PCFGMN
                                   "UgaVerticalResolution|"     // legacy
                                   "GraphicsResolution|"
                                   "NvramFile|"
-                                  "TpmPpiBase", "");
+                                  "TpmPpiBase|"
+                                  "AppleFirmwareFeatures|"
+                                  "AppleFirmwareFeaturesMask", "");
 
     /* CPU count (optional). */
     rc = pHlp->pfnCFGMQueryU32Def(pCfg, "NumCPUs", &pThisCC->cCpus, 1);
@@ -1773,6 +1791,30 @@ static DECLCALLBACK(int)  efiConstruct(PPDMDEVINS pDevIns, int iInstance, PCFGMN
     if (RT_FAILURE(rc))
         return PDMDEV_SET_ERROR(pDevIns, rc,
                                 N_("Configuration error: Querying \"TpmPpiBase\" as integer failed"));
+
+    /** @cfgm{/Devices/efi/0/Config/AppleFirmwareFeatures, uint64_t, 0x80000015}
+     * The value of the Apple FirmwareFeatures (low 32 bits) and, when
+     * FW_FEATURE_SUPPORTS_EXTENDED_FEATURES (bit 25) is set, the
+     * ExtendedFirmwareFeatures (all 64 bits) NVRAM variables which the firmware
+     * sets up for macOS (boot.efi and the installer check these). */
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "AppleFirmwareFeatures", &pThisCC->u64AppleFwFeatures,
+                                  VBOX_EFI_APPLE_FW_FEATURES_DEFAULT);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc,
+                                N_("Configuration error: Querying \"AppleFirmwareFeatures\" as integer failed"));
+
+    /** @cfgm{/Devices/efi/0/Config/AppleFirmwareFeaturesMask, uint64_t, 0x800003ff}
+     * The value of the Apple FirmwareFeaturesMask and ExtendedFirmwareFeaturesMask
+     * NVRAM variables, see AppleFirmwareFeatures. */
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "AppleFirmwareFeaturesMask", &pThisCC->u64AppleFwFeaturesMask,
+                                  VBOX_EFI_APPLE_FW_FEATURES_MASK_DEFAULT);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc,
+                                N_("Configuration error: Querying \"AppleFirmwareFeaturesMask\" as integer failed"));
+    if (   pThisCC->u64AppleFwFeatures     != VBOX_EFI_APPLE_FW_FEATURES_DEFAULT
+        || pThisCC->u64AppleFwFeaturesMask != VBOX_EFI_APPLE_FW_FEATURES_MASK_DEFAULT)
+        LogRel(("EFI: Apple firmware features %#RX64, mask %#RX64\n",
+                pThisCC->u64AppleFwFeatures, pThisCC->u64AppleFwFeaturesMask));
 
     /*
      * Load firmware volume and thunk ROM.

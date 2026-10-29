@@ -251,13 +251,24 @@ EFI_STATUS (EFIAPI *gUnknownProtoHandler[])() =
     UnknownHandlerImpl
 };
 
+/** FW_FEATURE_SUPPORTS_EXTENDED_FEATURES: The ExtendedFirmwareFeatures and
+ * ExtendedFirmwareFeaturesMask variables are present (64-bit versions of the
+ * FirmwareFeatures and FirmwareFeaturesMask variables). */
+#define VBOX_APPLE_FW_FEATURE_SUPPORTS_EXTENDED_FEATURES    0x02000000
+/** The FirmwareFeatures value used when DevEFI doesn't provide one. */
+#define VBOX_APPLE_FW_FEATURES_FALLBACK                     0x80000015
+/** The FirmwareFeaturesMask value used when DevEFI doesn't provide one. */
+#define VBOX_APPLE_FW_FEATURES_MASK_FALLBACK                0x800003ff
+
 EFI_STATUS EFIAPI
 SetProperVariables(IN EFI_HANDLE ImageHandle, EFI_RUNTIME_SERVICES * rs)
 {
     EFI_STATUS          rc;
     UINT32              vBackgroundClear = 0x00000000;
-    UINT32              vFwFeatures      = 0x80000015;
-    UINT32              vFwFeaturesMask  = 0x800003ff;
+    UINT32              vFwFeatures;
+    UINT32              vFwFeaturesMask;
+    UINT64              vExtFwFeatures     = 0;
+    UINT64              vExtFwFeaturesMask = 0;
 
     // -legacy acpi=0xffffffff acpi_debug=0xfffffff panic_io_port=0xef11 io=0xfffffffe trace=4096  io=0xffffffef -v serial=2 serialbaud=9600
     // 0x10 makes kdb default, thus 0x15e for kdb, 0x14e for gdb
@@ -283,6 +294,22 @@ SetProperVariables(IN EFI_HANDLE ImageHandle, EFI_RUNTIME_SERVICES * rs)
                          sizeof(vBackgroundClear), &vBackgroundClear);
     ASSERT_EFI_ERROR (rc);
 
+    /*
+     * The Apple firmware feature bits are configured by DevEFI depending on the
+     * guest OS type (macOS 10.14 and later get FW_FEATURE_SUPPORTS_APFS and the
+     * extended features with FW_FEATURE_SUPPORTS_LARGE_BASESYSTEM).
+     */
+    if (   GetVmVariable(EFI_INFO_INDEX_APPLE_FW_FEATURES, (CHAR8 *)&vExtFwFeatures, sizeof(vExtFwFeatures))
+           != sizeof(vExtFwFeatures)
+        || GetVmVariable(EFI_INFO_INDEX_APPLE_FW_FEATURES_MASK, (CHAR8 *)&vExtFwFeaturesMask, sizeof(vExtFwFeaturesMask))
+           != sizeof(vExtFwFeaturesMask))
+    {
+        vExtFwFeatures     = VBOX_APPLE_FW_FEATURES_FALLBACK;
+        vExtFwFeaturesMask = VBOX_APPLE_FW_FEATURES_MASK_FALLBACK;
+    }
+    vFwFeatures     = (UINT32)vExtFwFeatures;
+    vFwFeaturesMask = (UINT32)vExtFwFeaturesMask;
+
     rc = rs->SetVariable(L"FirmwareFeatures",
                          &gEfiAppleNvramGuid,
                          EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
@@ -294,6 +321,28 @@ SetProperVariables(IN EFI_HANDLE ImageHandle, EFI_RUNTIME_SERVICES * rs)
                          EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
                          sizeof(vFwFeaturesMask), &vFwFeaturesMask);
     ASSERT_EFI_ERROR (rc);
+
+    if (vFwFeatures & VBOX_APPLE_FW_FEATURE_SUPPORTS_EXTENDED_FEATURES)
+    {
+        rc = rs->SetVariable(L"ExtendedFirmwareFeatures",
+                             &gEfiAppleNvramGuid,
+                             EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+                             sizeof(vExtFwFeatures), &vExtFwFeatures);
+        ASSERT_EFI_ERROR (rc);
+
+        rc = rs->SetVariable(L"ExtendedFirmwareFeaturesMask",
+                             &gEfiAppleNvramGuid,
+                             EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+                             sizeof(vExtFwFeaturesMask), &vExtFwFeaturesMask);
+        ASSERT_EFI_ERROR (rc);
+    }
+    else
+    {
+        /* Remove stale variables from the persistent NVRAM store (e.g. after
+           changing the guest OS type).  EFI_NOT_FOUND is the normal case. */
+        rs->SetVariable(L"ExtendedFirmwareFeatures", &gEfiAppleNvramGuid, 0, 0, NULL);
+        rs->SetVariable(L"ExtendedFirmwareFeaturesMask", &gEfiAppleNvramGuid, 0, 0, NULL);
+    }
 
     rc = rs->SetVariable(L"boot-args",
                          &gEfiAppleBootGuid,
