@@ -251,5 +251,38 @@ extern DECL_HIDDEN_DATA(PFNWINSOCKGETHOSTBYNAME)         g_pfngethostbyname;
 #endif
 
 
+/** @name High resolution timed waits (VM processes only).
+ * @{ */
+/** High resolution waitable timer flag (W10 1803+) for SDKs lacking it. */
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+# define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION  0x00000002
+#endif
+/** Shortest relative timeout (ns) rtThreadWinHiResWait handles; anything
+ * shorter is a poll as far as NT is concerned (100ns units). */
+#define RTTHREADWIN_HIRES_WAIT_MIN_NS           UINT64_C(100)
+/** Longest relative timeout (ns) rtThreadWinHiResWait handles.  Beyond this
+ * the clock tick granularity (up to 15.6 ms) is a relatively minor error and
+ * such waits are mostly idle polling where timer coalescing saves power. */
+#define RTTHREADWIN_HIRES_WAIT_MAX_NS           (UINT64_C(50) * RT_NS_1MS)
+/** The timed wait resolution RTSemEventGetResolution and
+ * RTSemEventMultiGetResolution report while high resolution waits are enabled.
+ * (tstRTWinThreadQoS on W11 25H2: 0.5-10 ms waits are late by 0.3-0.6 ms
+ * median, 1.2 ms max, vs 5-15 ms at the default 15.6 ms timer resolution.)
+ * @note  This is only achieved on IPRT created (non-alien) threads and for
+ *        timeouts between RTTHREADWIN_HIRES_WAIT_MIN_NS and
+ *        RTTHREADWIN_HIRES_WAIT_MAX_NS; other waits keep the clock tick
+ *        granularity.  The EMT halt methods, the main users, meet both. */
+#define RTTHREADWIN_HIRES_WAIT_RESOLUTION_NS    UINT32_C(500000)
+/** Set when short timed waits should use high resolution timers, i.e. once
+ * the process is hosting a VM (rtSchedWinInitVmProcess calls
+ * rtThreadWinEnableHiResWaits). */
+extern DECL_HIDDEN_DATA(bool volatile)                  g_fRtThreadWinHiResWaits;
+DECLHIDDEN(bool) rtThreadWinEnableHiResWaits(void);
+#ifdef IPRT_INCLUDED_nt_nt_h
+DECLHIDDEN(bool) rtThreadWinHiResWait(HANDLE hObject, uint64_t cNsTimeout, NTSTATUS *prcNt);
+#endif
+/** @} */
+
+
 #endif /* !IPRT_INCLUDED_SRC_r3_win_internal_r3_win_h */
 

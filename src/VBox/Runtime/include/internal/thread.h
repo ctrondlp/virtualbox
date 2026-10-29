@@ -83,6 +83,10 @@ typedef struct RTTHREADINT
     /** The thread handle
      * This is not valid until the create function has returned! */
     uintptr_t               hThread;
+    /** High resolution waitable timer handle for short timed waits, created on
+     * demand by and only used by the thread itself (see rtThreadWinHiResWait).
+     * Zero if not created. */
+    uintptr_t               hHiResWaitTimer;
 #endif
 #if defined(RT_OS_LINUX) && defined(IN_RING3)
     /** The thread ID.

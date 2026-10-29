@@ -55,6 +55,9 @@
 #include <iprt/timer.h>
 
 #include "internal/magics.h"
+#ifdef IN_RING3
+# include "../r3/win/internal-r3-win.h"
+#endif
 
 
 /*********************************************************************************************************************************
@@ -376,6 +379,10 @@ DECLINLINE(int) rtR0SemEventMultiNtWait(PRTSEMEVENTMULTIINTERNAL pThis, uint32_t
             rcNt = NtWaitForSingleObject(pThis->hEvent, TRUE /*Alertable*/, NULL);
 #endif
         else
+#ifdef IN_RING3
+        /* Short timeouts may be done using a high resolution timer, see rtThreadWinHiResWait. */
+        if (!rtThreadWinHiResWait(pThis->hEvent, uTimeout, &rcNt))
+#endif
         {
             LARGE_INTEGER Timeout;
             Timeout.QuadPart = -(int64_t)(uTimeout / 100);

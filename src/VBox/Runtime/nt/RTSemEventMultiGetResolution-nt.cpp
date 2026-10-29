@@ -50,6 +50,7 @@
 #include <iprt/timer.h>
 #ifdef IN_RING3
 # include <iprt/system.h>
+# include "../r3/win/internal-r3-win.h"
 #endif
 
 
@@ -77,6 +78,10 @@ RTDECL(uint32_t) RTSemEventMultiGetResolution(void)
 #ifdef IN_RING0
     return RTTimerGetSystemGranularity();
 #else
+    /* Short timed waits use high resolution timers in VM processes. */
+    if (g_fRtThreadWinHiResWaits)
+        return RTTHREADWIN_HIRES_WAIT_RESOLUTION_NS;
+
     ULONG cNtTicksMin = 0;
     ULONG cNtTicksMax = 0;
     ULONG cNtTicksCur = 0;

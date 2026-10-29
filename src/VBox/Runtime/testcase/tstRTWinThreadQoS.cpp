@@ -1,10 +1,10 @@
 /* $Id$ */
 /** @file
- * IPRT Testcase - Windows thread QoS (power throttling).
+ * IPRT Testcase - Windows thread QoS (power throttling) and semaphore wait precision.
  *
  * Checks that IPRT opts emulation threads and the process hosting them out of
- * Windows power throttling (EcoQoS), and optionally measures which kind of
- * cores the threads run on.
+ * Windows power throttling (EcoQoS) and measures how precisely short relative
+ * semaphore waits are honoured.
  */
 
 /*
@@ -44,6 +44,8 @@
 *********************************************************************************************************************************/
 #include <iprt/win/windows.h>
 
+#include <iprt/semaphore.h>
+
 #include <iprt/env.h>
 #include <iprt/errcore.h>
 #include <iprt/path.h>
@@ -71,8 +73,8 @@
 #define TST_OPT_OUT_ENV_VAR                             "VBOX_NO_POWER_THROTTLING_OPTOUT"
 /** The argument telling us we're the opt-out child process. */
 #define TST_CHILD_ARG                                   "--child-opt-out"
-/** Command line option enabling the core placement measurements; by default
- * only the deterministic checks run. */
+/** Command line option enabling the (slow) wait latency and core placement
+ * measurements; by default only the deterministic checks run. */
 #define TST_BENCHMARK_ARG                               "--benchmark"
 
 
@@ -235,6 +237,83 @@ static void tstInitCpuSets(void)
 
 
 /**
+ * Measures how late short relative waits on event semaphores return.
+ *
+ * @param   pszWhat     The test phase.
+ */
+static void tstMeasureWaits(const char *pszWhat)
+{
+    static struct { uint64_t cNsWait; uint32_t cIterations; bool fMulti; } const s_aTests[] =
+    {
+        {   500000, 100, false },
+        {  1000000, 100, false },
+        {  2000000,  50, false },
+        { 10000000,  20, false },
+        {  1000000,  50, true  },
+    };
+
+    RTSEMEVENT      hEvt;
+    RTTESTI_CHECK_RC_RETV(RTSemEventCreate(&hEvt), VINF_SUCCESS);
+    RTSEMEVENTMULTI hEvtMulti;
+    int const rcCreate = RTSemEventMultiCreate(&hEvtMulti);
+    if (RT_FAILURE(rcCreate))
+    {
+        RTTestIFailed("RTSemEventMultiCreate -> %Rrc", rcCreate);
+        RTSemEventDestroy(hEvt);
+        return;
+    }
+
+    uint32_t const fFlags = RTSEMWAIT_FLAGS_RELATIVE | RTSEMWAIT_FLAGS_NANOSECS | RTSEMWAIT_FLAGS_NORESUME;
+    for (size_t iTest = 0; iTest < RT_ELEMENTS(s_aTests); iTest++)
+    {
+        uint64_t       acNsLate[128];
+        uint32_t const cIterations = RT_MIN(s_aTests[iTest].cIterations, RT_ELEMENTS(acNsLate));
+        uint64_t const cNsWait     = s_aTests[iTest].cNsWait;
+        uint64_t       cNsTotal    = 0;
+        uint32_t       cEarly      = 0;
+        for (uint32_t i = 0; i < cIterations; i++)
+        {
+            uint64_t const nsStart = RTTimeNanoTS();
+            int rc;
+            if (!s_aTests[iTest].fMulti)
+                rc = RTSemEventWaitEx(hEvt, fFlags, cNsWait);
+            else
+                rc = RTSemEventMultiWaitEx(hEvtMulti, fFlags, cNsWait);
+            uint64_t const cNsElapsed = RTTimeNanoTS() - nsStart;
+            if (rc != VERR_TIMEOUT)
+                RTTestIFailed("%s: wait returned %Rrc, expected VERR_TIMEOUT", pszWhat, rc);
+            /* Plain NT waits may time out up to a clock tick early as seen by
+               RTTimeNanoTS, so this is only reported (allowing for the 100ns
+               rounding). */
+            if (cNsElapsed + 100 < cNsWait)
+                cEarly++;
+
+            /* Insertion sort the lateness. */
+            uint64_t const cNsLate = cNsElapsed > cNsWait ? cNsElapsed - cNsWait : 0;
+            uint32_t       j       = i;
+            while (j > 0 && acNsLate[j - 1] > cNsLate)
+            {
+                acNsLate[j] = acNsLate[j - 1];
+                j--;
+            }
+            acNsLate[j] = cNsLate;
+            cNsTotal   += cNsLate;
+        }
+
+        RTTestIPrintf(RTTESTLVL_ALWAYS,
+                      "%-22s %-5s %6RU64 us wait: late by min %7RU64 median %7RU64 avg %7RU64 max %7RU64 ns (n=%u, early %u)\n",
+                      pszWhat, s_aTests[iTest].fMulti ? "multi" : "event", cNsWait / RT_NS_1US, acNsLate[0],
+                      acNsLate[cIterations / 2], cNsTotal / cIterations, acNsLate[cIterations - 1], cIterations, cEarly);
+        RTTestIValueF(acNsLate[cIterations / 2], RTTESTUNIT_NS, "%s %s %RU64us median late",
+                      pszWhat, s_aTests[iTest].fMulti ? "multi" : "event", cNsWait / RT_NS_1US);
+    }
+
+    RTSemEventMultiDestroy(hEvtMulti);
+    RTSemEventDestroy(hEvt);
+}
+
+
+/**
  * Spins for a while and samples which kind of core the thread runs on.
  *
  * @param   pszWhat     The test phase.
@@ -267,7 +346,7 @@ static void tstMeasurePlacement(const char *pszWhat)
 
 
 /**
- * Worker: Reports the thread state and measures the placement only.
+ * Worker: Measures waits and placement only.
  */
 static void tstWorkerMeasure(const char *pszWhat)
 {
@@ -276,7 +355,10 @@ static void tstWorkerMeasure(const char *pszWhat)
         RTTestIPrintf(RTTESTLVL_ALWAYS, "%-22s thread power throttling: control=%#x state=%#x\n",
                       pszWhat, State.ControlMask, State.StateMask);
     if (g_fBenchmark)
+    {
+        tstMeasureWaits(pszWhat);
         tstMeasurePlacement(pszWhat);
+    }
 }
 
 
@@ -312,7 +394,10 @@ static void tstWorkerEmulation(const char *pszWhat)
         RTTestIPrintf(RTTESTLVL_ALWAYS, "GetProcessInformation(ProcessPowerThrottling) failed: %u\n", GetLastError());
 
     if (g_fBenchmark)
+    {
+        tstMeasureWaits(pszWhat);
         tstMeasurePlacement(pszWhat);
+    }
 }
 
 

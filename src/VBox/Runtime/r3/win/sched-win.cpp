@@ -59,7 +59,10 @@
  *      - enables thread level EcoQoS opt-out for RTTHREADTYPE_EMULATION,
  *        RTTHREADTYPE_TIMER and RTTHREADTYPE_IO threads (SetThreadInformation /
  *        ThreadPowerThrottling), which also holds should something later put
- *        the process into EcoQoS (e.g. task manager's efficiency mode).
+ *        the process into EcoQoS (e.g. task manager's efficiency mode);
+ *      - enables high resolution timers for short timed semaphore waits (see
+ *        rtThreadWinHiResWait), or, lacking high resolution timer support (pre
+ *        W10 1803), raises the timer resolution to 1 ms for the process.
  *
  * RTTHREADTYPE_TIMER and RTTHREADTYPE_IO threads that got their type before the
  * first emulation thread was created don't get the thread level opt-out, only
@@ -115,7 +118,7 @@
 /** @} */
 
 /** Environment variable which, when set to anything but "0", disables the
- * VM process power throttling opt-out. */
+ * VM process power throttling opt-out and the high resolution waits. */
 #define RTSCHEDWIN_ENV_NO_POWER_THROTTLING_OPTOUT       "VBOX_NO_POWER_THROTTLING_OPTOUT"
 
 /** @name VM process initialization states (g_uVmProcessState).
@@ -170,6 +173,8 @@ typedef struct RTSCHEDWINPOWERTHROTTLING
 /** SetThreadInformation and SetProcessInformation (W8+); the information class
  * enum is passed as an int. */
 typedef BOOL (WINAPI *PFNRTSCHEDWINSETINFORMATION)(HANDLE, int, LPVOID, DWORD);
+/** NtSetTimerResolution (NTDLL.DLL, NT 3.50+). */
+typedef LONG (NTAPI *PFNRTSCHEDWINNTSETTIMERRESOLUTION)(ULONG, BOOLEAN, PULONG);
 
 
 /*********************************************************************************************************************************
@@ -405,7 +410,7 @@ static void rtSchedWinInitVmProcessWorker(void)
     if (   rc == VERR_BUFFER_OVERFLOW
         || (RT_SUCCESS(rc) && strcmp(szValue, "0") != 0))
     {
-        LogRel(("IPRT: %s is set, leaving power throttling to Windows.\n",
+        LogRel(("IPRT: %s is set, leaving power throttling and timer precision to Windows.\n",
                 RTSCHEDWIN_ENV_NO_POWER_THROTTLING_OPTOUT));
         return;
     }
@@ -440,6 +445,25 @@ static void rtSchedWinInitVmProcessWorker(void)
      * (Thread power throttling is W10 1709+, failures are ignored there.)
      */
     g_pfnSetThreadInformation = (PFNRTSCHEDWINSETINFORMATION)GetProcAddress(g_hModKernel32, "SetThreadInformation");
+
+    /*
+     * Make short timed waits precise, see rtThreadWinHiResWait.  Lacking high
+     * resolution timers (pre W10 1803), raise the timer resolution for the
+     * process lifetime instead (one VM per process).
+     */
+    if (rtThreadWinEnableHiResWaits())
+        LogRel(("IPRT: Using high resolution timers for short timed waits.\n"));
+    else
+    {
+        PFNRTSCHEDWINNTSETTIMERRESOLUTION pfnNtSetTimerResolution
+            = (PFNRTSCHEDWINNTSETTIMERRESOLUTION)GetProcAddress(g_hModNtDll, "NtSetTimerResolution");
+        if (pfnNtSetTimerResolution)
+        {
+            ULONG      cNtTicksCur = 0;
+            LONG const rcNt        = pfnNtSetTimerResolution(10000 /* 1ms in 100ns units */, TRUE /*fSet*/, &cNtTicksCur);
+            LogRel(("IPRT: No high resolution timers; requested 1 ms timer resolution: %#x, now %u00 ns.\n", rcNt, cNtTicksCur));
+        }
+    }
 }
 
 
