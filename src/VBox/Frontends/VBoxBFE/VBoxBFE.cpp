@@ -861,6 +861,7 @@ static DECLCALLBACK(int) vboxbfeConfigConstructor(PUVM pUVM, PVM pVM, PCVMMR3VTA
         {
             pCfgmNd = pVMM->pfnCFGMR3GetChild(pRoot, "PDM/Drivers");
             AssertPtr(pCfgmNd);
+            rc = VINF_SUCCESS;
         }
         RTUUID Uuid;
         RTUuidFromStr(&Uuid, PDMDRV_OID);
