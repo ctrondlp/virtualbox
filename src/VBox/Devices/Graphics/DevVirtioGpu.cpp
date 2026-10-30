@@ -641,6 +641,8 @@ typedef struct VIRTIOGPUR3
     bool                    fMainHasMode;
     /** Whether Main wants us to render into PDMIDISPLAYCONNECTOR::pbData. */
     bool                    fRenderVRAM;
+    /** Whether the guest cursor shape is currently shown by Main (cursor queue worker and teardown only). */
+    bool                    fCursorShown;
     /** @} */
 } VIRTIOGPUR3;
 /** Pointer to the ring-3 state of the virtio GPU device. */
@@ -2472,10 +2474,102 @@ static void vgpuR3CtrlCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGP
 
 
 /**
+ * Hides the guest cursor in Main.
+ *
+ * @param   pThisCC     The ring-3 device state.
+ */
+static void vgpuR3CursorHide(PVIRTIOGPUCC pThisCC)
+{
+    PPDMIDISPLAYCONNECTOR const pDrv = pThisCC->pDrv;
+    if (pDrv && pThisCC->fCursorShown)
+    {
+        pThisCC->fCursorShown = false;
+        pDrv->pfnVBVAMousePointerShape(pDrv, false /*fVisible*/, false /*fAlpha*/, 0, 0, 0, 0, NULL);
+    }
+}
+
+
+/**
+ * VIRTIOGPU_CMD_UPDATE_CURSOR: hands the cursor image to Main.
+ *
+ * The cursor image is a small 2D resource whose shadow holds BGRA pixels.  The
+ * position of the pointer is not used: the guest follows the host mouse
+ * (absolute pointing device), so only the shape and the hotspot matter.
+ * Resource 0 hides the cursor.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pReq        The request (host copy).
+ */
+static void vgpuR3CursorUpdate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PCVIRTIOGPUUPDATECURSOR pReq)
+{
+    if (!pReq->idResource)
+    {
+        vgpuR3CursorHide(pThisCC);
+        return;
+    }
+
+    uint8_t *pbShape = NULL;
+    uint32_t cx = 0, cy = 0, xHot = 0, yHot = 0;
+    size_t   cbShape = 0;
+    PPDMIDISPLAYCONNECTOR pDrv;
+
+    vgpuR3StateLock(pDevIns, pThis);
+    pDrv = pThisCC->pDrv;
+    PVIRTIOGPURESOURCE pRes = vgpuR3Resource2dFind(pThisCC, pReq->idResource);
+    if (   pDrv
+        && pRes
+        && pRes->pbShadow
+        && pRes->cx >= 1 && pRes->cx <= VIRTIOGPU_CURSOR_MAX_DIMENSION
+        && pRes->cy >= 1 && pRes->cy <= VIRTIOGPU_CURSOR_MAX_DIMENSION)
+    {
+        cx = pRes->cx;
+        cy = pRes->cy;
+        /* The pointer interface wants an AND mask (all ones: the alpha channel decides) padded to 4 bytes,
+           followed by the 32-bit BGRA pixels. */
+        size_t const cbAnd = RT_ALIGN_Z(((size_t)cx + 7) / 8 * cy, sizeof(uint32_t));
+        size_t const cbXor = (size_t)cx * cy * sizeof(uint32_t);
+        cbShape = cbAnd + cbXor;
+        pbShape = (uint8_t *)RTMemAlloc(cbShape);
+        if (pbShape)
+        {
+            memset(pbShape, 0xff, cbAnd);
+            /* Formats without an alpha channel have undefined alpha bytes: make them opaque. */
+            bool const fOpaque =    pRes->uFormat == VIRTIOGPU_FORMAT_B8G8R8X8_UNORM
+                                 || pRes->uFormat == VIRTIOGPU_FORMAT_X8R8G8B8_UNORM
+                                 || pRes->uFormat == VIRTIOGPU_FORMAT_X8B8G8R8_UNORM
+                                 || pRes->uFormat == VIRTIOGPU_FORMAT_R8G8B8X8_UNORM;
+            for (uint32_t iRow = 0; iRow < cy; iRow++)
+            {
+                uint32_t       *pu32Dst = (uint32_t *)(pbShape + cbAnd + (size_t)iRow * cx * sizeof(uint32_t));
+                uint32_t const *pu32Src = (uint32_t const *)(pRes->pbShadow + (size_t)iRow * pRes->cbPitch);
+                if (fOpaque)
+                    for (uint32_t i = 0; i < cx; i++)
+                        pu32Dst[i] = pu32Src[i] | UINT32_C(0xff000000);
+                else
+                    memcpy(pu32Dst, pu32Src, (size_t)cx * sizeof(uint32_t));
+            }
+            xHot = RT_MIN(pReq->xHot, cx - 1);
+            yHot = RT_MIN(pReq->yHot, cy - 1);
+        }
+    }
+    vgpuR3StateUnlock(pDevIns, pThis);
+
+    /* Not an error the guest can fix: an unknown or oversized cursor resource leaves the old shape. */
+    if (!pbShape)
+        return;
+    pThisCC->fCursorShown = true;
+    pDrv->pfnVBVAMousePointerShape(pDrv, true /*fVisible*/, true /*fAlpha*/, xHot, yHot, cx, cy, pbShape);
+    RTMemFree(pbShape);
+}
+
+
+/**
  * Processes one cursor queue descriptor chain.
  *
- * There is no hardware cursor, so the command is ignored.  Cursor commands
- * have no response; the chain is just handed back.
+ * Cursor commands have no response; the chain is just handed back.
+ * UPDATE_CURSOR sets the pointer shape in Main, MOVE_CURSOR is ignored.
  *
  * @param   pDevIns     The device instance.
  * @param   pThis       The shared device state.
@@ -2485,6 +2579,14 @@ static void vgpuR3CtrlCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGP
 static void vgpuR3CursorCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTQBUF pVirtqBuf)
 {
     STAM_REL_COUNTER_INC(&pThis->StatCursorCmds);
+
+    if (pVirtqBuf->cbPhysSend >= sizeof(VIRTIOGPUUPDATECURSOR))
+    {
+        VIRTIOGPUUPDATECURSOR Req;
+        virtioCoreR3VirtqBufDrain(&pThis->Virtio, pVirtqBuf, &Req, sizeof(Req));
+        if (Req.Hdr.uType == VIRTIOGPU_CMD_UPDATE_CURSOR)
+            vgpuR3CursorUpdate(pDevIns, pThis, pThisCC, &Req);
+    }
     vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CURSOR, pVirtqBuf, NULL, 0,
                       pThis->aWorkers[VIRTIOGPU_VIRTQ_CURSOR].uCmdGen);
 }
@@ -2613,6 +2715,7 @@ static DECLCALLBACK(int) vgpuR3WorkerThread(PPDMDEVINS pDevIns, PPDMTHREAD pThre
         {
             vgpuR3VenusTeardown(pDevIns, pThis, pThisCC);
             vgpuR3ResourcesDestroyAll(pDevIns, pThis, pThisCC);
+            vgpuR3CursorHide(pThisCC); /* The cursor image resource is gone. */
         }
 
         /* Sample the reset generation before looking at the queue, so a reset after this point is noticed

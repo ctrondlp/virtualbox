@@ -122,6 +122,8 @@ typedef VIRTIOGPUCONFIG *PVIRTIOGPUCONFIG;
 /* Cursor commands (cursor queue). */
 #define VIRTIOGPU_CMD_UPDATE_CURSOR             UINT32_C(0x0300)
 #define VIRTIOGPU_CMD_MOVE_CURSOR               UINT32_C(0x0301)
+/** Largest cursor image width or height accepted (the Linux driver uses 64). */
+#define VIRTIOGPU_CURSOR_MAX_DIMENSION          256
 /* Success responses. */
 #define VIRTIOGPU_RESP_OK_NODATA                UINT32_C(0x1100)
 #define VIRTIOGPU_RESP_OK_DISPLAY_INFO          UINT32_C(0x1101)
