@@ -68,9 +68,18 @@ rings one doorbell per kick. Measurements are in `vbox-devtools/testkit/gpu-2026
   VirtualAlloc and MapViewOfFile memory; a real-mode guest program saw correct reads and writes; unmapping a range
   with holes succeeds; a VirtualAlloc pool imports into Vulkan with VK_EXT_external_memory_host (host-coherent types).
 
+## Observations
+
+- With Venus off the guest reports `-virgl -edid -resource_blob -host_visible -context_init`, 1 scanout and 0 cap sets
+  (Fedora kernel 6.19.10), as designed. A Fedora live guest on the 2D device logged once a kernel WARNING from
+  `drm_atomic_helper_wait_for_vblanks` (a vblank wait timeout in the fbdev damage worker, about 4 s after the driver
+  loaded). The cause is not known: it may be the guest's vblank timer under the Hyper-V backend, or something the
+  device should do differently. It did not stop the display from working.
+
 ## NOT verified
 
-- Anything on Linux, macOS or in debug/strict builds (only the Windows release build was compiled).
+- macOS and Linux arm64 builds. (The branch was compiled on Linux/GCC in release and debug with -Werror, including
+  the ring-0 PGM variant, the Linux NEM stubs and the structure size tests; the Windows debug/strict build was not.)
 - That `VBoxEFI-amd64.fd` contains exactly what the DSC/FDF describe: the image was built locally with the GCC
   toolchain and replaced the checked-in one; it was only checked by booting.
 - The memory-window code, the VirtioCore capability and the Venus device code have been compiled but never RUN. The
