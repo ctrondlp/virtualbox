@@ -324,6 +324,10 @@ typedef struct VIRTIOGPURESOURCE
     /** Blob: taking the mapping out of the window failed, so the library
      * memory stays mapped (and the resource alive in the library) for good. */
     bool                    fMapLeaked;
+    /** Blob: the creating context was destroyed.  The mapping is out of the window and the library
+     * resource is released; the entry stays so the commands the guest still sends for it (Linux
+     * releases its buffer objects after the context) can be answered. */
+    bool                    fOrphan;
     /** Blob: VIRTIOGPU_BLOB_MEM_XXX. */
     uint32_t                uBlobMem;
     /** Blob: VIRTIOGPU_BLOB_FLAG_XXX. */
@@ -1088,10 +1092,13 @@ static int vgpuR3BlobUnmap(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pT
 static uint32_t vgpuR3BlobUnref(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
 {
     Assert(pRes->fBlob);
-    /* Out of the guest's reach first, then the library may free the memory. */
-    if (pRes->fMapped && RT_FAILURE(vgpuR3BlobUnmap(pDevIns, pThis, pThisCC, pRes)))
-        return VIRTIOGPU_RESP_ERR_UNSPEC;
-    vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
+    if (!pRes->fOrphan)
+    {
+        /* Out of the guest's reach first, then the library may free the memory. */
+        if (pRes->fMapped && RT_FAILURE(vgpuR3BlobUnmap(pDevIns, pThis, pThisCC, pRes)))
+            return VIRTIOGPU_RESP_ERR_UNSPEC;
+        vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
+    }
 
     vgpuR3StateLock(pDevIns, pThis);
     RTListNodeRemove(&pRes->Node);
@@ -1101,6 +1108,34 @@ static uint32_t vgpuR3BlobUnref(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
     vgpuR3StateUnlock(pDevIns, pThis);
 
     vgpuR3ResourceFree(pRes);
+    return VIRTIOGPU_RESP_OK_NODATA;
+}
+
+
+/**
+ * Releases a blob when its creating context is destroyed, but keeps the entry.
+ *
+ * The library may free the memory of a context's blobs with the context, so the
+ * blob must be out of the host visible window first.  Linux closes its buffer
+ * objects after it destroyed the context, so the entry stays (as an orphan) for
+ * the guest's own later UNMAP_BLOB, UNREF and attach/detach commands.
+ *
+ * @returns Response type, VIRTIOGPU_RESP_OK_NODATA on success.
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The blob resource.
+ */
+static uint32_t vgpuR3BlobOrphan(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
+{
+    Assert(pRes->fBlob && !pRes->fOrphan);
+    if (pRes->fMapped && RT_FAILURE(vgpuR3BlobUnmap(pDevIns, pThis, pThisCC, pRes)))
+        return VIRTIOGPU_RESP_ERR_UNSPEC;
+    vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
+
+    vgpuR3StateLock(pDevIns, pThis);
+    pRes->fOrphan = true;
+    vgpuR3StateUnlock(pDevIns, pThis);
     return VIRTIOGPU_RESP_OK_NODATA;
 }
 
@@ -1830,7 +1865,7 @@ static void vgpuR3VenusTeardown(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
     /* 3. The blob resources, except those whose memory the guest may still reach. */
     RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
     {
-        if (pRes->fBlob && !pRes->fMapLeaked)
+        if (pRes->fBlob && !pRes->fMapLeaked && !pRes->fOrphan)
             vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
     }
 
@@ -1982,7 +2017,8 @@ static uint32_t vgpuR3CmdCtxCreate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIO
  * Parked commands of the context are completed: their fences never retire
  * now, and the guest stopped waiting for them when it destroyed the context.
  *
- * The blob resources the context created are released first (see below).
+ * The blob resources the context created are released first (see below), but
+ * their entries stay until the guest releases them.
  *
  * @returns Response type.
  * @param   pDevIns     The device instance.
@@ -1998,16 +2034,16 @@ static uint32_t vgpuR3CmdCtxDestroy(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTI
         return VIRTIOGPU_RESP_ERR_INVALID_CONTEXT_ID;
 
     /* The library may free the memory of the blobs a context created when the context goes away, and the guest
-       decides the order of its commands (Linux releases the buffer objects first, a hostile guest need not).
-       So take the blobs of this context out of the host visible window and release them before the context,
-       or the guest could keep reaching host memory that has been freed and reused.  If a blob cannot be taken
-       out of the window, the context stays and the guest gets an error. */
+       decides the order of its commands (Linux closes its buffer objects after the context, a hostile guest
+       can do anything).  So take the blobs of this context out of the host visible window and release them
+       before the context, or the guest could keep reaching host memory that has been freed and reused.  If a
+       blob cannot be taken out of the window, the context stays and the guest gets an error. */
     PVIRTIOGPURESOURCE pRes, pResNext;
     RTListForEachSafe(&pThisCC->ListResources, pRes, pResNext, VIRTIOGPURESOURCE, Node)
     {
-        if (pRes->fBlob && pRes->idCtxCreator == pReqHdr->uCtxId)
+        if (pRes->fBlob && !pRes->fOrphan && pRes->idCtxCreator == pReqHdr->uCtxId)
         {
-            uint32_t const uRespType = vgpuR3BlobUnref(pDevIns, pThis, pThisCC, pRes);
+            uint32_t const uRespType = vgpuR3BlobOrphan(pDevIns, pThis, pThisCC, pRes);
             if (uRespType != VIRTIOGPU_RESP_OK_NODATA)
                 return uRespType;
         }
@@ -2042,6 +2078,8 @@ static uint32_t vgpuR3CmdCtxResource(PVIRTIOGPUCC pThisCC, PCVIRTIOGPUCTXRESOURC
     PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
     if (!pRes)
         return fAttach ? VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID : VIRTIOGPU_RESP_OK_NODATA;
+    if (pRes->fOrphan)
+        return VIRTIOGPU_RESP_OK_NODATA; /* Released with its creating context. */
     if (pRes->fBlob)
     {
         /* Both ids were checked to be at most INT32_MAX when created. */
@@ -2153,6 +2191,8 @@ static uint32_t vgpuR3CmdResourceCreateBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis
                                       pReq->idBlob, pReq->cbBlob);
     if (RT_FAILURE(rc))
     {
+        LogRelMax(16, ("%s: Creating blob %RU32 (%#RX64 bytes, blob id %#RX64, flags %#RX32) in context %RU32 failed: %Rrc\n",
+                       pThis->szInstance, idResource, pReq->cbBlob, pReq->idBlob, pReq->fBlobFlags, pReq->Hdr.uCtxId, rc));
         RTMemFree(pRes);
         return vgpuR3RespFromRendererRc(rc);
     }
@@ -2216,7 +2256,7 @@ static uint32_t vgpuR3CmdResourceMapBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, P
 {
     AssertReturn(pThisCC->pRenderer, VIRTIOGPU_RESP_ERR_UNSPEC);
     PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
-    if (!pRes || !pRes->fBlob)
+    if (!pRes || !pRes->fBlob || pRes->fOrphan)
         return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
     if (!(pRes->fBlobFlags & VIRTIOGPU_BLOB_FLAG_USE_MAPPABLE) || pRes->fMapped)
         return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
@@ -2310,6 +2350,8 @@ static uint32_t vgpuR3CmdResourceUnmapBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis,
     PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
     if (!pRes || !pRes->fBlob)
         return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
+    if (pRes->fOrphan)
+        return VIRTIOGPU_RESP_OK_NODATA; /* Already out of the window when its context was destroyed. */
     if (!pRes->fMapped)
         return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
     int rc = vgpuR3BlobUnmap(pDevIns, pThis, pThisCC, pRes);
@@ -2511,7 +2553,7 @@ static void vgpuR3CursorUpdate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUC
     }
 
     uint8_t *pbShape = NULL;
-    uint32_t cx = 0, cy = 0, xHot = 0, yHot = 0;
+    uint32_t cx = 0, cy = 0, xHot = 0, yHot = 0, uFormat = 0;
     size_t   cbShape = 0;
     PPDMIDISPLAYCONNECTOR pDrv;
 
@@ -2526,6 +2568,7 @@ static void vgpuR3CursorUpdate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUC
     {
         cx = pRes->cx;
         cy = pRes->cy;
+        uFormat = pRes->uFormat;
         /* The pointer interface wants an AND mask (all ones: the alpha channel decides) padded to 4 bytes,
            followed by the 32-bit BGRA pixels. */
         size_t const cbAnd = RT_ALIGN_Z(((size_t)cx + 7) / 8 * cy, sizeof(uint32_t));
@@ -2560,6 +2603,7 @@ static void vgpuR3CursorUpdate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUC
     if (!pbShape)
         return;
     pThisCC->fCursorShown = true;
+    LogRelMax(8, ("%s: Guest cursor %RU32x%RU32, hotspot %RU32,%RU32, format %RU32\n", pThis->szInstance, cx, cy, xHot, yHot, uFormat));
     pDrv->pfnVBVAMousePointerShape(pDrv, true /*fVisible*/, true /*fAlpha*/, xHot, yHot, cx, cy, pbShape);
     RTMemFree(pbShape);
 }
@@ -3390,7 +3434,7 @@ static DECLCALLBACK(void) vgpuR3Info(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, con
         else
             pHlp->pfnPrintf(pHlp, "  #%RU32: blob %#RX64 of context %RU32, %#RX64 bytes, flags %#RX32%s\n",
                             pRes->idResource, pRes->idBlob, pRes->idCtxCreator, pRes->cbBlob, pRes->fBlobFlags,
-                            pRes->fMapLeaked ? ", mapping leaked" : "");
+                            pRes->fMapLeaked ? ", mapping leaked" : pRes->fOrphan ? ", orphan (context destroyed)" : "");
     }
 
     if (pThisCC->pRenderer)
