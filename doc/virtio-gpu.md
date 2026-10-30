@@ -129,6 +129,35 @@ device counters stay balanced (every deferred fence is signalled).
   the dmabufs: `importing the supplied dmabufs failed`), so `vkmark` fails; `vkcube` works. The device is idle in
   that case, so it is a guest compositor / buffer sharing interaction and not a device error.
 
+## Model load speed, LLM results and guest Mesa limits (2026-10-30)
+
+- **Slow model load, found and fixed.** Loading a 2 GB model took about 2 minutes (guest user CPU 2m38s of 2m47s).
+  `perf` in the guest put 99.9% in `memmove` inside `ggml_vk_buffer_write`, and a `memcpy` shim showed every copy
+  into llama.cpp's staging buffer running at a flat 10 MB/s. A small Vulkan test (`memcpy-bench.c` in the testkit)
+  reproduced it per memory type: a 16 MiB `memcpy` into host cached + coherent memory took 1.6 s on every pass,
+  into write-combined memory 33 ms on the first pass and under 1 ms after. Cause: the host visible window is a PCI
+  BAR above RAM, which the guest MTRRs mark uncached; a write-back page attribute on top of an uncached MTRR type is
+  uncached on x86, so every store was an uncached access (~800 ns). Write-combining is not overridden by the MTRR
+  type. The device now reports write-combining for blobs the renderer calls cached (commit 6dbd353cc32).
+  After the change, same VM, same model: Qwen2.5-3B Q4_K_M `llama-bench` total time 2m47s -> 7.5 s; pp512 4252 t/s
+  (was 3970), tg128 71.5 t/s (was 48.8).
+- **7B model.** Qwen2.5-7B-Instruct Q4_K_M (4.36 GiB, 7.62 B params, 2 split files) on the host RTX 5070 from a
+  12 GB guest: pp512 3696 t/s, tg128 59.8 t/s, whole run 6.4 s including the load.
+- **Errors seen in a full run:** renderer log empty of errors, no virtio-gpu errors in the host log, fences 2878 of
+  2878 signaled, no guest kernel warnings from virtio_gpu except `response 0x1204 (command 0x203)`: a context
+  detach for a context or resource that is already gone (17 in that run). The device now answers a detach with OK
+  like other hypervisors (commit a8e1927d0e7). The `vmwgfx ... Failed to open channel` lines in second-GPU mode come
+  from the VMSVGA guest driver talking to VMware's backdoor RPC and are unrelated.
+- **Windowed Vulkan to a software compositor.** The guest kwin of the live image uses llvmpipe and cannot import the
+  dmabufs a Venus swapchain exports, so windowed vkmark hung. `MESA_VK_WSI_DEBUG=sw` makes Mesa's common WSI
+  present through shared memory instead: vkmark then runs windowed on the RTX (score 277, vertex 276 FPS, texture
+  278 FPS) and vkcube renders 300 frames in 5 s. A guest with hardware GL for its compositor does not need this.
+- **Zink on the Venus device (still not possible).** Zink matches the Vulkan device to the DRM render node EGL
+  opened through `VK_EXT_physical_device_drm`. With guest Mesa 26.0.3 and 26.2.5 the Venus device does not list that
+  extension or `VK_EXT_pci_bus_info`, and its DRM properties read `hasRender=1` with render node 0:0, so Zink
+  reports "failed to choose pdev" and falls back to llvmpipe. This is in the guest Mesa Venus driver, not in the
+  device. `LIBGL_ALWAYS_SOFTWARE=1` makes Zink pick the CPU device instead.
+
 ## Independent review (2026-10-29)
 
 Four read-only reviews of the code (memory window, device, renderer wrapper, Main/VirtioCore/firmware config) were
