@@ -1991,11 +1991,16 @@ static uint32_t vgpuR3CmdCtxDestroy(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTI
 static uint32_t vgpuR3CmdCtxResource(PVIRTIOGPUCC pThisCC, PCVIRTIOGPUCTXRESOURCE pReq, bool fAttach)
 {
     AssertReturn(pThisCC->pRenderer, VIRTIOGPU_RESP_ERR_UNSPEC);
+
+    /* Detaching has no error path in the virtio-gpu devices of other hypervisors.  Linux detaches the buffer
+       objects of a file when it closes, which can be after the context was destroyed (or for a context this
+       device never created, such as a 3D context of a library it does not offer), and the guest then logs
+       "response 0x1204 (command 0x203)".  There is nothing left to detach in those cases. */
     if (vgpuR3ContextLookup(pThisCC, pReq->Hdr.uCtxId) == UINT32_MAX)
-        return VIRTIOGPU_RESP_ERR_INVALID_CONTEXT_ID;
+        return fAttach ? VIRTIOGPU_RESP_ERR_INVALID_CONTEXT_ID : VIRTIOGPU_RESP_OK_NODATA;
     PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
     if (!pRes)
-        return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
+        return fAttach ? VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID : VIRTIOGPU_RESP_OK_NODATA;
     if (pRes->fBlob)
     {
         /* Both ids were checked to be at most INT32_MAX when created. */
