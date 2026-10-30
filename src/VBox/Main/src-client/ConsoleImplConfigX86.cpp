@@ -1598,6 +1598,13 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 hrc = pGraphicsAdapter->COMGETTER(HostVisibleSize)(&cHostVisibleMB);                H();
                 InsertConfigInteger(pCfg,  "HostVisibleSize",      (uint64_t)cHostVisibleMB * _1M);
 
+                /* 3D acceleration is Vulkan through Venus.  The device loads the renderer library next to the
+                   binaries and stays 2D, logging why, if it cannot be used.  The VBoxInternal extra data of the
+                   instance still overrides all of this. */
+                BOOL f3DEnabled = FALSE;
+                hrc = pGraphicsAdapter->IsFeatureEnabled(GraphicsFeature_Acceleration3D, &f3DEnabled); H();
+                InsertConfigInteger(pCfg,  "Venus",               f3DEnabled ? 1 : 0);
+
                 /* Attach the display. */
                 InsertConfigNode(pInst,    "LUN#0", &pLunL0);
                 InsertConfigString(pLunL0, "Driver",               "MainDisplay");

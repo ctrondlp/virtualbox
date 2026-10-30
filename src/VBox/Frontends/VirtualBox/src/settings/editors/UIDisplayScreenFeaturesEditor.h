@@ -56,6 +56,8 @@ public:
 
     /** Defines whether 'enable 3D acceleration' feature in @a fOn. */
     void setEnable3DAcceleration(bool fOn);
+    /** Defines whether the graphics controller is the virtio-gpu, which changes the tool-tip. */
+    void setVirtioGpuMode(bool fOn);
     /** Returns 'enable 3D acceleration' feature value. */
     bool isEnabled3DAcceleration() const;
 
@@ -78,6 +80,8 @@ private:
      * @{ */
         /** Holds the 'enable 3D acceleration' feature value. */
         bool  m_fEnable3DAcceleration;
+        /** Holds whether the graphics controller is the virtio-gpu. */
+        bool  m_fVirtioGpuMode;
     /** @} */
 
     /** @name Widgets
