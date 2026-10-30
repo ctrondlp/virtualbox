@@ -1232,6 +1232,7 @@ HRESULT showVMInfo(ComPtr<IVirtualBox> pVirtualBox,
     ComPtr<IGraphicsAdapter> pGraphicsAdapter;
     machine->COMGETTER(GraphicsAdapter)(pGraphicsAdapter.asOutParam());
     SHOW_ULONG_PROP(pGraphicsAdapter, VRAMSize,                 "vram",                 Info::tr("VRAM size:"),       "MB");
+    SHOW_ULONG_PROP(pGraphicsAdapter, HostVisibleSize,          "hostvisiblesize",      Info::tr("Host visible size:"), "MB");
     SHOW_ULONG_PROP(       machine, CPUExecutionCap,            "cpuexecutioncap",      Info::tr("CPU exec cap:"),    "%");
     SHOW_STRING_PROP_MAJ(  machine, CPUProfile,                 "cpu-profile",          Info::tr("CPUProfile:"),      "host", 6);
 
@@ -1529,6 +1530,12 @@ HRESULT showVMInfo(ComPtr<IVirtualBox> pVirtualBox,
                     pszCtrl = "qemuramfb";
                 else
                     pszCtrl = "QemuRamFB";
+                break;
+            case GraphicsControllerType_VirtioGpu:
+                if (details == VMINFO_MACHINEREADABLE)
+                    pszCtrl = "virtiogpu";
+                else
+                    pszCtrl = "VirtioGpu";
                 break;
 
             default:

@@ -607,6 +607,30 @@ VMMR3_INT_DECL(bool) NEMR3IsMmio2DirtyPageTrackingSupported(PVM pVM)
 }
 
 
+VMMR3_INT_DECL(bool) NEMR3IsHostRangeMappingSupported(PVM pVM)
+{
+    RT_NOREF(pVM);
+    return false;
+}
+
+
+VMMR3_INT_DECL(int) NEMR3NotifyPhysHostRangeMap(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, void *pvHost, uint32_t fProt,
+                                                uint8_t *pu2State)
+{
+    RT_NOREF(pVM, GCPhys, cb, pvHost, fProt);
+    *pu2State = UINT8_MAX;
+    return VERR_NOT_SUPPORTED;
+}
+
+
+VMMR3_INT_DECL(int) NEMR3NotifyPhysHostRangeUnmap(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, uint8_t *pu2State)
+{
+    RT_NOREF(pVM, GCPhys, cb);
+    *pu2State = UINT8_MAX;
+    return VERR_NOT_SUPPORTED;
+}
+
+
 VMMR3_INT_DECL(int)  NEMR3PhysMmio2QueryAndResetDirtyBitmap(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, uint32_t uNemRange,
                                                             void *pvBitmap, size_t cbBitmap)
 {

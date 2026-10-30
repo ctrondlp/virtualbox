@@ -199,6 +199,7 @@ HRESULT GraphicsAdapter::setGraphicsControllerType(GraphicsControllerType_T aGra
         case GraphicsControllerType_VBoxSVGA:
 #endif
         case GraphicsControllerType_QemuRamFB:
+        case GraphicsControllerType_VirtioGpu:
             break;
         default:
             return setError(E_INVALIDARG, tr("The graphics controller type (%d) is invalid"), aGraphicsControllerType);
@@ -256,6 +257,38 @@ HRESULT GraphicsAdapter::setVRAMSize(ULONG aVRAMSize)
     mParent->i_setModified(Machine::IsModified_GraphicsAdapter);
     mData.backup();
     mData->ulVRAMSizeMB = aVRAMSize;
+
+    return S_OK;
+}
+
+HRESULT GraphicsAdapter::getHostVisibleSize(ULONG *aHostVisibleSize)
+{
+    AutoReadLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    *aHostVisibleSize = mData->ulHostVisibleSizeMB;
+
+    return S_OK;
+}
+
+HRESULT GraphicsAdapter::setHostVisibleSize(ULONG aHostVisibleSize)
+{
+    /* the machine needs to be mutable */
+    AutoMutableStateDependency adep(mParent);
+    if (FAILED(adep.hrc())) return adep.hrc();
+
+    /* The device maps the window as one 64-bit BAR, which has to be a power of two. */
+    if (   aHostVisibleSize < 64
+        || aHostVisibleSize > 16384
+        || !RT_IS_POWER_OF_TWO(aHostVisibleSize))
+        return setError(E_INVALIDARG,
+                        tr("Invalid host visible size: %lu MB (must be a power of two from 64 to 16384 MB)"),
+                        aHostVisibleSize);
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    mParent->i_setModified(Machine::IsModified_GraphicsAdapter);
+    mData.backup();
+    mData->ulHostVisibleSizeMB = aHostVisibleSize;
 
     return S_OK;
 }

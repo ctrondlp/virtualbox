@@ -3199,6 +3199,87 @@ static void pgmR3PhysMmio2Link(PVM pVM, PPGMREGMMIO2RANGE pNew)
 
 
 /**
+ * Checks whether MMIO2 host windows (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW) can be
+ * used with the current execution mode.
+ *
+ * Host windows need the simplified (NEM) memory mode, a NEM backend that can map
+ * host ranges, and no ring-0 PGM (the window only exists in ring-3).
+ *
+ * @returns true if supported, false if not.
+ * @param   pVM     The cross context VM structure.
+ */
+static bool pgmR3PhysMmio2IsHostWindowSupported(PVM pVM)
+{
+#if defined(VBOX_WITH_NATIVE_NEM) && defined(VBOX_WITH_PGM_NEM_MODE)
+    if (!PGM_IS_IN_NEM_MODE(pVM) || !VM_IS_NEM_ENABLED(pVM))
+        return false;
+# if defined(VBOX_WITH_R0_MODULES) && !defined(VBOX_WITH_MINIMAL_R0)
+    if (!SUPR3IsDriverless())
+        return false;
+# endif
+    if (GUEST_PAGE_SIZE != HOST_PAGE_SIZE_DYNAMIC)
+        return false;
+    return NEMR3IsHostRangeMappingSupported(pVM);
+#else
+    RT_NOREF(pVM);
+    return false;
+#endif
+}
+
+
+/**
+ * Worker for PGMR3PhysMmio2Register that creates an MMIO2 host window.
+ *
+ * Sets up the MMIO2 registration and RAM range without any backing, plus the
+ * host window tracking structure and its sink page.
+ *
+ * @returns VBox status code.
+ * @param   pVM             The cross context VM structure.
+ * @param   cGuestPages     Number of pages in the window.
+ * @param   idMmio2         The MMIO2 ID to use.
+ * @param   cChunks         Number of chunks, must be 1.
+ * @param   pDevIns         The owner.
+ * @param   iSubDev         The sub-device number.
+ * @param   iRegion         The region number.
+ * @param   fFlags          PGMPHYS_MMIO2_FLAGS_XXX.
+ */
+static int pgmR3PhysMmio2RegisterHostWindow(PVM pVM, uint32_t cGuestPages, uint8_t idMmio2, uint32_t cChunks, PPDMDEVINS pDevIns,
+                                            uint32_t iSubDev, uint32_t iRegion, uint32_t fFlags)
+{
+    PGM_LOCK_ASSERT_OWNER(pVM);
+    AssertReturn(cChunks == 1, VERR_PGM_PHYS_MMIO_EX_IPE);
+    AssertReturn(fFlags & PGMPHYS_MMIO2_FLAGS_HOST_WINDOW, VERR_PGM_PHYS_MMIO_EX_IPE);
+
+    size_t const        cbHostWindow = RT_UOFFSETOF_DYN(PGMMMIO2HOSTWINDOW, auPages[cGuestPages]);
+    PPGMMMIO2HOSTWINDOW pHostWindow  = (PPGMMMIO2HOSTWINDOW)MMR3HeapAllocZ(pVM, MM_TAG_PGM_PHYS, cbHostWindow);
+    AssertLogRelMsgReturn(pHostWindow, ("cbHostWindow=%#zx\n", cbHostWindow), VERR_NO_MEMORY);
+    pHostWindow->cPages       = cGuestPages;
+    pHostWindow->cBackedPages = 0;
+
+    int rc = SUPR3PageAlloc(1, 0 /*fFlags*/, (void **)&pHostWindow->pbSink);
+    if (RT_SUCCESS(rc))
+    {
+        RT_BZERO(pHostWindow->pbSink, GUEST_PAGE_SIZE);
+
+        /* Use the existing backing worker with a NULL backing; pbR3 stays NULL. */
+        rc = pgmPhysMmio2RegisterWorkerExisting(pVM, cGuestPages, idMmio2, (uint8_t)cChunks, pDevIns, (uint8_t)iSubDev,
+                                                (uint8_t)iRegion, fFlags, NIL_RTR3PTR);
+        if (RT_SUCCESS(rc))
+        {
+            PPGMREGMMIO2RANGE const pMmio2 = &pVM->pgm.s.aMmio2Ranges[idMmio2 - 1];
+            Assert(pMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW);
+            Assert(!pMmio2->pbR3);
+            pMmio2->pHostWindowR3 = pHostWindow;
+            return VINF_SUCCESS;
+        }
+        SUPR3PageFree(pHostWindow->pbSink, 1);
+    }
+    MMR3HeapFree(pHostWindow);
+    return rc;
+}
+
+
+/**
  * Allocate and register an MMIO2 region.
  *
  * As mentioned elsewhere, MMIO2 is just RAM spelled differently.  It's RAM
@@ -3272,6 +3353,19 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
     AssertLogRelReturn(cGuestPages <= PGM_MAX_PAGES_PER_MMIO2_REGION, VERR_OUT_OF_RANGE);
     AssertLogRelReturn(cGuestPages <= (MM_MMIO_64_MAX >> GUEST_PAGE_SHIFT), VERR_OUT_OF_RANGE);
 
+    if (fFlags & PGMPHYS_MMIO2_FLAGS_HOST_WINDOW)
+    {
+        AssertReturn(!(fFlags & (PGMPHYS_MMIO2_FLAGS_TRACK_DIRTY_PAGES | PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING)),
+                     VERR_INVALID_FLAGS);
+        AssertLogRelMsgReturn(pgmPhysMmio2CalcChunkCount(cb, NULL) == 1, ("%s: cb=%RGp needs more than one chunk\n", pszDesc, cb),
+                              VERR_OUT_OF_RANGE);
+        if (!pgmR3PhysMmio2IsHostWindowSupported(pVM))
+        {
+            LogRel(("PGMR3PhysMmio2Register: %s: Host windows are not supported in this execution mode\n", pszDesc));
+            return VERR_NOT_SUPPORTED;
+        }
+    }
+
     AssertReturn(pgmR3PhysMmio2Find(pVM, pDevIns, iSubDev, iRegion) == NULL, VERR_ALREADY_EXISTS);
 
     /*
@@ -3303,9 +3397,10 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
 
     /*
      * Try reserve and allocate the backing memory first as this is what is
-     * most likely to fail.
+     * most likely to fail.  Host windows have no backing to reserve.
      */
-    rc = MMR3AdjustFixedReservation(pVM, cGuestPages, pszDesc);
+    int32_t const cReservePages = fFlags & PGMPHYS_MMIO2_FLAGS_HOST_WINDOW ? 0 : (int32_t)cGuestPages;
+    rc = MMR3AdjustFixedReservation(pVM, cReservePages, pszDesc);
     if (RT_SUCCESS(rc))
     {
         /*
@@ -3335,7 +3430,9 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
         }
         else
 #endif
-        if (!(fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
+        if (fFlags & PGMPHYS_MMIO2_FLAGS_HOST_WINDOW)
+            rc = pgmR3PhysMmio2RegisterHostWindow(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags);
+        else if (!(fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
             rc = pgmPhysMmio2RegisterWorkerAlloc(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags);
         else
             rc = pgmPhysMmio2RegisterWorkerExisting(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags, (uint8_t *)*ppv);
@@ -3378,14 +3475,17 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
              */
             if (phRegion)
                 *phRegion = idMmio2;
-            *ppv = pVM->pgm.s.aMmio2Ranges[idMmio2 - 1].pbR3;
+            *ppv = pVM->pgm.s.aMmio2Ranges[idMmio2 - 1].pbR3; /* NULL for host windows. */
+            if (fFlags & PGMPHYS_MMIO2_FLAGS_HOST_WINDOW)
+                LogRel(("PGM: Registered MMIO2 host window '%s' (%RGp bytes)\n", pszDesc, cb));
 
             PGM_UNLOCK(pVM);
             return VINF_SUCCESS;
         }
 
-        MMR3AdjustFixedReservation(pVM, -(int32_t)cGuestPages, pszDesc);
+        MMR3AdjustFixedReservation(pVM, -cReservePages, pszDesc);
     }
+    PGM_UNLOCK(pVM);
     if (pDevIns->iInstance > 0)
         MMR3HeapFree((void *)pszDesc);
     return rc;
@@ -3513,7 +3613,7 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Deregister(PVM pVM, PPDMDEVINS pDevIns, PGMMMI
 #endif
             {
                 Assert(PGM_IS_IN_NEM_MODE(pVM));
-                rc2 = pgmPhysMmio2DeregisterWorker(pVM, idx, cChunks, pDevIns);
+                rc2 = pgmPhysMmio2DeregisterWorker(pVM, (uint8_t)(idx + 1) /*idMmio2*/, cChunks, pDevIns);
                 AssertLogRelMsgStmt(RT_SUCCESS(rc2),
                                     ("pgmPhysMmio2DeregisterWorker: rc=%Rrc idx=%#x cChunks=%#x %s\n",
                                      rc2, idx, cChunks, pszDesc),
@@ -3547,6 +3647,85 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Deregister(PVM pVM, PPDMDEVINS pDevIns, PGMMMI
 }
 
 
+#ifdef VBOX_WITH_NATIVE_NEM
+
+/**
+ * Maps a run of host backed pages of a mapped MMIO2 host window into NEM.
+ *
+ * @returns VBox status code.  On failure the pages are left unmapped in NEM and
+ *          will be mapped lazily one by one on access.
+ * @param   pVM         The cross context VM structure.
+ * @param   pMmio2      The host window MMIO2 range (mapped, single chunk).
+ * @param   pRamRange   The RAM range of @a pMmio2.
+ * @param   iPage       The first page of the run.
+ * @param   cPages      Number of pages in the run.
+ * @param   uEntry      The PGMMMIO2HOSTWINDOW::auPages entry of the first page.
+ *                      The run is host contiguous and shares its flags.
+ */
+static int pgmR3PhysMmio2HostWindowNemMapRun(PVM pVM, PPGMREGMMIO2RANGE pMmio2, PPGMRAMRANGE pRamRange,
+                                             uint32_t iPage, uint32_t cPages, RTR3UINTPTR uEntry)
+{
+    PGM_LOCK_ASSERT_OWNER(pVM);
+    Assert(pMmio2->fFlags & PGMREGMMIO2RANGE_F_MAPPED);
+    Assert(pMmio2->GCPhys == pRamRange->GCPhys);
+
+    uint32_t const fProt   = NEM_PAGE_PROT_READ | NEM_PAGE_PROT_WRITE
+                           | (uEntry & PGMMMIO2HOSTWINDOW_PAGE_F_NO_EXEC ? 0 : NEM_PAGE_PROT_EXECUTE);
+    uint8_t        u2State = UINT8_MAX;
+    int rc = NEMR3NotifyPhysHostRangeMap(pVM, pMmio2->GCPhys + ((RTGCPHYS)iPage << GUEST_PAGE_SHIFT),
+                                         (RTGCPHYS)cPages << GUEST_PAGE_SHIFT,
+                                         (void *)(uintptr_t)(uEntry & ~(RTR3UINTPTR)GUEST_PAGE_OFFSET_MASK), fProt, &u2State);
+    if (u2State != UINT8_MAX)
+        pgmPhysSetNemStateForPages(&pRamRange->aPages[iPage], cPages, u2State);
+    return rc;
+}
+
+
+/**
+ * Maps all host backed parts of an MMIO2 host window into NEM after the window
+ * itself got mapped into the guest physical address space.
+ *
+ * Failures are logged and leave the pages to be mapped lazily on access.
+ *
+ * @param   pVM         The cross context VM structure.
+ * @param   pMmio2      The host window MMIO2 range (mapped, single chunk).
+ * @param   pRamRange   The RAM range of @a pMmio2.
+ */
+static void pgmR3PhysMmio2HostWindowMapAll(PVM pVM, PPGMREGMMIO2RANGE pMmio2, PPGMRAMRANGE pRamRange)
+{
+    PGM_LOCK_ASSERT_OWNER(pVM);
+    PPGMMMIO2HOSTWINDOW const pHostWindow = pMmio2->pHostWindowR3;
+    AssertPtrReturnVoid(pHostWindow);
+    if (!pHostWindow->cBackedPages)
+        return;
+
+    uint32_t const cPages = RT_MIN(pHostWindow->cPages, (uint32_t)(pRamRange->cb >> GUEST_PAGE_SHIFT));
+    uint32_t       iPage  = 0;
+    while (iPage < cPages)
+    {
+        RTR3UINTPTR const uFirst = pHostWindow->auPages[iPage];
+        if (!uFirst)
+        {
+            iPage++;
+            continue;
+        }
+
+        /* The run continues while the host memory is contiguous and the flags are the same. */
+        uint32_t cRun = 1;
+        while (   iPage + cRun < cPages
+               && pHostWindow->auPages[iPage + cRun] == uFirst + ((RTR3UINTPTR)cRun << GUEST_PAGE_SHIFT))
+            cRun++;
+
+        int rc = pgmR3PhysMmio2HostWindowNemMapRun(pVM, pMmio2, pRamRange, iPage, cRun, uFirst);
+        if (RT_FAILURE(rc))
+            LogRel(("PGM: Failed to map host window run %#x LB %#x of '%s' at %RGp: %Rrc (pages will be mapped on access)\n",
+                    iPage, cRun, pRamRange->pszDesc, pMmio2->GCPhys, rc));
+        iPage += cRun;
+    }
+}
+
+#endif /* VBOX_WITH_NATIVE_NEM */
+
 /**
  * Worker form PGMR3PhysMmio2Map.
  */
@@ -3572,7 +3751,9 @@ static int pgmR3PhysMmio2MapLocked(PVM pVM, uint32_t const idxFirst, uint32_t co
 #ifdef VBOX_WITH_NATIVE_NEM
     uint32_t const     fNemFlags = NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2
                                  | (pVM->pgm.s.aMmio2Ranges[idxFirst].fFlags & PGMREGMMIO2RANGE_F_TRACK_DIRTY_PAGES
-                                    ? NEM_NOTIFY_PHYS_MMIO_EX_F_TRACK_DIRTY_PAGES : 0);
+                                    ? NEM_NOTIFY_PHYS_MMIO_EX_F_TRACK_DIRTY_PAGES : 0)
+                                 | (pVM->pgm.s.aMmio2Ranges[idxFirst].fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW
+                                    ? NEM_NOTIFY_PHYS_MMIO_EX_F_HOST_WINDOW : 0);
 #endif
 
     /*
@@ -3771,6 +3952,19 @@ static int pgmR3PhysMmio2MapLocked(PVM pVM, uint32_t const idxFirst, uint32_t co
         }
     }
 
+#ifdef VBOX_WITH_NATIVE_NEM
+    /*
+     * Host window: map the parts currently backed by host memory right away.
+     * Everything else is mapped lazily (to the sink page) on first access.
+     */
+    if (   (pVM->pgm.s.aMmio2Ranges[idxFirst].fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+        && VM_IS_NEM_ENABLED(pVM))
+    {
+        Assert(!pOverlappingRange && cChunks == 1);
+        pgmR3PhysMmio2HostWindowMapAll(pVM, &pVM->pgm.s.aMmio2Ranges[idxFirst], pVM->pgm.s.apMmio2RamRanges[idxFirst]);
+    }
+#endif
+
     /*
      * If the range have dirty page monitoring enabled, enable that.
      *
@@ -3939,7 +4133,9 @@ static int pgmR3PhysMmio2UnmapLocked(PVM pVM, uint32_t const idxFirst, uint32_t 
 #ifdef VBOX_WITH_NATIVE_NEM
     uint32_t const fNemFlags = NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2
                              | (fOldFlags & PGMREGMMIO2RANGE_F_TRACK_DIRTY_PAGES
-                                ? NEM_NOTIFY_PHYS_MMIO_EX_F_TRACK_DIRTY_PAGES : 0);
+                                ? NEM_NOTIFY_PHYS_MMIO_EX_F_TRACK_DIRTY_PAGES : 0)
+                             | (fOldFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW
+                                ? NEM_NOTIFY_PHYS_MMIO_EX_F_HOST_WINDOW : 0); /* (host pages stay recorded for remapping) */
 #endif
     if (fOldFlags & PGMREGMMIO2RANGE_F_OVERLAPPING)
     {
@@ -4116,8 +4312,13 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Reduce(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HA
     {
         PPGMREGMMIO2RANGE const pFirstMmio2    = &pVM->pgm.s.aMmio2Ranges[idxFirst];
         PPGMRAMRANGE const      pFirstRamRange = pVM->pgm.s.apMmio2RamRanges[idxFirst];
-        if (   !(pFirstMmio2->fFlags & PGMREGMMIO2RANGE_F_MAPPED)
-            && pFirstMmio2->GCPhys == NIL_RTGCPHYS)
+        if (pFirstMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+        {
+            AssertLogRelMsgFailed(("MMIO2/%s: cannot reduce a host window\n", pFirstRamRange->pszDesc));
+            rc = VERR_NOT_SUPPORTED;
+        }
+        else if (   !(pFirstMmio2->fFlags & PGMREGMMIO2RANGE_F_MAPPED)
+                 && pFirstMmio2->GCPhys == NIL_RTGCPHYS)
         {
             /*
              * NOTE! Current implementation does not support multiple ranges.
@@ -4561,6 +4762,387 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2ChangeRegionNo(PVM pVM, PPDMDEVINS pDevIns, PG
 
     PGM_UNLOCK(pVM);
     return rc;
+}
+
+
+/**
+ * Resolves and validates a host window handle and page range.
+ *
+ * @returns VBox status code.
+ * @param   pVM             The cross context VM structure.
+ * @param   pDevIns         The device owning the window.
+ * @param   hMmio2          The window handle.
+ * @param   offRegion       Offset into the window (page aligned).
+ * @param   cb              Size of the range (page aligned, non-zero).
+ * @param   ppMmio2         Where to return the MMIO2 range.
+ * @param   ppRamRange      Where to return the RAM range.
+ * @param   piFirstPage     Where to return the index of the first page.
+ * @param   pcPages         Where to return the number of pages.
+ */
+static int pgmR3PhysMmio2HostWindowResolveLocked(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion,
+                                                 RTGCPHYS cb, PPGMREGMMIO2RANGE *ppMmio2, PPGMRAMRANGE *ppRamRange,
+                                                 uint32_t *piFirstPage, uint32_t *pcPages)
+{
+    PGM_LOCK_ASSERT_OWNER(pVM);
+
+    uint32_t      cChunks  = 0;
+    int32_t const idxFirst = pgmR3PhysMmio2ResolveHandle(pVM, pDevIns, hMmio2, &cChunks);
+    if (idxFirst < 0)
+        return idxFirst;
+
+    PPGMREGMMIO2RANGE const   pMmio2      = &pVM->pgm.s.aMmio2Ranges[idxFirst];
+    PPGMRAMRANGE const        pRamRange   = pVM->pgm.s.apMmio2RamRanges[idxFirst];
+    PPGMMMIO2HOSTWINDOW const pHostWindow = pMmio2->pHostWindowR3;
+    AssertLogRelMsgReturn(   (pMmio2->fFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW)
+                          && pHostWindow
+                          && pRamRange
+                          && cChunks == 1,
+                          ("hMmio2=%#RX64 is not a host window (fFlags=%#x cChunks=%u)\n", hMmio2, pMmio2->fFlags, cChunks),
+                          VERR_WRONG_TYPE);
+
+    RTGCPHYS const cbWindow = RT_MIN(pRamRange->cb, (RTGCPHYS)pHostWindow->cPages << GUEST_PAGE_SHIFT);
+    AssertLogRelMsgReturn(offRegion < cbWindow && cb <= cbWindow - offRegion,
+                          ("%s: offRegion=%RGp cb=%RGp cbWindow=%RGp\n", pRamRange->pszDesc, offRegion, cb, cbWindow),
+                          VERR_OUT_OF_RANGE);
+
+    *ppMmio2     = pMmio2;
+    *ppRamRange  = pRamRange;
+    *piFirstPage = (uint32_t)(offRegion >> GUEST_PAGE_SHIFT);
+    *pcPages     = (uint32_t)(cb >> GUEST_PAGE_SHIFT);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Backs part of an MMIO2 host window with caller provided host memory.
+ *
+ * The memory becomes visible to the guest at the window offset immediately if
+ * the window is mapped (and whenever the guest maps it later), until
+ * PGMR3PhysMmio2UnmapHostRange is called.  The caller must keep the memory
+ * valid and must not free or unmap it before PGMR3PhysMmio2UnmapHostRange has
+ * succeeded for the whole range.  The memory must not contain anything the
+ * guest is not supposed to see (the complete pages are exposed).
+ *
+ * @returns VBox status code.
+ * @retval  VERR_RESOURCE_BUSY if part of the range is already backed.
+ * @retval  VERR_NOT_SUPPORTED for PGMPHYS_MMIO2_HOST_RANGE_F_READ_ONLY.
+ * @retval  VERR_WRONG_TYPE if @a hMmio2 isn't a host window.
+ * @retval  VERR_NEM_MAP_PAGES_FAILED (or similar) if the hypervisor refused the
+ *          memory; nothing is mapped then.
+ *
+ * @param   pVM         The cross context VM structure.
+ * @param   pDevIns     The device owning the window.
+ * @param   hMmio2      The host window handle (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW).
+ * @param   offRegion   Page aligned offset into the window.
+ * @param   pvHost      Page aligned ring-3 address of the memory.
+ * @param   cb          Page aligned size of the range.
+ * @param   fFlags      PGMPHYS_MMIO2_HOST_RANGE_F_XXX.
+ *
+ * @thread  Any.  Must not be called while owning locks an EMT may wait on.
+ */
+VMMR3_INT_DECL(int) PGMR3PhysMmio2MapHostRange(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion,
+                                               void *pvHost, RTGCPHYS cb, uint32_t fFlags)
+{
+    /*
+     * Validate input.
+     */
+    AssertPtrReturn(pDevIns, VERR_INVALID_POINTER);
+    AssertReturn(hMmio2 != NIL_PGMMMIO2HANDLE, VERR_INVALID_HANDLE);
+    AssertReturn(!(fFlags & ~PGMPHYS_MMIO2_HOST_RANGE_F_VALID_MASK), VERR_INVALID_FLAGS);
+    AssertReturn(!(fFlags & PGMPHYS_MMIO2_HOST_RANGE_F_READ_ONLY), VERR_NOT_SUPPORTED);
+    AssertPtrReturn(pvHost, VERR_INVALID_POINTER);
+    AssertReturn(!((uintptr_t)pvHost & GUEST_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(!(offRegion & GUEST_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(cb > 0 && !(cb & GUEST_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn((uintptr_t)pvHost + (cb - 1) > (uintptr_t)pvHost, VERR_INVALID_PARAMETER);
+    AssertReturn(PGM_IS_IN_NEM_MODE(pVM), VERR_NOT_SUPPORTED);
+
+    /*
+     * Take the PGM lock and check the window and range.
+     */
+    int rc = PGM_LOCK(pVM);
+    AssertRCReturn(rc, rc);
+
+    PPGMREGMMIO2RANGE pMmio2     = NULL;
+    PPGMRAMRANGE      pRamRange  = NULL;
+    uint32_t          iFirstPage = 0;
+    uint32_t          cPages     = 0;
+    rc = pgmR3PhysMmio2HostWindowResolveLocked(pVM, pDevIns, hMmio2, offRegion, cb, &pMmio2, &pRamRange, &iFirstPage, &cPages);
+    if (RT_SUCCESS(rc))
+    {
+        PPGMMMIO2HOSTWINDOW const pHostWindow = pMmio2->pHostWindowR3;
+        for (uint32_t i = 0; i < cPages; i++)
+            if (pHostWindow->auPages[iFirstPage + i])
+            {
+                LogRel(("PGMR3PhysMmio2MapHostRange: %s: page %#x is already backed\n", pRamRange->pszDesc, iFirstPage + i));
+                rc = VERR_RESOURCE_BUSY;
+                break;
+            }
+        if (RT_SUCCESS(rc))
+        {
+            RTR3UINTPTR const uFirstEntry = (RTR3UINTPTR)(uintptr_t)pvHost
+                                          | (fFlags & PGMPHYS_MMIO2_HOST_RANGE_F_NO_EXEC ? PGMMMIO2HOSTWINDOW_PAGE_F_NO_EXEC : 0);
+#ifdef VBOX_WITH_NATIVE_NEM
+            /*
+             * If the window is mapped, replace whatever the hypervisor has there
+             * (lazily mapped sink pages) with the host memory first.  If that fails
+             * nothing is recorded, so emulation never sees memory the caller may
+             * free right after we return.  Racing vCPUs get memory access exits
+             * and block on the PGM lock until we're done.
+             */
+            if (   (pMmio2->fFlags & PGMREGMMIO2RANGE_F_MAPPED)
+                && VM_IS_NEM_ENABLED(pVM))
+            {
+                rc = pgmR3PhysMmio2HostWindowNemMapRun(pVM, pMmio2, pRamRange, iFirstPage, cPages, uFirstEntry);
+                if (RT_FAILURE(rc))
+                    LogRel(("PGMR3PhysMmio2MapHostRange: %s: mapping %p LB %RGp at %RGp failed: %Rrc\n",
+                            pRamRange->pszDesc, pvHost, cb, pMmio2->GCPhys + offRegion, rc));
+            }
+#endif
+            if (RT_SUCCESS(rc))
+            {
+                /*
+                 * Record the backing and flush the PGM and IEM TLBs so emulation and
+                 * device access see the host memory instead of the sink page.
+                 */
+                for (uint32_t i = 0; i < cPages; i++)
+                    pHostWindow->auPages[iFirstPage + i] = uFirstEntry + ((RTR3UINTPTR)i << GUEST_PAGE_SHIFT);
+                pHostWindow->cBackedPages += cPages;
+                pgmPhysInvalidatePageMapTLB(pVM, false /*fInRendezvous*/);
+                Log(("PGMR3PhysMmio2MapHostRange: %s: %#RGp LB %#RGp -> %p fFlags=%#x\n",
+                     pRamRange->pszDesc, offRegion, cb, pvHost, fFlags));
+            }
+        }
+    }
+
+    PGM_UNLOCK(pVM);
+    return rc;
+}
+
+
+/** Argument package for pgmR3PhysMmio2UnmapHostRangeRendezvous. */
+typedef struct PGMR3MMIO2UNMAPHOSTRANGEARGS
+{
+    PPDMDEVINS      pDevIns;
+    PGMMMIO2HANDLE  hMmio2;
+    RTGCPHYS        offRegion;
+    RTGCPHYS        cb;
+} PGMR3MMIO2UNMAPHOSTRANGEARGS;
+
+
+/**
+ * Worker for PGMR3PhysMmio2UnmapHostRange, called owning the PGM lock with no
+ * EMT executing guest code.
+ */
+static int pgmR3PhysMmio2UnmapHostRangeLocked(PVM pVM, PGMR3MMIO2UNMAPHOSTRANGEARGS const *pArgs)
+{
+    PGM_LOCK_ASSERT_OWNER(pVM);
+
+    PPGMREGMMIO2RANGE pMmio2     = NULL;
+    PPGMRAMRANGE      pRamRange  = NULL;
+    uint32_t          iFirstPage = 0;
+    uint32_t          cPages     = 0;
+    int rc = pgmR3PhysMmio2HostWindowResolveLocked(pVM, pArgs->pDevIns, pArgs->hMmio2, pArgs->offRegion, pArgs->cb,
+                                                   &pMmio2, &pRamRange, &iFirstPage, &cPages);
+    if (RT_FAILURE(rc))
+        return rc;
+    PPGMMMIO2HOSTWINDOW const pHostWindow = pMmio2->pHostWindowR3;
+
+    /*
+     * The whole range must be backed, and no device may hold a page mapping lock
+     * on it (it could still be using the host address after we return).
+     */
+    for (uint32_t i = 0; i < cPages; i++)
+    {
+        uint32_t const iPage = iFirstPage + i;
+        if (!pHostWindow->auPages[iPage])
+        {
+            LogRel(("PGMR3PhysMmio2UnmapHostRange: %s: page %#x is not backed\n", pRamRange->pszDesc, iPage));
+            return VERR_NOT_FOUND;
+        }
+        PCPGMPAGE const pPage = &pRamRange->aPages[iPage];
+        if (PGM_PAGE_GET_WRITE_LOCKS(pPage) || PGM_PAGE_GET_READ_LOCKS(pPage))
+        {
+            LogRel(("PGMR3PhysMmio2UnmapHostRange: %s: page %#x is locked (%u write, %u read locks)\n",
+                    pRamRange->pszDesc, iPage, PGM_PAGE_GET_WRITE_LOCKS(pPage), PGM_PAGE_GET_READ_LOCKS(pPage)));
+            return VERR_RESOURCE_BUSY;
+        }
+    }
+
+#ifdef VBOX_WITH_NATIVE_NEM
+    /*
+     * Remove the hypervisor mapping first.  If that fails the guest may still
+     * reach the memory, so we keep it recorded and the caller must not free it.
+     */
+    if (   (pMmio2->fFlags & PGMREGMMIO2RANGE_F_MAPPED)
+        && VM_IS_NEM_ENABLED(pVM))
+    {
+        uint8_t u2State = UINT8_MAX;
+        rc = NEMR3NotifyPhysHostRangeUnmap(pVM, pMmio2->GCPhys + pArgs->offRegion, pArgs->cb, &u2State);
+        if (u2State != UINT8_MAX)
+            pgmPhysSetNemStateForPages(&pRamRange->aPages[iFirstPage], cPages, u2State);
+        if (RT_FAILURE(rc))
+        {
+            LogRel(("PGMR3PhysMmio2UnmapHostRange: %s: hypervisor unmap of %RGp LB %RGp failed: %Rrc\n",
+                    pRamRange->pszDesc, pMmio2->GCPhys + pArgs->offRegion, pArgs->cb, rc));
+            return rc;
+        }
+    }
+#endif
+
+    /*
+     * Forget the host memory and flush the TLBs.  The pages fall back on the sink
+     * page and get mapped lazily on the next access.
+     */
+    for (uint32_t i = 0; i < cPages; i++)
+        pHostWindow->auPages[iFirstPage + i] = 0;
+    Assert(pHostWindow->cBackedPages >= cPages);
+    pHostWindow->cBackedPages -= cPages;
+
+    /*
+     * Flush the dangling pointers to guest paging structures.  Each vCPU keeps
+     * host pointers to its top level page tables (CR3, the PAE PDPT and its page
+     * directories, EPT) between instructions, and the guest may have pointed
+     * them into this window.  They come from the deprecated page mapping API
+     * which isn't covered by the page lock check above, so forget them all, the
+     * same way chunk unmapping does.  We're in a rendezvous or the guest isn't
+     * running, so nobody is using them right now.
+     */
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+    {
+# ifdef VBOX_VMM_TARGET_X86
+        PPGMCPU pPGM = &pVM->apCpusR3[idCpu]->pgm.s;
+
+        pPGM->pGst32BitPdR3    = NULL;
+        pPGM->pGstPaePdptR3    = NULL;
+        pPGM->pGstAmd64Pml4R3  = NULL;
+        pPGM->pGstEptPml4R3    = NULL;
+        pPGM->pGst32BitPdR0    = NIL_RTR0PTR;
+        pPGM->pGstPaePdptR0    = NIL_RTR0PTR;
+        pPGM->pGstAmd64Pml4R0  = NIL_RTR0PTR;
+        pPGM->pGstEptPml4R0    = NIL_RTR0PTR;
+        for (unsigned i = 0; i < RT_ELEMENTS(pPGM->apGstPaePDsR3); i++)
+        {
+            pPGM->apGstPaePDsR3[i] = NULL;
+            pPGM->apGstPaePDsR0[i] = NIL_RTR0PTR;
+        }
+# endif
+
+        /* Flush the TLBs of the other execution engines. */
+        CPUMSetChangedFlags(pVM->apCpusR3[idCpu], CPUM_CHANGED_GLOBAL_TLB_FLUSH);
+    }
+    pgmPhysInvalidatePageMapTLB(pVM, false /*fInRendezvous*/);
+
+    Log(("PGMR3PhysMmio2UnmapHostRange: %s: %#RGp LB %#RGp\n", pRamRange->pszDesc, pArgs->offRegion, pArgs->cb));
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @callback_method_impl{FNVMMEMTRENDEZVOUS, Worker for PGMR3PhysMmio2UnmapHostRange.}
+ */
+static DECLCALLBACK(VBOXSTRICTRC) pgmR3PhysMmio2UnmapHostRangeRendezvous(PVM pVM, PVMCPU pVCpu, void *pvUser)
+{
+    RT_NOREF(pVCpu);
+    PGM_LOCK_VOID(pVM);
+    int const rc = pgmR3PhysMmio2UnmapHostRangeLocked(pVM, (PGMR3MMIO2UNMAPHOSTRANGEARGS const *)pvUser);
+    PGM_UNLOCK(pVM);
+    return rc;
+}
+
+
+/**
+ * Worker for PGMR3PhysMmio2UnmapHostRange running on an EMT.
+ *
+ * Unless guest code is executing (VM reset, power off, suspend, construction,
+ * destruction, state loading: the other EMTs are then idle or waiting in the
+ * rendezvous we're part of) the work is done in an EMT rendezvous, so that no
+ * EMT can be in the middle of an emulated access using the host address.
+ *
+ * @returns VBox status code.
+ * @param   pVM         The cross context VM structure.
+ * @param   pArgs       The arguments.
+ */
+static DECLCALLBACK(int) pgmR3PhysMmio2UnmapHostRangeOnEmt(PVM pVM, PGMR3MMIO2UNMAPHOSTRANGEARGS *pArgs)
+{
+    VMSTATE const enmState = VMR3GetState(pVM);
+    if (enmState != VMSTATE_RUNNING && enmState != VMSTATE_RUNNING_LS)
+    {
+        PGM_LOCK_VOID(pVM);
+        int const rc = pgmR3PhysMmio2UnmapHostRangeLocked(pVM, pArgs);
+        PGM_UNLOCK(pVM);
+        return rc;
+    }
+    return VMMR3EmtRendezvous(pVM, VMMEMTRENDEZVOUS_FLAGS_TYPE_ONCE, pgmR3PhysMmio2UnmapHostRangeRendezvous, pArgs);
+}
+
+
+/**
+ * Removes host memory backing previously established by
+ * PGMR3PhysMmio2MapHostRange from part of an MMIO2 host window.
+ *
+ * When this returns successfully the guest can no longer reach the memory, no
+ * EMT is using it, and the caller may free it.  The pages read as the sink page
+ * afterwards.  On failure the memory may still be in use and must be kept.
+ *
+ * Unless the caller is an EMT and no guest code is executing (VM reset, power
+ * off, suspend, construction, destruction, state loading), the work is done in
+ * an EMT rendezvous so that no EMT can be in the middle of an emulated access
+ * using the host address.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_FOUND if part of the range isn't backed.
+ * @retval  VERR_RESOURCE_BUSY if a device holds a page mapping lock on part of
+ *          the range (e.g. guest directed DMA in progress); retry later.
+ * @retval  VERR_WRONG_TYPE if @a hMmio2 isn't a host window.
+ *
+ * @param   pVM         The cross context VM structure.
+ * @param   pDevIns     The device owning the window.
+ * @param   hMmio2      The host window handle.
+ * @param   offRegion   Page aligned offset into the window.
+ * @param   cb          Page aligned size of the range.  Must match whole
+ *                      ranges or parts of ranges that are backed.
+ *
+ * @thread  Any.  Must not be called while owning the PGM lock, the device
+ *          critical section or any other lock an EMT may wait on (deadlock),
+ *          nor from a PCI region map/unmap callback.
+ */
+VMMR3_INT_DECL(int) PGMR3PhysMmio2UnmapHostRange(PVM pVM, PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion,
+                                                 RTGCPHYS cb)
+{
+    /*
+     * Validate input.
+     */
+    AssertPtrReturn(pDevIns, VERR_INVALID_POINTER);
+    AssertReturn(hMmio2 != NIL_PGMMMIO2HANDLE, VERR_INVALID_HANDLE);
+    AssertReturn(!(offRegion & GUEST_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(cb > 0 && !(cb & GUEST_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    AssertReturn(PGM_IS_IN_NEM_MODE(pVM), VERR_NOT_SUPPORTED);
+    Assert(!PGMIsLockOwner(pVM));
+
+    PGMR3MMIO2UNMAPHOSTRANGEARGS Args;
+    Args.pDevIns   = pDevIns;
+    Args.hMmio2    = hMmio2;
+    Args.offRegion = offRegion;
+    Args.cb        = cb;
+
+    /*
+     * An EMT does the work itself.  Any other thread hands it to an EMT as a PRIORITY
+     * request: during suspend, power off and similar transitions all EMTs sit in the
+     * transition rendezvous and only EMT0's PDM async notification loop services
+     * requests, and it services priority requests only.  A normal request (which is
+     * what a rendezvous started by another thread uses) would never be picked up
+     * while EMT0 waits for this very thread to finish, and the VM would hang.
+     */
+    if (VMMGetCpu(pVM) != NULL)
+        return pgmR3PhysMmio2UnmapHostRangeOnEmt(pVM, &Args);
+
+    VMSTATE const enmState = VMR3GetState(pVM);
+    AssertLogRelMsgReturn(   enmState != VMSTATE_DESTROYING
+                          && enmState != VMSTATE_TERMINATED,
+                          ("PGMR3PhysMmio2UnmapHostRange: called from a non-EMT in state %s\n", VMR3GetStateName(enmState)),
+                          VERR_VM_INVALID_VM_STATE);
+    return VMR3ReqPriorityCallWait(pVM, VMCPUID_ANY, (PFNRT)pgmR3PhysMmio2UnmapHostRangeOnEmt, 2, pVM, &Args);
 }
 
 

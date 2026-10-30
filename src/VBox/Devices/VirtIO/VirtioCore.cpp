@@ -706,6 +706,17 @@ static inline void virtioCoreDumpTraceBufToRelLog(RTTRACEBUF hTraceBuf)
 }
 #endif /* VIRTIO_REL_INFO_DUMP */
 
+/** API Function: See header file */
+DECLHIDDEN(void) virtioCoreR3ShmRegionsInfo(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, PVIRTIOCORECC pVirtioCC)
+{
+    RT_NOREF(pDevIns);
+    unsigned const cShmRegions = RT_MIN(pVirtioCC->cShmRegions, RT_ELEMENTS(pVirtioCC->aShmRegions));
+    for (unsigned iShm = 0; iShm < cShmRegions; iShm++)
+        pHlp->pfnPrintf(pHlp, "    shared memory region id %u: BAR%u offset %#RX64 size %#RX64 (capability at %#x)\n",
+                        pVirtioCC->aShmRegions[iShm].idShm, pVirtioCC->aShmRegions[iShm].iBar,
+                        pVirtioCC->aShmRegions[iShm].off, pVirtioCC->aShmRegions[iShm].cb, pVirtioCC->aoffShmCaps[iShm]);
+}
+
 /** API Fuunction: See header file */
 DECLHIDDEN(void) virtioCoreR3VirtqInfo(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, PVIRTIOCORE pVirtio, const char *pszArgs, int uVirtq)
 {
@@ -3211,6 +3222,53 @@ static int virtioR3PciTransportInit(PPDMDEVINS pDevIns, PVIRTIOCORE pVirtio, PVI
     else
         Assert(pVirtio->LocDeviceCap.cbMmio == 0 && pVirtio->LocDeviceCap.cbPci == 0);
 
+    /*
+     * Shared memory region capabilities (VirtIO 1.2, section 4.1.4.7), one per
+     * region the device asked for.  They go before MSI-X, which keeps using
+     * pCfg->uCapNext below.  The device creates the BARs.
+     */
+    AssertCompileSize(VIRTIO_PCI_CAP64_T, 24);
+    AssertLogRelReturn(pVirtioCC->cShmRegions <= RT_ELEMENTS(pVirtioCC->aShmRegions), VERR_OUT_OF_RANGE);
+    for (unsigned iShm = 0; iShm < pVirtioCC->cShmRegions; iShm++)
+    {
+        uint8_t const  iBar  = pVirtioCC->aShmRegions[iShm].iBar;
+        uint64_t const offShm = pVirtioCC->aShmRegions[iShm].off;
+        uint64_t const cbShm  = pVirtioCC->aShmRegions[iShm].cb;
+        AssertLogRelMsgReturn(   iBar <= 5
+                              && iBar != VIRTIO_REGION_PCI_CAP
+                              && (!pVirtio->fOfferLegacy || iBar != VIRTIO_REGION_LEGACY_IO)
+                              && (!pVirtio->fMsiSupport  || iBar != VIRTIO_REGION_MSIX_CAP)
+                              && cbShm > 0
+                              && offShm + cbShm > offShm,
+                              ("iShm=%u iBar=%u off=%#RX64 cb=%#RX64\n", iShm, iBar, offShm, cbShm),
+                              VERR_INVALID_PARAMETER);
+
+        uint32_t const offCap = (uint32_t)CFG_ADDR_2_IDX(pCfg) + pCfg->uCapLen;
+        AssertLogRelMsgReturn(offCap + sizeof(VIRTIO_PCI_CAP64_T) <= 0x100, ("offCap=%#x\n", offCap), VERR_BUFFER_OVERFLOW);
+        pCfg->uCapNext = (uint8_t)offCap;
+
+        PVIRTIO_PCI_CAP64_T pShmCap  = (PVIRTIO_PCI_CAP64_T)&pPciDev->abConfig[offCap];
+        pShmCap->pciCap.uCapVndr     = VIRTIO_PCI_CAP_ID_VENDOR;
+        pShmCap->pciCap.uCapNext     = 0;
+        pShmCap->pciCap.uCapLen      = sizeof(VIRTIO_PCI_CAP64_T);
+        pShmCap->pciCap.uCfgType     = VIRTIO_PCI_CAP_SHARED_MEMORY_CFG;
+        pShmCap->pciCap.uBar         = iBar;
+        pShmCap->pciCap.uPadding[0]  = pVirtioCC->aShmRegions[iShm].idShm; /* 'id' in VirtIO 1.2 */
+        pShmCap->pciCap.uPadding[1]  = 0;
+        pShmCap->pciCap.uPadding[2]  = 0;
+        pShmCap->pciCap.uOffset      = RT_LO_U32(offShm);
+        pShmCap->pciCap.uLength      = RT_LO_U32(cbShm);
+        pShmCap->uOffsetHi           = RT_HI_U32(offShm);
+        pShmCap->uLengthHi           = RT_HI_U32(cbShm);
+        pVirtioCC->aoffShmCaps[iShm] = (uint8_t)offCap;
+        pCfg = &pShmCap->pciCap;
+
+        LogRel(("%s: Shared memory region id %u: BAR%u offset %#RX64 size %#RX64 (capability at %#x)\n",
+                pcszInstance, pVirtioCC->aShmRegions[iShm].idShm, iBar, offShm, cbShm, offCap));
+    }
+    if (pVirtioCC->cShmRegions)
+        pCfg->uCapNext = pVirtio->fMsiSupport ? CFG_ADDR_2_IDX(pCfg) + pCfg->uCapLen : 0;
+
     if (pVirtio->fMsiSupport)
     {
         PDMMSIREG aMsiReg;
@@ -3368,8 +3426,16 @@ DECLHIDDEN(int) virtioCoreR3Init(PPDMDEVINS pDevIns, PVIRTIOCORE pVirtio, PVIRTI
     AssertLogRelReturn(pVirtioCC->pbPrevDevSpecificCfg, VERR_NO_MEMORY);
 
     if (GCPhysMmioBase != NIL_RTGCPHYS)
+    {
+        if (pVirtioCC->cShmRegions)
+        {
+            /** @todo Shared memory regions over the MMIO transport (SHMSel/SHMLen/SHMBase registers). */
+            LogRel(("%s: Shared memory regions are not supported with the MMIO transport, ignoring them\n", pcszInstance));
+            pVirtioCC->cShmRegions = 0;
+        }
         rc = virtioR3MmioTransportInit(pDevIns, pVirtio, pVirtioCC, pcszInstance, cbDevSpecificCfg,
                                        GCPhysMmioBase, u16Irq);
+    }
     else
         rc = virtioR3PciTransportInit(pDevIns, pVirtio, pVirtioCC, pPciParams, pcszInstance, cbDevSpecificCfg);
     AssertLogRelRCReturn(rc, rc);

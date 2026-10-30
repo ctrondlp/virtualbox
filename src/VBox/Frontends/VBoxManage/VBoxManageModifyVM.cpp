@@ -68,6 +68,7 @@ enum
     MODIFYVM_MEMORY,
     MODIFYVM_PAGEFUSION,
     MODIFYVM_VRAM,
+    MODIFYVM_HOST_VISIBLE_SIZE,
     MODIFYVM_FIRMWARE,
     MODIFYVM_ACPI,
     MODIFYVM_IOAPIC,
@@ -297,6 +298,7 @@ static const RTGETOPTDEF g_aModifyVMOptions[] =
     OPT1("--memory",                                                    MODIFYVM_MEMORY,                    RTGETOPT_REQ_UINT32),
     OPT2("--page-fusion",                   "--pagefusion",             MODIFYVM_PAGEFUSION,                RTGETOPT_REQ_BOOL_ONOFF),
     OPT1("--vram",                                                      MODIFYVM_VRAM,                      RTGETOPT_REQ_UINT32),
+    OPT1("--host-visible-size",                                         MODIFYVM_HOST_VISIBLE_SIZE,         RTGETOPT_REQ_UINT32),
     OPT1("--firmware",                                                  MODIFYVM_FIRMWARE,                  RTGETOPT_REQ_STRING),
     OPT1("--acpi",                                                      MODIFYVM_ACPI,                      RTGETOPT_REQ_BOOL_ONOFF),
     OPT1("--ioapic",                                                    MODIFYVM_IOAPIC,                    RTGETOPT_REQ_BOOL_ONOFF),
@@ -1006,6 +1008,12 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
                 break;
             }
 
+            case MODIFYVM_HOST_VISIBLE_SIZE:
+            {
+                CHECK_ERROR(pGraphicsAdapter, COMSETTER(HostVisibleSize)(ValueUnion.u32));
+                break;
+            }
+
             case MODIFYVM_FIRMWARE:
             {
                 if (!RTStrICmp(ValueUnion.psz, "efi"))
@@ -1146,6 +1154,9 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
                 else if (   !RTStrICmp(ValueUnion.psz, "qemuramfb")
                          || !RTStrICmp(ValueUnion.psz, "qemu-ramfb"))
                     CHECK_ERROR(pGraphicsAdapter, COMSETTER(GraphicsControllerType)(GraphicsControllerType_QemuRamFB));
+                else if (   !RTStrICmp(ValueUnion.psz, "virtiogpu")
+                         || !RTStrICmp(ValueUnion.psz, "virtio-gpu"))
+                    CHECK_ERROR(pGraphicsAdapter, COMSETTER(GraphicsControllerType)(GraphicsControllerType_VirtioGpu));
                 else
                 {
                     errorArgument(ModifyVM::tr("Invalid --graphicscontroller argument '%s'"), ValueUnion.psz);

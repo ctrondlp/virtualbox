@@ -46,6 +46,7 @@ class UIDisplayScreenFeaturesEditor;
 class UIMonitorCountEditor;
 class UIRecordingSettingsEditor;
 class UIScaleFactorEditor;
+class UIHostVisibleSizeEditor;
 class UIVideoMemoryEditor;
 class UIVRDESettingsEditor;
 struct UIDataSettingsMachineDisplay;
@@ -175,6 +176,8 @@ private:
         UIEditor                      *m_pTabScreen;
         /** Holds the video memory size editor instance. */
         UIVideoMemoryEditor           *m_pEditorVideoMemorySize;
+        /** Holds the host visible memory size editor instance. */
+        UIHostVisibleSizeEditor       *m_pEditorHostVisibleSize;
         /** Holds the monitor count spinbox instance. */
         UIMonitorCountEditor          *m_pEditorMonitorCount;
         /** Holds the scale factor editor instance. */

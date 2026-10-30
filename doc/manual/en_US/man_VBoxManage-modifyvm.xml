@@ -64,6 +64,7 @@
           <arg choice="plain">off</arg>
         </group></arg>
       <arg>--vram=<replaceable>size-in-MB</replaceable></arg>
+      <arg>--host-visible-size=<replaceable>size-in-MB</replaceable></arg>
       <arg>--acpi=<group choice="plain">
           <arg choice="plain">on</arg>
           <arg choice="plain">off</arg>
@@ -249,6 +250,7 @@
           <arg choice="plain">vmsvga</arg>
           <arg choice="plain">vboxsvga</arg>
           <arg choice="plain">qemuramfb</arg>
+          <arg choice="plain">virtiogpu</arg>
         </group></arg>
       <arg>--snapshot-folder=<group choice="plain">
           <arg choice="plain">default</arg>
@@ -797,6 +799,18 @@ it unless this changes. -->
             </para></listitem>
         </varlistentry>
         <varlistentry>
+          <term><option>--host-visible-size=<replaceable>size</replaceable></option></term>
+          <listitem><para>
+              Specifies the size in megabytes of the host visible memory
+              window of the <literal>virtiogpu</literal> graphics
+              controller, the address space the guest can map host GPU
+              memory into for 3D acceleration. The value must be a power
+              of two from 64 to 16384; the default is 1024. The window is
+              address space only, it is not backed by memory until the
+              guest maps something into it.
+            </para></listitem>
+        </varlistentry>
+        <varlistentry>
           <term><option>--acpi=on | off</option></term>
           <listitem><para>
               Determines whether the VM has ACPI support. See
@@ -1334,10 +1348,18 @@ it unless this changes. -->
             </para></listitem>
         </varlistentry>
         <varlistentry>
-          <term><option>--graphicscontroller=none | vboxvga | vmsvga | vboxsvga</option></term>
+          <term><option>--graphicscontroller=none | vboxvga | vmsvga | vboxsvga | virtiogpu</option></term>
           <listitem><para>
               Specifies the graphics controller type to use. See
               <xref linkend="settings-screen" />.
+            </para><para>
+              The <literal>virtiogpu</literal> controller is a 2D
+              virtio-gpu display without VGA compatibility. Guests that
+              boot with the 64-bit EFI firmware get a display from the
+              firmware's virtio-gpu driver; with the BIOS the VM has no
+              display output until the guest operating system loads its
+              virtio-gpu driver. 3D acceleration is experimental, and the
+              state of a VM using it cannot be saved yet.
             </para></listitem>
         </varlistentry>
         <varlistentry>

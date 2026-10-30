@@ -132,7 +132,54 @@ VMMR3_INT_DECL(int)  NEMR3NotifyPhysMmioExUnmap(PVM pVM, RTGCPHYS GCPhys, RTGCPH
 #define NEM_NOTIFY_PHYS_MMIO_EX_F_MMIO2                 RT_BIT(1)
 /** Set if MMIO2 and dirty page tracking is configured. */
 #define NEM_NOTIFY_PHYS_MMIO_EX_F_TRACK_DIRTY_PAGES     RT_BIT(2)
+/** Set if MMIO2 host window (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW).  pvMmio2 is NULL
+ * then and nothing is mapped up front; the backed parts are mapped separately
+ * by NEMR3NotifyPhysHostRangeMap() and the rest lazily on access. */
+#define NEM_NOTIFY_PHYS_MMIO_EX_F_HOST_WINDOW           RT_BIT(3)
 /** @} */
+
+/**
+ * Checks if the backend can map caller provided host memory ranges into MMIO2
+ * host windows (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW).
+ *
+ * @retval  true if NEMR3NotifyPhysHostRangeMap and NEMR3NotifyPhysHostRangeUnmap
+ *          are implemented.
+ * @retval  false if not.
+ * @param   pVM     The cross context VM structure.
+ */
+VMMR3_INT_DECL(bool) NEMR3IsHostRangeMappingSupported(PVM pVM);
+
+/**
+ * Maps a host memory range at a guest physical address inside an MMIO2 host
+ * window, replacing whatever the hypervisor had mapped there.
+ *
+ * @returns VBox status code.  On failure nothing is mapped in the range.
+ * @param   pVM         The cross context VM structure.
+ * @param   GCPhys      The guest physical address (page aligned).
+ * @param   cb          The size of the range (page aligned).
+ * @param   pvHost      The ring-3 host address of the memory (page aligned).
+ * @param   fProt       NEM_PAGE_PROT_XXX; must include NEM_PAGE_PROT_READ.
+ * @param   pu2State    Where to return the new NEM page state for all the pages
+ *                      in the range.  UINT8_MAX if not to be changed.
+ * @thread  Any, caller owns the PGM lock.
+ */
+VMMR3_INT_DECL(int)  NEMR3NotifyPhysHostRangeMap(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, void *pvHost, uint32_t fProt,
+                                                 uint8_t *pu2State);
+
+/**
+ * Removes the hypervisor mapping of a guest physical range inside an MMIO2 host
+ * window (the range may contain unmapped pages).
+ *
+ * @returns VBox status code.  On failure the caller must assume the host memory
+ *          may still be accessible to the guest.
+ * @param   pVM         The cross context VM structure.
+ * @param   GCPhys      The guest physical address (page aligned).
+ * @param   cb          The size of the range (page aligned).
+ * @param   pu2State    Where to return the new NEM page state for all the pages
+ *                      in the range.  UINT8_MAX if not to be changed.
+ * @thread  Any, caller owns the PGM lock.
+ */
+VMMR3_INT_DECL(int)  NEMR3NotifyPhysHostRangeUnmap(PVM pVM, RTGCPHYS GCPhys, RTGCPHYS cb, uint8_t *pu2State);
 
 /**
  * Called very early during ROM registration, basically so an existing RAM range

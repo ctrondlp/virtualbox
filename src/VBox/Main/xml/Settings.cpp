@@ -3457,6 +3457,7 @@ bool Recording::operator==(const Recording &that) const
 GraphicsAdapter::GraphicsAdapter() :
     graphicsControllerType(GraphicsControllerType_VBoxVGA),
     ulVRAMSizeMB(8),
+    ulHostVisibleSizeMB(1024),
     cMonitors(1),
     fAccelerate3D(false),
     fAccelerate2DVideo(false)
@@ -3470,6 +3471,7 @@ bool GraphicsAdapter::areDefaultSettings() const
 {
     return graphicsControllerType == GraphicsControllerType_VBoxVGA
         && ulVRAMSizeMB == 8
+        && ulHostVisibleSizeMB == 1024
         && cMonitors <= 1
         && !fAccelerate3D
         && !fAccelerate2DVideo;
@@ -3485,6 +3487,7 @@ bool GraphicsAdapter::operator==(const GraphicsAdapter &g) const
     return (this == &g)
         || (   graphicsControllerType         == g.graphicsControllerType
             && ulVRAMSizeMB                   == g.ulVRAMSizeMB
+            && ulHostVisibleSizeMB            == g.ulHostVisibleSizeMB
             && cMonitors                      == g.cMonitors
             && fAccelerate3D                  == g.fAccelerate3D
             && fAccelerate2DVideo             == g.fAccelerate2DVideo);
@@ -5848,6 +5851,8 @@ void MachineConfigFile::readHardware(const xml::ElementNode &elmHardware,
                     type = GraphicsControllerType_VBoxSVGA;
                 else if (strGraphicsControllerType == "QEMURAMFB")
                     type = GraphicsControllerType_QemuRamFB;
+                else if (strGraphicsControllerType == "VIRTIOGPU")
+                    type = GraphicsControllerType_VirtioGpu;
                 else if (strGraphicsControllerType == "NONE")
                     type = GraphicsControllerType_Null;
                 else
@@ -5855,6 +5860,7 @@ void MachineConfigFile::readHardware(const xml::ElementNode &elmHardware,
                 hw.graphicsAdapter.graphicsControllerType = type;
             }
             pelmHwChild->getAttributeValue("VRAMSize", hw.graphicsAdapter.ulVRAMSizeMB);
+            pelmHwChild->getAttributeValue("hostVisibleSize", hw.graphicsAdapter.ulHostVisibleSizeMB);
             if (!pelmHwChild->getAttributeValue("monitorCount", hw.graphicsAdapter.cMonitors))
                 pelmHwChild->getAttributeValue("MonitorCount", hw.graphicsAdapter.cMonitors);       // pre-v1.5 variant
             if (!pelmHwChild->getAttributeValue("accelerate3D", hw.graphicsAdapter.fAccelerate3D))
@@ -7829,12 +7835,15 @@ void MachineConfigFile::buildHardwareXML(xml::ElementNode &elmParent,
                 case GraphicsControllerType_VMSVGA:             pcszGraphics = "VMSVGA"; break;
                 case GraphicsControllerType_VBoxSVGA:           pcszGraphics = "VBoxSVGA"; break;
                 case GraphicsControllerType_QemuRamFB:          pcszGraphics = "QemuRamFB"; break;
+                case GraphicsControllerType_VirtioGpu:          pcszGraphics = "VirtioGpu"; break;
                 default: /*case GraphicsControllerType_Null:*/  pcszGraphics = "None"; break;
             }
             pelmDisplay->setAttribute("controller", pcszGraphics);
         }
         if (hw.graphicsAdapter.ulVRAMSizeMB != 8)
             pelmDisplay->setAttribute("VRAMSize", hw.graphicsAdapter.ulVRAMSizeMB);
+        if (hw.graphicsAdapter.ulHostVisibleSizeMB != 1024)
+            pelmDisplay->setAttribute("hostVisibleSize", hw.graphicsAdapter.ulHostVisibleSizeMB);
         if (hw.graphicsAdapter.cMonitors > 1)
             pelmDisplay->setAttribute("monitorCount", hw.graphicsAdapter.cMonitors);
         if (hw.graphicsAdapter.fAccelerate3D)
@@ -9741,6 +9750,13 @@ void MachineConfigFile::bumpSettingsVersionIfNeeded()
         // VirtualBox 7.3 (settings v1.22) moves clipboard mode to Hardware/Clipboard/@mode.
         if (   hardwareMachine.clipboardSettings.mode != ClipboardMode_Disabled
             || hardwareMachine.clipboardSettings.fFileTransfersEnabled)
+        {
+            m->sv = SettingsVersion_v1_22;
+            return;
+        }
+
+        // VirtualBox 7.3 (settings v1.22) adds the virtio-gpu graphics controller.
+        if (hardwareMachine.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu)
         {
             m->sv = SettingsVersion_v1_22;
             return;

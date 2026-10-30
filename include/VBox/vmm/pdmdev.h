@@ -2412,7 +2412,7 @@ typedef const PDMRTCHLP *PCPDMRTCHLP;
 /** @} */
 
 /** Current PDMDEVHLPR3 version number. */
-#define PDM_DEVHLPR3_VERSION                PDM_VERSION_MAKE_PP(0xffe7, 71, 0)
+#define PDM_DEVHLPR3_VERSION                PDM_VERSION_MAKE_PP(0xffe7, 71, 1)
 
 /**
  * PDM Device API.
@@ -4726,11 +4726,66 @@ typedef struct PDMDEVHLPR3
      */
     DECLR3CALLBACKMEMBER(uint64_t, pfnCpuGetGuestScalableBusFrequency,(PPDMDEVINS pDevIns));
 
+    /**
+     * Backs part of an MMIO2 host window with host memory.
+     *
+     * The region must have been created with PGMPHYS_MMIO2_FLAGS_HOST_WINDOW (see
+     * PDMDevHlpPCIIORegionCreateMmio2Ex).  The memory becomes visible to the
+     * guest at @a offRegion whenever the region is mapped.  The caller must keep
+     * the memory valid until pfnMmio2UnmapHostRange has succeeded for it, and the
+     * complete pages must be fit for the guest to see.
+     *
+     * @returns VBox status code.
+     * @retval  VERR_RESOURCE_BUSY if part of the range is already backed.
+     * @retval  VERR_NOT_SUPPORTED if host windows aren't supported or for
+     *          PGMPHYS_MMIO2_HOST_RANGE_F_READ_ONLY.
+     * @param   pDevIns     The device instance.
+     * @param   hRegion     The MMIO2 host window handle.
+     * @param   offRegion   Page aligned offset into the region.
+     * @param   pvHost      Page aligned ring-3 address of the memory.
+     * @param   cb          Page aligned size.
+     * @param   fFlags      PGMPHYS_MMIO2_HOST_RANGE_F_XXX.
+     * @thread  Any, but not while owning the device lock or other locks EMTs may
+     *          wait on, and never from a PCI region map/unmap callback.
+     * @sa      PDMDevHlpMmio2MapHostRange, PGMR3PhysMmio2MapHostRange
+     */
+    DECLR3CALLBACKMEMBER(int, pfnMmio2MapHostRange,(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
+                                                    void *pvHost, RTGCPHYS cb, uint32_t fFlags));
+
+    /**
+     * Removes the host memory backing from part of an MMIO2 host window.
+     *
+     * When this succeeds the guest can no longer access the memory and the caller
+     * may free it.  On failure the memory may still be in use and must be kept.
+     * Unless called on an EMT while no guest code executes (reset, power off,
+     * destruct, ...), this involves an EMT rendezvous.
+     *
+     * @returns VBox status code.
+     * @retval  VERR_RESOURCE_BUSY if another device has part of the range mapped
+     *          for DMA; retry later.
+     * @param   pDevIns     The device instance.
+     * @param   hRegion     The MMIO2 host window handle.
+     * @param   offRegion   Page aligned offset into the region.
+     * @param   cb          Page aligned size.
+     * @thread  Any, but not while owning the device lock or other locks EMTs may
+     *          wait on, and never from a PCI region map/unmap callback.
+     * @sa      PDMDevHlpMmio2UnmapHostRange, PGMR3PhysMmio2UnmapHostRange
+     */
+    DECLR3CALLBACKMEMBER(int, pfnMmio2UnmapHostRange,(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
+                                                      RTGCPHYS cb));
+
+    /**
+     * Tells whether the device may call the trusted-only helpers, such as the
+     * MMIO2 host window ones.  A device that needs one of those and is not
+     * trusted should degrade at construction time instead of asserting later.
+     *
+     * @returns true if the device is trusted.
+     * @param   pDevIns     The device instance.
+     */
+    DECLR3CALLBACKMEMBER(bool, pfnIsTrusted,(PPDMDEVINS pDevIns));
+
     /** Space reserved for future members.
      * @{ */
-    DECLR3CALLBACKMEMBER(void, pfnReserved1,(void));
-    DECLR3CALLBACKMEMBER(void, pfnReserved2,(void));
-    DECLR3CALLBACKMEMBER(void, pfnReserved3,(void));
     DECLR3CALLBACKMEMBER(void, pfnReserved4,(void));
     DECLR3CALLBACKMEMBER(void, pfnReserved5,(void));
     DECLR3CALLBACKMEMBER(void, pfnReserved6,(void));
@@ -6983,6 +7038,31 @@ DECLINLINE(int) PDMDevHlpMmio2ControlDirtyPageTracking(PPDMDEVINS pDevIns, PGMMM
     return pDevIns->pHlpR3->pfnMmio2ControlDirtyPageTracking(pDevIns, hRegion, fEnabled);
 }
 
+/**
+ * @copydoc PDMDEVHLPR3::pfnMmio2MapHostRange
+ */
+DECLINLINE(int) PDMDevHlpMmio2MapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion, void *pvHost,
+                                           RTGCPHYS cb, uint32_t fFlags)
+{
+    return pDevIns->pHlpR3->pfnMmio2MapHostRange(pDevIns, hMmio2, offRegion, pvHost, cb, fFlags);
+}
+
+/**
+ * @copydoc PDMDEVHLPR3::pfnMmio2UnmapHostRange
+ */
+DECLINLINE(int) PDMDevHlpMmio2UnmapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion, RTGCPHYS cb)
+{
+    return pDevIns->pHlpR3->pfnMmio2UnmapHostRange(pDevIns, hMmio2, offRegion, cb);
+}
+
+/**
+ * @copydoc PDMDEVHLPR3::pfnIsTrusted
+ */
+DECLINLINE(bool) PDMDevHlpIsTrusted(PPDMDEVINS pDevIns)
+{
+    return pDevIns->pHlpR3->pfnIsTrusted(pDevIns);
+}
+
 #endif /* IN_RING3 */
 
 /**
@@ -8352,7 +8432,10 @@ DECLINLINE(int) PDMDevHlpPCIIORegionCreateMmio2FromExistingEx(PPDMDEVINS pDevIns
  * @param   enmType         PCI_ADDRESS_SPACE_MEM or
  *                          PCI_ADDRESS_SPACE_MEM_PREFETCH, optionally or-ing in
  *                          PCI_ADDRESS_SPACE_BAR64 or PCI_ADDRESS_SPACE_BAR32.
- * @param   fMmio2Flags     PGMPHYS_MMIO2_FLAGS_XXX (see pgm.h).
+ * @param   fMmio2Flags     PGMPHYS_MMIO2_FLAGS_XXX (see pgm.h).  With
+ *                          PGMPHYS_MMIO2_FLAGS_HOST_WINDOW the region has no
+ *                          backing (*ppvMapping is set to NULL); populate it with
+ *                          PDMDevHlpMmio2MapHostRange.
  * @param   pfnMapUnmap     Callback for doing the mapping, optional.  The
  *                          callback will be invoked holding only the PDM lock.
  *                          The device lock will _not_ be taken (due to lock

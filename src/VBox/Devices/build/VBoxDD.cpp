@@ -213,6 +213,11 @@ extern "C" DECLEXPORT(int) VBoxDevicesRegister(PPDMDEVREGCB pCallbacks, uint32_t
     if (RT_FAILURE(rc))
         return rc;
 #endif
+#ifdef VBOX_WITH_VIRTIO_GPU
+    rc = pCallbacks->pfnRegister(pCallbacks, &g_DeviceVirtioGpu);
+    if (RT_FAILURE(rc))
+        return rc;
+#endif
     rc = pCallbacks->pfnRegister(pCallbacks, &g_DeviceGIMDev);
     if (RT_FAILURE(rc))
         return rc;

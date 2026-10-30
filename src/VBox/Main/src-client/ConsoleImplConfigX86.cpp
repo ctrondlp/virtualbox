@@ -1581,6 +1581,29 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 if (FAILED(vrc))
                     return vrc;
                 break;
+            case GraphicsControllerType_VirtioGpu:
+            {
+                /* Plain 2D virtio-gpu device without VGA compatibility, so no VGA BIOS,
+                   logo or boot menu settings. The VRAM size is not used by it. */
+                InsertConfigNode(pDevices, "virtio-gpu", &pDev);
+                InsertConfigNode(pDev,     "0", &pInst);
+                InsertConfigInteger(pInst, "Trusted",              1); /* boolean */
+                hrc = pBusMgr->assignPCIDevice("virtio-gpu", pInst);                                H();
+                InsertConfigNode(pInst,    "Config", &pCfg);
+                ULONG cMonitorCount;
+                hrc = pGraphicsAdapter->COMGETTER(MonitorCount)(&cMonitorCount);                    H();
+                InsertConfigInteger(pCfg,  "MonitorCount",         cMonitorCount);
+
+                ULONG cHostVisibleMB;
+                hrc = pGraphicsAdapter->COMGETTER(HostVisibleSize)(&cHostVisibleMB);                H();
+                InsertConfigInteger(pCfg,  "HostVisibleSize",      (uint64_t)cHostVisibleMB * _1M);
+
+                /* Attach the display. */
+                InsertConfigNode(pInst,    "LUN#0", &pLunL0);
+                InsertConfigString(pLunL0, "Driver",               "MainDisplay");
+                InsertConfigNode(pLunL0,   "Config", &pCfg);
+                break;
+            }
             default:
                 AssertMsgFailed(("Invalid graphicsController=%d\n", enmGraphicsController));
                 return pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,

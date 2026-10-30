@@ -300,6 +300,7 @@
     <xsd:enumeration value="VMSVGA"/>
     <xsd:enumeration value="VBoxSVGA"/>
     <xsd:enumeration value="QemuRamFB"/>
+    <xsd:enumeration value="VirtioGpu"/>
   </xsd:restriction>
 </xsd:simpleType>
 

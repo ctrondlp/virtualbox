@@ -722,6 +722,7 @@
       <desc>Settings version "1.22", written by VirtualBox 7.3.x.</desc>
       <!--
           Machine changes: Clipboard mode is stored in Hardware/Clipboard/@mode.
+          Adds the VirtioGpu graphics controller type (Display/@controller).
       -->
     </const>
     <const name="Future" value="99999">
@@ -6208,7 +6209,7 @@
     uuid="13ee6eb4-06fe-406b-ad69-f6e08b0587a3"
     wsmap="managed"
     rest="managed"
-    reservedMethods="4" reservedAttributes="8"
+    reservedMethods="4" reservedAttributes="7"
     >
     <desc>
         The IGraphicsAdapter interface represents the graphics adapter
@@ -6221,6 +6222,19 @@
 
     <attribute name="VRAMSize" type="unsigned long">
       <desc>Video memory size in megabytes.</desc>
+    </attribute>
+
+    <attribute name="hostVisibleSize" type="unsigned long">
+      <desc>
+        Size in megabytes of the host visible memory window of the virtio-gpu
+        graphics controller, the address space the guest can map host GPU
+        memory into for 3D acceleration.  It must be a power of two from 64 to
+        16384.  The window is address space only and is not backed by memory
+        until the guest maps something into it.
+        <note>
+          Only used by the VirtioGpu graphics controller.
+        </note>
+      </desc>
     </attribute>
 
     <attribute name="monitorCount" type="unsigned long">
@@ -7411,7 +7425,7 @@
 
   <enum
     name="GraphicsControllerType"
-    uuid="e1379bad-ae01-493d-abf5-740a95c41676"
+    uuid="b14e57d8-29d5-4c4d-9602-066fe41baae0"
     >
     <desc>Graphics controller type, used with <link to="IGraphicsAdapter::graphicsControllerType" />.
     </desc>
@@ -7429,6 +7443,11 @@
     </const>
     <const name="QemuRamFB" value="4">
       <desc>QEMU RAM based framebuffer based device.</desc>
+    </const>
+    <const name="VirtioGpu" value="5">
+      <desc>virtio-gpu 2D paravirtual display device, for guests with a virtio-gpu
+        driver. It has no VGA compatibility. 3D acceleration is experimental and
+        needs the virtio-gpu renderer library, see the device configuration.</desc>
     </const>
   </enum>
 

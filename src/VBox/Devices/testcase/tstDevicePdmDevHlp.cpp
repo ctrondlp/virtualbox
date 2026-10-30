@@ -360,6 +360,16 @@ static DECLCALLBACK(int) pdmR3DevHlp_Mmio2Destroy(PPDMDEVINS pDevIns, PGMMMIO2HA
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnIsTrusted} */
+static DECLCALLBACK(bool) pdmR3DevHlp_IsTrusted(PPDMDEVINS pDevIns)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    RT_NOREF(pDevIns);
+    /* The host window helpers are not implemented here, so devices must not rely on them. */
+    return false;
+}
+
+
 /** @interface_method_impl{PDMDEVHLPR3,pfnMmio2Map} */
 static DECLCALLBACK(int) pdmR3DevHlp_Mmio2Map(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS GCPhys)
 {
@@ -6146,9 +6156,9 @@ const PDMDEVHLPR3 g_tstDevPdmDevHlpR3 =
     pdmR3DevHlp_CpuGetGuestMicroarch,
     pdmR3DevHlp_CpuGetGuestAddrWidths,
     pdmR3DevHlp_CpuGetGuestScalableBusFrequency,
-    NULL,
-    NULL,
-    NULL,
+    NULL, /* pfnMmio2MapHostRange: not available in the standalone test environment */
+    NULL, /* pfnMmio2UnmapHostRange */
+    pdmR3DevHlp_IsTrusted,
     NULL,
     NULL,
     NULL,

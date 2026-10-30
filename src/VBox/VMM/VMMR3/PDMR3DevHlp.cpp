@@ -458,6 +458,54 @@ static DECLCALLBACK(int) pdmR3DevHlp_Mmio2ChangeRegionNo(PPDMDEVINS pDevIns, PGM
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnIsTrusted} */
+static DECLCALLBACK(bool) pdmR3DevHlp_IsTrusted(PPDMDEVINS pDevIns)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    RT_NOREF(pDevIns);
+    return true;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnIsTrusted} */
+static DECLCALLBACK(bool) pdmR3DevHlp_Untrusted_IsTrusted(PPDMDEVINS pDevIns)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    RT_NOREF(pDevIns);
+    return false;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnMmio2MapHostRange} */
+static DECLCALLBACK(int) pdmR3DevHlp_Mmio2MapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
+                                                       void *pvHost, RTGCPHYS cb, uint32_t fFlags)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    LogFlow(("pdmR3DevHlp_Mmio2MapHostRange: caller='%s'/%d: hRegion=%#RX64 offRegion=%RGp pvHost=%p cb=%RGp fFlags=%#x\n",
+             pDevIns->pReg->szName, pDevIns->iInstance, hRegion, offRegion, pvHost, cb, fFlags));
+
+    int rc = PGMR3PhysMmio2MapHostRange(pDevIns->Internal.s.pVMR3, pDevIns, hRegion, offRegion, pvHost, cb, fFlags);
+
+    LogFlow(("pdmR3DevHlp_Mmio2MapHostRange: caller='%s'/%d: returns %Rrc\n", pDevIns->pReg->szName, pDevIns->iInstance, rc));
+    return rc;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnMmio2UnmapHostRange} */
+static DECLCALLBACK(int) pdmR3DevHlp_Mmio2UnmapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
+                                                         RTGCPHYS cb)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    LogFlow(("pdmR3DevHlp_Mmio2UnmapHostRange: caller='%s'/%d: hRegion=%#RX64 offRegion=%RGp cb=%RGp\n",
+             pDevIns->pReg->szName, pDevIns->iInstance, hRegion, offRegion, cb));
+
+    int rc = PGMR3PhysMmio2UnmapHostRange(pDevIns->Internal.s.pVMR3, pDevIns, hRegion, offRegion, cb);
+
+    LogFlow(("pdmR3DevHlp_Mmio2UnmapHostRange: caller='%s'/%d: returns %Rrc\n", pDevIns->pReg->szName, pDevIns->iInstance, rc));
+    return rc;
+}
+
+
 /** @interface_method_impl{PDMDEVHLPR3,pfnMmioMapMmio2Page} */
 static DECLCALLBACK(int) pdmR3DevHlp_MmioMapMmio2Page(PPDMDEVINS pDevIns, IOMMMIOHANDLE hRegion, RTGCPHYS offRegion,
                                                       uint64_t hMmio2, RTGCPHYS offMmio2, uint64_t fPageFlags)
@@ -5402,9 +5450,9 @@ const PDMDEVHLPR3 g_pdmR3DevHlpTrusted =
     pdmR3DevHlp_CpuGetGuestMicroarch,
     pdmR3DevHlp_CpuGetGuestAddrWidths,
     pdmR3DevHlp_CpuGetGuestScalableBusFrequency,
-    0,
-    0,
-    0,
+    pdmR3DevHlp_Mmio2MapHostRange,
+    pdmR3DevHlp_Mmio2UnmapHostRange,
+    pdmR3DevHlp_IsTrusted,
     0,
     0,
     0,
@@ -5808,9 +5856,9 @@ const PDMDEVHLPR3 g_pdmR3DevHlpTracing =
     pdmR3DevHlp_CpuGetGuestMicroarch,
     pdmR3DevHlp_CpuGetGuestAddrWidths,
     pdmR3DevHlp_CpuGetGuestScalableBusFrequency,
-    0,
-    0,
-    0,
+    pdmR3DevHlp_Mmio2MapHostRange,
+    pdmR3DevHlp_Mmio2UnmapHostRange,
+    pdmR3DevHlp_IsTrusted,
     0,
     0,
     0,
@@ -6071,6 +6119,30 @@ static DECLCALLBACK(int) pdmR3DevHlp_Untrusted_PGMHandlerPhysicalReset(PPDMDEVIN
 {
     PDMDEV_ASSERT_DEVINS(pDevIns);
     RT_NOREF(GCPhys);
+    AssertReleaseMsgFailed(("Untrusted device called trusted helper! '%s'/%d\n",
+                            pDevIns->pReg->szName, pDevIns->iInstance));
+    return VERR_ACCESS_DENIED;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnMmio2MapHostRange} */
+static DECLCALLBACK(int) pdmR3DevHlp_Untrusted_Mmio2MapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
+                                                                 void *pvHost, RTGCPHYS cb, uint32_t fFlags)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    RT_NOREF(hRegion, offRegion, pvHost, cb, fFlags);
+    AssertReleaseMsgFailed(("Untrusted device called trusted helper! '%s'/%d\n",
+                            pDevIns->pReg->szName, pDevIns->iInstance));
+    return VERR_ACCESS_DENIED;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnMmio2UnmapHostRange} */
+static DECLCALLBACK(int) pdmR3DevHlp_Untrusted_Mmio2UnmapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
+                                                                   RTGCPHYS cb)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    RT_NOREF(hRegion, offRegion, cb);
     AssertReleaseMsgFailed(("Untrusted device called trusted helper! '%s'/%d\n",
                             pDevIns->pReg->szName, pDevIns->iInstance));
     return VERR_ACCESS_DENIED;
@@ -6542,9 +6614,9 @@ const PDMDEVHLPR3 g_pdmR3DevHlpUnTrusted =
     pdmR3DevHlp_CpuGetGuestMicroarch,
     pdmR3DevHlp_CpuGetGuestAddrWidths,
     pdmR3DevHlp_CpuGetGuestScalableBusFrequency,
-    0,
-    0,
-    0,
+    pdmR3DevHlp_Untrusted_Mmio2MapHostRange,
+    pdmR3DevHlp_Untrusted_Mmio2UnmapHostRange,
+    pdmR3DevHlp_Untrusted_IsTrusted,
     0,
     0,
     0,
