@@ -190,6 +190,7 @@ device counters stay balanced (every deferred fence is signalled).
   `MOVE_CURSOR` is ignored because the position follows the host mouse. The alpha byte is used as the guest sends it:
   Linux creates every dumb buffer as an "X" format resource and puts an ARGB cursor image in it, so forcing the X
   formats opaque showed a square pointer.
+  Checked by eye in the GUI window on 2026-10-30 (build 20261030-1204): the pointer is a normal arrow.
 
 ## Independent review (2026-10-29)
 
