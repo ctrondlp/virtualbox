@@ -2214,6 +2214,14 @@ static uint32_t vgpuR3CmdResourceMapBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, P
         LogRelMax(16, ("%s: Blob %RU32 maps only %#RX64 of %#RX64 bytes, the rest of the range stays unbacked\n",
                        pThis->szInstance, pRes->idResource, cbMap, cbWant));
 
+    /* The window is a PCI BAR above RAM, which the guest MTRRs normally mark uncached, and a write-back
+       page attribute on top of an uncached MTRR type gives an uncached mapping on x86: every store of a
+       memcpy into a "cached" blob (for example llama.cpp's staging buffer) took ~800 ns, 10 MB/s measured.
+       Write-combining is not overridden by the MTRR type (480 MB/s on first touch, over 20 GB/s after),
+       and the host memory stays coherent either way, so never ask the guest for a cached mapping. */
+    if (fMapInfo == VIRTIOGPU_MAP_CACHE_CACHED)
+        fMapInfo = VIRTIOGPU_MAP_CACHE_WC;
+
     /* No lock held: the helper may rendezvous with the EMTs. */
     rc = PDMDevHlpMmio2MapHostRange(pDevIns, pThis->hMmio2HostVisible, offRegion, pvHost, cbMap, 0 /*fFlags*/);
     if (RT_FAILURE(rc))
