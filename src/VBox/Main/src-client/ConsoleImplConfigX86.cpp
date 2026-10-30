@@ -1594,6 +1594,10 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 hrc = pGraphicsAdapter->COMGETTER(MonitorCount)(&cMonitorCount);                    H();
                 InsertConfigInteger(pCfg,  "MonitorCount",         cMonitorCount);
 
+                ULONG cHostVisibleMB;
+                hrc = pGraphicsAdapter->COMGETTER(HostVisibleSize)(&cHostVisibleMB);                H();
+                InsertConfigInteger(pCfg,  "HostVisibleSize",      (uint64_t)cHostVisibleMB * _1M);
+
                 /* Attach the display. */
                 InsertConfigNode(pInst,    "LUN#0", &pLunL0);
                 InsertConfigString(pLunL0, "Driver",               "MainDisplay");

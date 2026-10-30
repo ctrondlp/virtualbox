@@ -35,6 +35,9 @@ rings one doorbell per kick. Measurements are in `vbox-devtools/testkit/gpu-2026
   `RendererPath` (absolute path of `libvirglrenderer-1.dll`, default next to the VirtualBox binaries),
   `HostVisibleSize` (power of two, 64 MB to 16 GB, default 1 GB), `MonitorCount`. If the library cannot be loaded or
   the host window cannot be created the device falls back to 2D before the guest sees any 3D feature bit.
+  When Main creates the device, `HostVisibleSize` comes from the machine setting (`IGraphicsAdapter::hostVisibleSize`, MB,
+  default 1024): the Display page of the GUI, `VBoxManage modifyvm --host-visible-size`, `hostVisibleSize` in the `Display`
+  element of the .vbox file. It is address space only. In second-GPU mode the extra data key is used.
 - **Renderer** (`DevVirtioGpuRenderer.cpp`): all `virgl_renderer_*` calls come from one dedicated thread. Fence
   callbacks only record progress and wake the control worker, which writes the responses. No file descriptors cross
   the MinGW/MSVC boundary. The library is loaded with NO_UNLOAD.

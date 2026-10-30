@@ -64,6 +64,7 @@
           <arg choice="plain">off</arg>
         </group></arg>
       <arg>--vram=<replaceable>size-in-MB</replaceable></arg>
+      <arg>--host-visible-size=<replaceable>size-in-MB</replaceable></arg>
       <arg>--acpi=<group choice="plain">
           <arg choice="plain">on</arg>
           <arg choice="plain">off</arg>
@@ -795,6 +796,18 @@ it unless this changes. -->
           <listitem><para>
               Specifies the amount of RAM to allocate to the virtual
               graphics card. See <xref linkend="ct_settings-display" />.
+            </para></listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--host-visible-size=<replaceable>size</replaceable></option></term>
+          <listitem><para>
+              Specifies the size in megabytes of the host visible memory
+              window of the <literal>virtiogpu</literal> graphics
+              controller, the address space the guest can map host GPU
+              memory into for 3D acceleration. The value must be a power
+              of two from 64 to 16384; the default is 1024. The window is
+              address space only, it is not backed by memory until the
+              guest maps something into it.
             </para></listitem>
         </varlistentry>
         <varlistentry>

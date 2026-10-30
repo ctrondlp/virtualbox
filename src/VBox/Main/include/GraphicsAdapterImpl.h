@@ -74,6 +74,8 @@ private:
     HRESULT setGraphicsControllerType(GraphicsControllerType_T aGraphicsControllerType);
     HRESULT getVRAMSize(ULONG *aVRAMSize);
     HRESULT setVRAMSize(ULONG aVRAMSize);
+    HRESULT getHostVisibleSize(ULONG *aHostVisibleSize);
+    HRESULT setHostVisibleSize(ULONG aHostVisibleSize);
     HRESULT setFeature(GraphicsFeature_T aFeature, BOOL aEnabled);
     HRESULT isFeatureEnabled(GraphicsFeature_T aFeature, BOOL *aEnabled);
     HRESULT getMonitorCount(ULONG *aMonitorCount);

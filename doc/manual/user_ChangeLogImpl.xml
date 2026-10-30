@@ -102,7 +102,9 @@ Rules for adding a changelog entry to make them look more uniform:
         <para>Graphics: Added the VirtioGpu graphics controller for x86 VMs, a
           2D virtio-gpu display for guests with a virtio-gpu driver. It has no
           VGA compatibility or 3D acceleration, and the state of VMs using it
-          cannot be saved yet (github:gh-NNN)</para>
+          cannot be saved yet. The size of its host visible memory window can
+          be set in the Display settings or with VBoxManage modifyvm
+          --host-visible-size (github:gh-NNN)</para>
       </listitem>
 
     </itemizedlist>

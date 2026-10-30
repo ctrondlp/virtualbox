@@ -6209,7 +6209,7 @@
     uuid="13ee6eb4-06fe-406b-ad69-f6e08b0587a3"
     wsmap="managed"
     rest="managed"
-    reservedMethods="4" reservedAttributes="8"
+    reservedMethods="4" reservedAttributes="7"
     >
     <desc>
         The IGraphicsAdapter interface represents the graphics adapter
@@ -6222,6 +6222,19 @@
 
     <attribute name="VRAMSize" type="unsigned long">
       <desc>Video memory size in megabytes.</desc>
+    </attribute>
+
+    <attribute name="hostVisibleSize" type="unsigned long">
+      <desc>
+        Size in megabytes of the host visible memory window of the virtio-gpu
+        graphics controller, the address space the guest can map host GPU
+        memory into for 3D acceleration.  It must be a power of two from 64 to
+        16384.  The window is address space only and is not backed by memory
+        until the guest maps something into it.
+        <note>
+          Only used by the VirtioGpu graphics controller.
+        </note>
+      </desc>
     </attribute>
 
     <attribute name="monitorCount" type="unsigned long">
