@@ -1341,11 +1341,12 @@ it unless this changes. -->
               <xref linkend="settings-screen" />.
             </para><para>
               The <literal>virtiogpu</literal> controller is a 2D
-              virtio-gpu display without VGA compatibility. The guest
-              needs a virtio-gpu driver to show anything, so the VM has
-              no display output until the guest operating system loads
-              that driver. It has no 3D acceleration, and the state of a
-              VM using it cannot be saved yet.
+              virtio-gpu display without VGA compatibility. Guests that
+              boot with the 64-bit EFI firmware get a display from the
+              firmware's virtio-gpu driver; with the BIOS the VM has no
+              display output until the guest operating system loads its
+              virtio-gpu driver. 3D acceleration is experimental, and the
+              state of a VM using it cannot be saved yet.
             </para></listitem>
         </varlistentry>
         <varlistentry>

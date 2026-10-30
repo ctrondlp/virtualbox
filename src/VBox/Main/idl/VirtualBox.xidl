@@ -7433,7 +7433,8 @@
     </const>
     <const name="VirtioGpu" value="5">
       <desc>virtio-gpu 2D paravirtual display device, for guests with a virtio-gpu
-        driver. It has no VGA compatibility and no 3D acceleration.</desc>
+        driver. It has no VGA compatibility. 3D acceleration is experimental and
+        needs the virtio-gpu renderer library, see the device configuration.</desc>
     </const>
   </enum>
 

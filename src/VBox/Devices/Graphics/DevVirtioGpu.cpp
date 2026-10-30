@@ -3247,6 +3247,8 @@ static DECLCALLBACK(void) vgpuR3Info(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, con
         pHlp->pfnPrintf(pHlp, "Venus: %s\n", pThisCC->pszVenusState ? pThisCC->pszVenusState : "off");
     vgpuR3StateUnlock(pDevIns, pThis);
 
+    virtioCoreR3ShmRegionsInfo(pDevIns, pHlp, &pThisCC->Virtio);
+
     /* The queue dump reads guest memory, so do it without the state lock. */
     for (uint16_t uVirtq = 0; uVirtq < VIRTIOGPU_VIRTQ_COUNT; uVirtq++)
     {

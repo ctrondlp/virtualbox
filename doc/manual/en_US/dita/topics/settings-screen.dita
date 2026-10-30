@@ -37,8 +37,8 @@
             <p><b outputclass="bold">VMSVGA:</b> Use this graphics controller to emulate a VMware SVGA graphics device. This is the default graphics controller for Linux guests.</p>
           </li>
           <li>
-            <p><b outputclass="bold">VirtioGpu:</b> Use this graphics controller to emulate a 2D virtio-gpu display device, for guests that have a virtio-gpu driver, such as recent Linux guests. It has no VGA compatibility, so the VM shows nothing until the guest OS loads its virtio-gpu driver.</p>
-            <p>3D acceleration is not supported for this graphics controller, and the state of a VM that uses it cannot be saved yet.</p>
+            <p><b outputclass="bold">VirtioGpu:</b> Use this graphics controller to emulate a 2D virtio-gpu display device, for guests that have a virtio-gpu driver, such as recent Linux guests. It has no VGA compatibility: guests that boot with the 64-bit EFI firmware get a display from the firmware's virtio-gpu driver, but with the BIOS the VM shows nothing until the guest OS loads its virtio-gpu driver.</p>
+            <p>3D acceleration is experimental for this graphics controller, and the state of a VM that uses it cannot be saved yet.</p>
           </li>
           <li>
             <p><b outputclass="bold">None:</b> Does not emulate a graphics adapter type.</p>
