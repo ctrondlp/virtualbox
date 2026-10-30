@@ -1144,6 +1144,13 @@ it unless this changes. -->
               graphics adapter variants which support it. This option
               has an effect only when the Guest Additions are installed.
               See <xref linkend="guestadd-video" />.
+            </para><para>
+              For the <literal>virtiogpu</literal> graphics controller
+              this gives Linux guests that have the Mesa Venus driver
+              access to the Vulkan capabilities of the host graphics
+              card. It loads the Venus renderer library into the VM
+              process; if the library cannot be loaded, the VM keeps a 2D
+              display and says why in the release log.
             </para></listitem>
         </varlistentry>
         <varlistentry>

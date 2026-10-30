@@ -528,9 +528,10 @@ bool UIMachineSettingsDisplay::validate(QList<UIValidationMessage> &messages)
     /* Special handling for MacOS guests, 3D is NOT available at all: */
     else if (m_strGuestOSTypeId.startsWith("MacOS"))
         m_f3DAccelerationSupported = false;
-    /* For the rest of guest OS types 3D is available for VMSVGA only: */
+    /* For the rest of guest OS types 3D is available for VMSVGA and for the virtio-gpu (Venus): */
     else
-        m_f3DAccelerationSupported = graphicsControllerTypeCurrent() == KGraphicsControllerType_VMSVGA;
+        m_f3DAccelerationSupported =    graphicsControllerTypeCurrent() == KGraphicsControllerType_VMSVGA
+                                     || graphicsControllerTypeCurrent() == KGraphicsControllerType_VirtioGpu;
 
     /* Additionally make sure 3D acceleration is one of the features for current graphical controller: */
     if (m_f3DAccelerationSupported)
@@ -543,6 +544,9 @@ bool UIMachineSettingsDisplay::validate(QList<UIValidationMessage> &messages)
             comPlatformProperties.GetSupportedGfxFeaturesForType(graphicsControllerTypeCurrent());
         m_f3DAccelerationSupported &= features.contains(KGraphicsFeature_Acceleration3D);
     }
+
+    /* The tool-tip of the check-box tells what it means for the virtio-gpu: */
+    m_pEditorDisplayScreenFeatures->setVirtioGpuMode(graphicsControllerTypeCurrent() == KGraphicsControllerType_VirtioGpu);
 
     /* Pass whether 3D acceleration is supported into Video Memory Editor: */
     m_pEditorVideoMemorySize->set3DAccelerationSupported(m_f3DAccelerationSupported);
@@ -557,7 +561,9 @@ bool UIMachineSettingsDisplay::validate(QList<UIValidationMessage> &messages)
         message.first = UITranslator::removeAccelMark(m_pTabWidget->tabText(0));
 
         /* Video RAM amount test: */
-        if (shouldWeWarnAboutLowVRAM() && !m_strGuestOSTypeId.isEmpty())
+        if (   shouldWeWarnAboutLowVRAM()
+            && !m_strGuestOSTypeId.isEmpty()
+            && graphicsControllerTypeCurrent() != KGraphicsControllerType_VirtioGpu) /* it does not use the video memory */
         {
             quint64 uNeedBytes = UIGuestOSTypeHelpers::requiredVideoMemory(m_strGuestOSTypeId, m_pEditorMonitorCount->value());
 
@@ -590,7 +596,9 @@ bool UIMachineSettingsDisplay::validate(QList<UIValidationMessage> &messages)
             if (graphicsControllerTypeCurrent() != graphicsControllerTypeRecommended())
             {
 #ifdef VBOX_WITH_3D_ACCELERATION
-                if (m_f3DAccelerationSupported && m_pEditorDisplayScreenFeatures->isEnabled3DAcceleration())
+                if (   m_f3DAccelerationSupported
+                    && m_pEditorDisplayScreenFeatures->isEnabled3DAcceleration()
+                    && graphicsControllerTypeCurrent() != KGraphicsControllerType_VirtioGpu)
                     message.second << tr("The virtual machine is configured to use 3D acceleration. This will work only if you "
                                          "pick a different graphics controller (%1). Either disable 3D acceleration or switch "
                                          "to required graphics controller type. The latter will be done automatically if you "

@@ -37,6 +37,7 @@
 UIDisplayScreenFeaturesEditor::UIDisplayScreenFeaturesEditor(QWidget *pParent /* = 0 */)
     : UIEditor(pParent)
     , m_fEnable3DAcceleration(false)
+    , m_fVirtioGpuMode(false)
     , m_pLabel(0)
     , m_pCheckBoxEnable3DAcceleration(0)
 {
@@ -75,6 +76,15 @@ void UIDisplayScreenFeaturesEditor::setMinimumLayoutIndent(int iIndent)
         m_pLayout->setColumnMinimumWidth(0, iIndent);
 }
 
+void UIDisplayScreenFeaturesEditor::setVirtioGpuMode(bool fOn)
+{
+    if (m_fVirtioGpuMode != fOn)
+    {
+        m_fVirtioGpuMode = fOn;
+        sltRetranslateUI();
+    }
+}
+
 void UIDisplayScreenFeaturesEditor::sltRetranslateUI()
 {
     if (m_pLabel)
@@ -82,8 +92,14 @@ void UIDisplayScreenFeaturesEditor::sltRetranslateUI()
     if (m_pCheckBoxEnable3DAcceleration)
     {
         m_pCheckBoxEnable3DAcceleration->setText(tr("&3D Acceleration"));
-        m_pCheckBoxEnable3DAcceleration->setToolTip(tr("The VM will be given access to the 3D graphics "
-                                                       "capabilities available on the host"));
+        if (m_fVirtioGpuMode)
+            m_pCheckBoxEnable3DAcceleration->setToolTip(tr("The VM will be given access to the Vulkan capabilities of the "
+                                                           "host graphics card through the virtio-gpu (Venus). This loads "
+                                                           "the Venus renderer library into the VM process and needs a "
+                                                           "Linux guest with the Mesa Venus driver."));
+        else
+            m_pCheckBoxEnable3DAcceleration->setToolTip(tr("The VM will be given access to the 3D graphics "
+                                                           "capabilities available on the host"));
     }
 }
 

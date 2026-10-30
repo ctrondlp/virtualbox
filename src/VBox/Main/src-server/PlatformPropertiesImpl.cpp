@@ -860,9 +860,17 @@ int PlatformProperties::s_getSupportedGraphicsControllerFeatures(PlatformArchite
 #endif
                     return VINF_SUCCESS;
 
+                case GraphicsControllerType_VirtioGpu:
+#ifdef VBOX_WITH_3D_ACCELERATION
+                    /* 3D acceleration is Vulkan through Venus; it loads the renderer library into the VM
+                       process, so it is only on when the user asks for it. */
+                    if (enmArchitecture == PlatformArchitecture_x86)
+                        vecSupportedGraphicsFeatures.push_back(GraphicsFeature_Acceleration3D);
+#endif
+                    return VINF_SUCCESS;
+
                 case GraphicsControllerType_VBoxVGA:
                 case GraphicsControllerType_QemuRamFB:
-                case GraphicsControllerType_VirtioGpu:
                     /* None supported. */
                     return VINF_SUCCESS;
 
