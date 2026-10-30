@@ -3591,7 +3591,19 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
     uint64_t fFeatures = VIRTIOGPU_FEATURES_OFFERED_2D;
     if (fVenus)
     {
-        if (GCPhysMmioBase != NIL_RTGCPHYS)
+        /* The host window needs trusted device helpers: the untrusted ones assert when called, which
+           would kill the VM.  Main marks the device trusted; a device created by hand through
+           extra data does not unless the Trusted key of the instance is set too. */
+        bool      fTrusted = false;
+        PCFGMNODE pCfgInst = pHlp->pfnCFGMGetParent(pCfg);
+        if (pCfgInst)
+            pHlp->pfnCFGMQueryBoolDef(pCfgInst, "Trusted", &fTrusted, false);
+        if (!fTrusted)
+        {
+            LogRel(("%s: Venus needs a trusted device (set the Trusted key of the instance), staying 2D\n", pThis->szInstance));
+            pThisCC->pszVenusState = "not available for an untrusted device";
+        }
+        else if (GCPhysMmioBase != NIL_RTGCPHYS)
         {
             LogRel(("%s: Venus needs the PCI transport, staying 2D\n", pThis->szInstance));
             pThisCC->pszVenusState = "not available with the virtio-mmio transport";
