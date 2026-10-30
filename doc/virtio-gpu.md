@@ -169,15 +169,23 @@ device counters stay balanced (every deferred fence is signalled).
   of a context at `CTX_DESTROY` and deleting their entries made the guest log unmap/unref/attach errors. The entries
   now stay as orphans (the window mapping and the library resource are released at `CTX_DESTROY`, later commands for
   them are answered OK).
-- **Open: the renderer fails a second type 4 allocation.** In the guest, `vkAllocateMemory` of a memory type 2 block
-  followed by a type 4 block (device local + host visible) on the same device makes the Venus ring fail on the host:
-  the guest aborts in `vn_ring_wait_seqno` at `vkDestroyInstance`, and when the guest maps such a block the blob
-  creation fails (`VERR_GENERAL_FAILURE`), after which the guest's attach/map/unmap/unref of the missing resource are
-  answered with `0x1203` (`response 0x1203 (command 0x202/0x208/0x209/0x102)` in the guest log). It reproduces with
-  no mapping at all (`dtest 1 2 0 2 1030 4`: two allocations of 1030 KiB, types 2 then 4), so it is in the
-  renderer library or the host driver and not in the device; 3 -> 4 and 4 -> 4 fail the same way, 4 -> 2, 2 -> 3
-  and 2 -> 2 do not, and 2,800 cycles of type 2 or type 4 alone, or 4 parallel processes, never fail. The renderer
-  log stays empty. llama.cpp, vkcube and vkmark are not affected. Not investigated further.
+- **Renderer problem found by it, with a driver cause, fixed in the renderer.** In the guest, `vkAllocateMemory` of a
+  memory type 2 block followed by a type 4 block (device local + host visible) on the same device made the Venus ring
+  fail on the host: the guest aborted in `vn_ring_wait_seqno` at `vkDestroyInstance`, and when the guest mapped such
+  a block the blob creation failed (`VERR_GENERAL_FAILURE`), after which the guest's attach/map/unmap/unref of the
+  missing resource got `0x1203` (`response 0x1203 (command 0x202/0x208/0x209/0x102)` in the guest log). It
+  reproduced with no mapping at all (`dtest 1 2 0 2 1030 4`) and, without VirtualBox, with a small host program
+  (`whvmap/hostalloc.c`): with an exportable (`OPAQUE_WIN32`) allocation the NVIDIA driver fails a device local + host
+  visible block with `VK_ERROR_OUT_OF_DEVICE_MEMORY` once an exportable system memory block exists (the other order
+  works, and so does a non-exportable one). The renderer forces export for host visible types, and the guest
+  allocates asynchronously, so it later refers to a memory object that was never created, which is fatal for the
+  context. The renderer (`patches/11-hide-device-local-host-visible-types.patch`, Windows only) now does not tell the
+  guest about device local + host visible types: it keeps the type index but drops the host bits, so the guest uses it
+  as plain device local memory. `VKR_KEEP_BAR_MEMORY` restores the old behaviour. After that the repro passes, the
+  stress phases show no aborted processes and no guest errors. The guest no longer sees resizable BAR VRAM as
+  mappable memory; uploads go through the system memory staging types, which are fast enough (3B model load 6 s).
+  `patches/12-log-context-fatal-site.patch` logs the source line whenever a context is made fatal (the log needs
+  `WINQ_DIAG=1`).
 - **Cursor.** `UPDATE_CURSOR` now hands the cursor image to Main (alpha cursor, hotspot, 64x64 from the Linux driver);
   `MOVE_CURSOR` is ignored because the position follows the host mouse. The alpha byte is used as the guest sends it:
   Linux creates every dumb buffer as an "X" format resource and puts an ARGB cursor image in it, so forcing the X
