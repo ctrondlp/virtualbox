@@ -158,6 +158,31 @@ device counters stay balanced (every deferred fence is signalled).
   reports "failed to choose pdev" and falls back to llvmpipe. This is in the guest Mesa Venus driver, not in the
   device. `LIBGL_ALWAYS_SOFTWARE=1` makes Zink pick the CPU device instead.
 
+## Lifecycle stress tests and the cursor (2026-10-30)
+
+- **Stress script** (`stress-venus.sh` and `vkstress.c`, `dtest.c`, `maptest.c` in the testkit): parallel Vulkan
+  processes that churn Venus contexts and host window mappings (orderly teardown, device destroyed with memory
+  mapped, exit with everything live), `kill -9`, a driver unbind/bind (device reset) under load, VM pause/resume and a
+  VM reset under load. After every phase the device state was empty again (no contexts, blobs or window mappings) and
+  the VM kept running. The device did not crash or hang in any phase.
+- **Found and fixed by it:** Linux closes its buffer objects after it destroyed the context, so releasing the blobs
+  of a context at `CTX_DESTROY` and deleting their entries made the guest log unmap/unref/attach errors. The entries
+  now stay as orphans (the window mapping and the library resource are released at `CTX_DESTROY`, later commands for
+  them are answered OK).
+- **Open: the renderer fails a second type 4 allocation.** In the guest, `vkAllocateMemory` of a memory type 2 block
+  followed by a type 4 block (device local + host visible) on the same device makes the Venus ring fail on the host:
+  the guest aborts in `vn_ring_wait_seqno` at `vkDestroyInstance`, and when the guest maps such a block the blob
+  creation fails (`VERR_GENERAL_FAILURE`), after which the guest's attach/map/unmap/unref of the missing resource are
+  answered with `0x1203` (`response 0x1203 (command 0x202/0x208/0x209/0x102)` in the guest log). It reproduces with
+  no mapping at all (`dtest 1 2 0 2 1030 4`: two allocations of 1030 KiB, types 2 then 4), so it is in the
+  renderer library or the host driver and not in the device; 3 -> 4 and 4 -> 4 fail the same way, 4 -> 2, 2 -> 3
+  and 2 -> 2 do not, and 2,800 cycles of type 2 or type 4 alone, or 4 parallel processes, never fail. The renderer
+  log stays empty. llama.cpp, vkcube and vkmark are not affected. Not investigated further.
+- **Cursor.** `UPDATE_CURSOR` now hands the cursor image to Main (alpha cursor, hotspot, 64x64 from the Linux driver);
+  `MOVE_CURSOR` is ignored because the position follows the host mouse. The alpha byte is used as the guest sends it:
+  Linux creates every dumb buffer as an "X" format resource and puts an ARGB cursor image in it, so forcing the X
+  formats opaque showed a square pointer.
+
 ## Independent review (2026-10-29)
 
 Four read-only reviews of the code (memory window, device, renderer wrapper, Main/VirtioCore/firmware config) were

@@ -2534,7 +2534,7 @@ static void vgpuR3CursorHide(PVIRTIOGPUCC pThisCC)
 /**
  * VIRTIOGPU_CMD_UPDATE_CURSOR: hands the cursor image to Main.
  *
- * The cursor image is a small 2D resource whose shadow holds BGRA pixels.  The
+ * The cursor image is a small 2D resource whose shadow holds BGRA pixels (the alpha byte as sent by the guest).  The
  * position of the pointer is not used: the guest follows the host mouse
  * (absolute pointing device), so only the shape and the hotspot matter.
  * Resource 0 hides the cursor.
@@ -2578,21 +2578,12 @@ static void vgpuR3CursorUpdate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUC
         if (pbShape)
         {
             memset(pbShape, 0xff, cbAnd);
-            /* Formats without an alpha channel have undefined alpha bytes: make them opaque. */
-            bool const fOpaque =    pRes->uFormat == VIRTIOGPU_FORMAT_B8G8R8X8_UNORM
-                                 || pRes->uFormat == VIRTIOGPU_FORMAT_X8R8G8B8_UNORM
-                                 || pRes->uFormat == VIRTIOGPU_FORMAT_X8B8G8R8_UNORM
-                                 || pRes->uFormat == VIRTIOGPU_FORMAT_R8G8B8X8_UNORM;
+            /* The alpha byte is used as it is, whatever format the resource was declared with: Linux creates
+               every dumb buffer as an "X" format resource and puts an ARGB cursor image into it, and the
+               virtio-gpu devices of other hypervisors do the same. */
             for (uint32_t iRow = 0; iRow < cy; iRow++)
-            {
-                uint32_t       *pu32Dst = (uint32_t *)(pbShape + cbAnd + (size_t)iRow * cx * sizeof(uint32_t));
-                uint32_t const *pu32Src = (uint32_t const *)(pRes->pbShadow + (size_t)iRow * pRes->cbPitch);
-                if (fOpaque)
-                    for (uint32_t i = 0; i < cx; i++)
-                        pu32Dst[i] = pu32Src[i] | UINT32_C(0xff000000);
-                else
-                    memcpy(pu32Dst, pu32Src, (size_t)cx * sizeof(uint32_t));
-            }
+                memcpy(pbShape + cbAnd + (size_t)iRow * cx * sizeof(uint32_t),
+                       pRes->pbShadow + (size_t)iRow * pRes->cbPitch, (size_t)cx * sizeof(uint32_t));
             xHot = RT_MIN(pReq->xHot, cx - 1);
             yHot = RT_MIN(pReq->yHot, cy - 1);
         }
