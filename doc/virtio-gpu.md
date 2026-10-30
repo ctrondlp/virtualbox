@@ -104,6 +104,28 @@ rings one doorbell per kick. Measurements are in `vbox-devtools/testkit/gpu-2026
 - Anything that looks like a vulnerability found while working on this (in this code or in existing VirtualBox
   code) is deliberately not described here; see the reporting rules at the top of this section.
 
+## Results with the real renderer (2026-10-30)
+
+Venus works end to end on this machine (Windows host, Hyper-V backend, RTX 5070 + Intel iGPU, patched winq-emu
+virglrenderer). A Fedora KDE live guest sees the host GPUs as Vulkan devices (`Virtio-GPU Venus (NVIDIA GeForce
+RTX 5070)`, Vulkan 1.4, 11.66 GiB device-local heap, 4 GiB maximum storage buffer), `vkcube` renders on it, and the
+device counters stay balanced (every deferred fence is signalled).
+
+- **LLM inference in a guest** (llama.cpp prebuilt Vulkan build, guest CPU = 4 vCPUs, `llama-bench`):
+  Qwen2.5-0.5B Q4: GPU 5218 tok/s prompt, 73.6 tok/s generation; CPU 483 / 107.8.
+  Qwen2.5-3B Q4_K_M: GPU 3970 / 48.8; CPU 97 / 23.5 (41x prompt, 2.1x generation).
+  Loading the 2 GB of weights through the device took about two minutes (not profiled).
+- **Second-GPU mode**: the guest can have VMSVGA as its display and the virtio-gpu device as an extra compute GPU.
+  It is configured through VBoxInternal extra data (`Devices/virtio-gpu/0/Config/Venus`, `RendererPath`,
+  `HostVisibleSize`) and needs `Devices/virtio-gpu/0/Trusted` = 1, otherwise the device stays 2D.
+  Restrict the host loader to one GPU with `VBoxManage startvm <vm> --putenv=VK_LOADER_DRIVERS_SELECT=nv-vk64.json`.
+- **OpenGL**: VMSVGA scores about 15,100 in glmark2 off-screen in the same guest, software rendering about 1,440.
+  Zink over Venus works only for the Intel Venus device (about 1,700): Zink cannot pick the NVIDIA Venus device
+  because Venus devices expose no DRM identity (`MESA: ZINK: failed to choose pdev`).
+- **Not working yet**: presenting Venus windows to a software-rendered guest compositor (the compositor rejects
+  the dmabufs: `importing the supplied dmabufs failed`), so `vkmark` fails; `vkcube` works. The device is idle in
+  that case, so it is a guest compositor / buffer sharing interaction and not a device error.
+
 ## Independent review (2026-10-29)
 
 Four read-only reviews of the code (memory window, device, renderer wrapper, Main/VirtioCore/firmware config) were
