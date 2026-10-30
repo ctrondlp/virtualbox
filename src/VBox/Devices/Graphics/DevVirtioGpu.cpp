@@ -3594,10 +3594,7 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
         /* The host window needs trusted device helpers: the untrusted ones assert when called, which
            would kill the VM.  Main marks the device trusted; a device created by hand through
            extra data does not unless the Trusted key of the instance is set too. */
-        bool      fTrusted = false;
-        PCFGMNODE pCfgInst = pHlp->pfnCFGMGetParent(pCfg);
-        if (pCfgInst)
-            pHlp->pfnCFGMQueryBoolDef(pCfgInst, "Trusted", &fTrusted, false);
+        bool const fTrusted = PDMDevHlpIsTrusted(pDevIns);
         if (!fTrusted)
         {
             LogRel(("%s: Venus needs a trusted device (set the Trusted key of the instance), staying 2D\n", pThis->szInstance));

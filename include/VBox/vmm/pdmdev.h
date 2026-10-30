@@ -4774,6 +4774,16 @@ typedef struct PDMDEVHLPR3
     DECLR3CALLBACKMEMBER(int, pfnMmio2UnmapHostRange,(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
                                                       RTGCPHYS cb));
 
+    /**
+     * Tells whether the device may call the trusted-only helpers, such as the
+     * MMIO2 host window ones.  A device that needs one of those and is not
+     * trusted should degrade at construction time instead of asserting later.
+     *
+     * @returns true if the device is trusted.
+     * @param   pDevIns     The device instance.
+     */
+    DECLR3CALLBACKMEMBER(bool, pfnIsTrusted,(PPDMDEVINS pDevIns));
+
     /** Space reserved for future members.
      * @{ */
     DECLR3CALLBACKMEMBER(void, pfnReserved3,(void));
@@ -7044,6 +7054,14 @@ DECLINLINE(int) PDMDevHlpMmio2MapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hM
 DECLINLINE(int) PDMDevHlpMmio2UnmapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hMmio2, RTGCPHYS offRegion, RTGCPHYS cb)
 {
     return pDevIns->pHlpR3->pfnMmio2UnmapHostRange(pDevIns, hMmio2, offRegion, cb);
+}
+
+/**
+ * @copydoc PDMDEVHLPR3::pfnIsTrusted
+ */
+DECLINLINE(bool) PDMDevHlpIsTrusted(PPDMDEVINS pDevIns)
+{
+    return pDevIns->pHlpR3->pfnIsTrusted(pDevIns);
 }
 
 #endif /* IN_RING3 */

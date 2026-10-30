@@ -458,6 +458,24 @@ static DECLCALLBACK(int) pdmR3DevHlp_Mmio2ChangeRegionNo(PPDMDEVINS pDevIns, PGM
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnIsTrusted} */
+static DECLCALLBACK(bool) pdmR3DevHlp_IsTrusted(PPDMDEVINS pDevIns)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    RT_NOREF(pDevIns);
+    return true;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnIsTrusted} */
+static DECLCALLBACK(bool) pdmR3DevHlp_Untrusted_IsTrusted(PPDMDEVINS pDevIns)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    RT_NOREF(pDevIns);
+    return false;
+}
+
+
 /** @interface_method_impl{PDMDEVHLPR3,pfnMmio2MapHostRange} */
 static DECLCALLBACK(int) pdmR3DevHlp_Mmio2MapHostRange(PPDMDEVINS pDevIns, PGMMMIO2HANDLE hRegion, RTGCPHYS offRegion,
                                                        void *pvHost, RTGCPHYS cb, uint32_t fFlags)
@@ -5434,6 +5452,7 @@ const PDMDEVHLPR3 g_pdmR3DevHlpTrusted =
     pdmR3DevHlp_CpuGetGuestScalableBusFrequency,
     pdmR3DevHlp_Mmio2MapHostRange,
     pdmR3DevHlp_Mmio2UnmapHostRange,
+    pdmR3DevHlp_IsTrusted,
     0,
     0,
     0,
@@ -5840,6 +5859,7 @@ const PDMDEVHLPR3 g_pdmR3DevHlpTracing =
     pdmR3DevHlp_CpuGetGuestScalableBusFrequency,
     pdmR3DevHlp_Mmio2MapHostRange,
     pdmR3DevHlp_Mmio2UnmapHostRange,
+    pdmR3DevHlp_IsTrusted,
     0,
     0,
     0,
@@ -6598,6 +6618,7 @@ const PDMDEVHLPR3 g_pdmR3DevHlpUnTrusted =
     pdmR3DevHlp_CpuGetGuestScalableBusFrequency,
     pdmR3DevHlp_Untrusted_Mmio2MapHostRange,
     pdmR3DevHlp_Untrusted_Mmio2UnmapHostRange,
+    pdmR3DevHlp_Untrusted_IsTrusted,
     0,
     0,
     0,
