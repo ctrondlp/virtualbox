@@ -450,6 +450,8 @@ typedef struct VIRTIOGPUPENDING
     uint32_t                uRingIdx;
     /** The fence id. */
     uint64_t                uFenceId;
+    /** The reset generation the command was taken in (VIRTIOGPU::uResetGen). */
+    uint32_t                uGen;
     /** Size of the response in abResp. */
     size_t                  cbResp;
     /** The response to write when the fence retired. */
@@ -471,7 +473,10 @@ typedef struct VIRTIOGPUWORKER
     /** Set when the worker was notified and must look at its queue again. */
     bool volatile           fNotified;
     /** Explicit padding. */
-    bool                    afPadding[6];
+    bool                    afPadding[2];
+    /** The reset generation sampled before the worker took its current buffer (VIRTIOGPU::uResetGen);
+     * only the worker itself uses it. */
+    uint32_t                uCmdGen;
 } VIRTIOGPUWORKER;
 /** Pointer to the shared worker state. */
 typedef VIRTIOGPUWORKER *PVIRTIOGPUWORKER;
@@ -510,6 +515,9 @@ typedef struct VIRTIOGPU
     bool volatile           fQuiescing;
     /** Set by a device reset: the control worker must free all resources (and the 3D state). */
     bool volatile           fDropResources;
+    /** Counts the device resets.  A command that started in an older generation must not touch the
+     * rings of a driver that has initialized the device again since. */
+    uint32_t volatile       uResetGen;
     /** Set by the fence callback: the control worker must look at the fenced commands. */
     bool volatile           fFencesSignaled;
     /** Number of workers currently inside their processing section. */
@@ -1538,8 +1546,16 @@ static int vgpuR3ReturnBufWrite(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PCVIRTIOSG
  * @param   cbResp      The response size, 0 if none.
  */
 static void vgpuR3CmdComplete(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, uint16_t uVirtq,
-                              PVIRTQBUF pVirtqBuf, void *pvResp, size_t cbResp)
+                              PVIRTQBUF pVirtqBuf, void *pvResp, size_t cbResp, uint32_t uGen)
 {
+    /* The device was reset since the command was taken: the buffer belongs to rings that are gone, and the
+       driver may have set the device up again, so neither write the response nor put the buffer on the new ring. */
+    if (uGen != ASMAtomicReadU32(&pThis->uResetGen))
+    {
+        LogRelMax(16, ("%s: Dropping the completion of a command from before a device reset\n", pThis->szInstance));
+        return;
+    }
+
     size_t cbUsed = 0;
     if (cbResp)
     {
@@ -1559,8 +1575,10 @@ static void vgpuR3CmdComplete(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC
 
     PRTCRITSECT pCritSect = &pThisCC->aWorkers[uVirtq].CritSectVirtq;
     RTCritSectEnter(pCritSect);
-    /* The driver may have reset the device while the command ran; its rings are gone then. */
-    if (pThis->Virtio.fDeviceStatus & VIRTIO_STATUS_DRIVER_OK)
+    /* The driver may have reset the device while the command ran; its rings are gone then.  Check the
+       generation again under the queue lock, a reset can come between the check above and here. */
+    if (   (pThis->Virtio.fDeviceStatus & VIRTIO_STATUS_DRIVER_OK)
+        && uGen == ASMAtomicReadU32(&pThis->uResetGen))
     {
         int rc;
         if (cbUsed)
@@ -1607,7 +1625,8 @@ static uint32_t vgpuR3RespFromRendererRc(int rc)
  */
 static void vgpuR3PendingComplete(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPUPENDING pPend)
 {
-    vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CONTROL, pPend->pVirtqBuf, pPend->abResp, pPend->cbResp);
+    vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CONTROL, pPend->pVirtqBuf, pPend->abResp, pPend->cbResp,
+                      pPend->uGen);
     virtioCoreR3VirtqBufRelease(&pThis->Virtio, pPend->pVirtqBuf);
     ASMAtomicDecU32(&pThisCC->cPending);
     RTMemFree(pPend);
@@ -1727,6 +1746,7 @@ static bool vgpuR3FenceDefer(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC 
     pPend->iCtx      = iCtx;
     pPend->uRingIdx  = uRingIdx;
     pPend->uFenceId  = pReqHdr->uFenceId;
+    pPend->uGen      = pThis->aWorkers[VIRTIOGPU_VIRTQ_CONTROL].uCmdGen;
     pPend->cbResp    = cbResp;
     memcpy(pPend->abResp, pvResp, cbResp);
     virtioCoreR3VirtqBufRetain(pVirtqBuf);
@@ -1960,6 +1980,8 @@ static uint32_t vgpuR3CmdCtxCreate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIO
  * Parked commands of the context are completed: their fences never retire
  * now, and the guest stopped waiting for them when it destroyed the context.
  *
+ * The blob resources the context created are released first (see below).
+ *
  * @returns Response type.
  * @param   pDevIns     The device instance.
  * @param   pThis       The shared device state.
@@ -1972,6 +1994,23 @@ static uint32_t vgpuR3CmdCtxDestroy(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTI
     uint32_t const iCtx = vgpuR3ContextLookup(pThisCC, pReqHdr->uCtxId);
     if (iCtx == UINT32_MAX)
         return VIRTIOGPU_RESP_ERR_INVALID_CONTEXT_ID;
+
+    /* The library may free the memory of the blobs a context created when the context goes away, and the guest
+       decides the order of its commands (Linux releases the buffer objects first, a hostile guest need not).
+       So take the blobs of this context out of the host visible window and release them before the context,
+       or the guest could keep reaching host memory that has been freed and reused.  If a blob cannot be taken
+       out of the window, the context stays and the guest gets an error. */
+    PVIRTIOGPURESOURCE pRes, pResNext;
+    RTListForEachSafe(&pThisCC->ListResources, pRes, pResNext, VIRTIOGPURESOURCE, Node)
+    {
+        if (pRes->fBlob && pRes->idCtxCreator == pReqHdr->uCtxId)
+        {
+            uint32_t const uRespType = vgpuR3BlobUnref(pDevIns, pThis, pThisCC, pRes);
+            if (uRespType != VIRTIOGPU_RESP_OK_NODATA)
+                return uRespType;
+        }
+    }
+
     vgpuR3ContextDestroy(pDevIns, pThis, pThisCC, iCtx, false /*fDropPending*/);
     return VIRTIOGPU_RESP_OK_NODATA;
 }
@@ -2426,7 +2465,8 @@ static void vgpuR3CtrlCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGP
         && uReq.Hdr.uCtxId != 0)
         fParked = vgpuR3FenceDefer(pDevIns, pThis, pThisCC, pVirtqBuf, &uReq.Hdr, pvResp, cbResp);
     if (!fParked)
-        vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CONTROL, pVirtqBuf, pvResp, cbResp);
+        vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CONTROL, pVirtqBuf, pvResp, cbResp,
+                          pThis->aWorkers[VIRTIOGPU_VIRTQ_CONTROL].uCmdGen);
     RTMemFree(pbRespAlloc);
 }
 
@@ -2445,7 +2485,8 @@ static void vgpuR3CtrlCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGP
 static void vgpuR3CursorCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTQBUF pVirtqBuf)
 {
     STAM_REL_COUNTER_INC(&pThis->StatCursorCmds);
-    vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CURSOR, pVirtqBuf, NULL, 0);
+    vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CURSOR, pVirtqBuf, NULL, 0,
+                      pThis->aWorkers[VIRTIOGPU_VIRTQ_CURSOR].uCmdGen);
 }
 
 
@@ -2574,6 +2615,10 @@ static DECLCALLBACK(int) vgpuR3WorkerThread(PPDMDEVINS pDevIns, PPDMTHREAD pThre
             vgpuR3ResourcesDestroyAll(pDevIns, pThis, pThisCC);
         }
 
+        /* Sample the reset generation before looking at the queue, so a reset after this point is noticed
+           when the command completes. */
+        pWorker->uCmdGen = ASMAtomicReadU32(&pThis->uResetGen);
+
         if (vgpuR3IsVirtqReady(pThis, uVirtq))
         {
             /* Complete the fenced commands whose fence retired.  The flag is only
@@ -2669,6 +2714,7 @@ static DECLCALLBACK(void) vgpuR3StatusChanged(PVIRTIOCORE pVirtio, PVIRTIOCORECC
     else
     {
         ASMAtomicWriteBool(&pThis->fVirtioReady, false);
+        ASMAtomicIncU32(&pThis->uResetGen);
         pThis->fNegotiatedFeatures = 0;
         pThis->Config.fEventsRead  = 0;
 
