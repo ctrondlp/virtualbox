@@ -17,6 +17,12 @@ This is a fork of VirtualBox (Oracle's open source repository) with these kinds 
 5. **Correctness fixes** in the instruction emulator, the guest CPU model, the Hyper-V back end and the settings API,
    found along the way.
 
+**Where the code is:** all of the work described here has landed on the
+[`integration`](https://github.com/ctrondlp/virtualbox/tree/integration) branch of this fork, which is the branch to build
+and try (see [Build it yourself](building.html)). The branch names on the other pages are the individual feature branches
+that were merged into it (they are not all published separately, but their commits are in `integration`); the stand-alone ones are being prepared for upstream one by one. `main` is VirtualBox's own code
+as of the last sync, and `showcase` only holds this site.
+
 These changes are meant to go back into VirtualBox, see [Upstream](#upstream-we-want-these-changes-in-virtualbox).
 Everything on this site was measured on one machine, and the pages say how. Nothing here is endorsed by or affiliated
 with Oracle; VirtualBox is Oracle's trademark and the code stays under its original license.
