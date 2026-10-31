@@ -111,6 +111,12 @@ Fixes found along the way (a wrong source register in two AVX conversions, a rel
 setting that wrongly turned the APIC off), and a few test tools are in the
 [full list of changes](changes.html), generated from git so it stays accurate.
 
+## Build it yourself
+
+This can be built and run locally. An unofficial build runs without the VirtualBox kernel drivers, so bridged, host-only and
+internal networking and USB passthrough are not available (plain NAT works). The [build page](building.html) lists what
+does not work and what differs.
+
 ## How these numbers were made
 
 The guests ran under the development build without the VirtualBox kernel driver, which is how VirtualBox runs on this
