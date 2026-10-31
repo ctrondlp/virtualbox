@@ -2319,14 +2319,29 @@ DECLINLINE(VBOXSTRICTRC) virtioDeviceCfgRead(PPDMDEVINS pDevIns, PVIRTIOCORE pVi
  *
  * This MMIO handler specifically supports the VIRTIO_PCI_CAP_PCI_CFG capability defined
  * in the VirtIO 1.0 specification, section 4.1.4.7, and as such is restricted to reads
- * of 1, 2 or 4 bytes, only.
+ * of 1, 2 or 4 bytes.  Wider accesses are split into dwords, other sizes read as all ones.
  *
  */
 static DECLCALLBACK(VBOXSTRICTRC) virtioMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
 {
     PVIRTIOCORE   pVirtio   = PDMINS_2_DATA(pDevIns, PVIRTIOCORE);
     PVIRTIOCORECC pVirtioCC = PDMINS_2_DATA_CC(pDevIns, PVIRTIOCORECC);
-    AssertReturn(cb == 1 || cb == 2 || cb == 4, VINF_IOM_MMIO_UNUSED_FF);
+    if (RT_UNLIKELY(cb != 1 && cb != 2 && cb != 4))
+    {
+        /* The specification only has 8, 16 and 32 bit accesses to these structures (4.1.3.1), but the guest decides
+           what its instructions do.  Treat a wider access like a bus would, as a series of dwords.  Anything else
+           reads as all ones.  An error status here would take the whole VM down. */
+        if (cb > 4 && !(cb & 3))
+        {
+            VBOXSTRICTRC rcStrict = VINF_SUCCESS;
+            for (unsigned offPart = 0; offPart < cb && rcStrict == VINF_SUCCESS; offPart += 4)
+                rcStrict = virtioMmioRead(pDevIns, pvUser, off + offPart, (uint8_t *)pv + offPart, 4);
+            return rcStrict;
+        }
+        ASSERT_GUEST_MSG_FAILED(("Unsupported read access size to mapped capabilities region: off=%RGp cb=%u\n", off, cb));
+        memset(pv, 0xFF, cb);
+        return VINF_SUCCESS;
+    }
     Assert(pVirtio == (PVIRTIOCORE)pvUser); RT_NOREF(pvUser);
 
     STAM_PROFILE_ADV_START(&pVirtio->CTX_SUFF(StatRead), a);
@@ -2363,13 +2378,25 @@ static DECLCALLBACK(VBOXSTRICTRC) virtioMmioRead(PPDMDEVINS pDevIns, void *pvUse
  *
  * This MMIO handler specifically supports the VIRTIO_PCI_CAP_PCI_CFG capability defined
  * in the VirtIO 1.0 specification, section 4.1.4.7, and as such is restricted to writes
- * of 1, 2 or 4 bytes, only.
+ * of 1, 2 or 4 bytes.  Wider accesses are split into dwords, other sizes are ignored.
  */
 static DECLCALLBACK(VBOXSTRICTRC) virtioMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
 {
     PVIRTIOCORE   pVirtio   = PDMINS_2_DATA(pDevIns, PVIRTIOCORE);
     PVIRTIOCORECC pVirtioCC = PDMINS_2_DATA_CC(pDevIns, PVIRTIOCORECC);
-    AssertReturn(cb == 1 || cb == 2 || cb == 4, VERR_INVALID_PARAMETER);
+    if (RT_UNLIKELY(cb != 1 && cb != 2 && cb != 4))
+    {
+        /* See virtioMmioRead: split wider accesses into dwords, ignore the rest, never fail. */
+        if (cb > 4 && !(cb & 3))
+        {
+            VBOXSTRICTRC rcStrict = VINF_SUCCESS;
+            for (unsigned offPart = 0; offPart < cb && rcStrict == VINF_SUCCESS; offPart += 4)
+                rcStrict = virtioMmioWrite(pDevIns, pvUser, off + offPart, (uint8_t const *)pv + offPart, 4);
+            return rcStrict;
+        }
+        ASSERT_GUEST_MSG_FAILED(("Unsupported write access size to mapped capabilities region: off=%RGp cb=%u\n", off, cb));
+        return VINF_SUCCESS;
+    }
     Assert(pVirtio == (PVIRTIOCORE)pvUser); RT_NOREF(pvUser);
     STAM_PROFILE_ADV_START(&pVirtio->CTX_SUFF(StatWrite), a);
 
