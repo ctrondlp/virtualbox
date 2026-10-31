@@ -1,0 +1,32 @@
+main:
+  - title: "Home"
+    url: /
+  - title: "Speed"
+    url: /speed.html
+  - title: "virtio-gpu"
+    url: /virtio-gpu.html
+  - title: "macOS"
+    url: /macos.html
+  - title: "CPU"
+    url: /cpu.html
+  - title: "Build it"
+    url: /building.html
+  - title: "All changes"
+    url: /changes.html
+pages:
+  - title: "Pages"
+    children:
+      - title: "Home"
+        url: /
+      - title: "Speed"
+        url: /speed.html
+      - title: "virtio-gpu"
+        url: /virtio-gpu.html
+      - title: "macOS guests"
+        url: /macos.html
+      - title: "Guest CPU features"
+        url: /cpu.html
+      - title: "Build it yourself"
+        url: /building.html
+      - title: "All changes"
+        url: /changes.html

@@ -1,9 +1,8 @@
 ---
-layout: default
+layout: single
+classes: wide
 title: Speed
 ---
-
-# Speed
 
 Each item is one feature branch (see [all changes](changes.html)). The numbers are medians or ranges of repeated runs of
 the same guest on the same host, with the change off and on. "Per second" figures are what a small guest benchmark

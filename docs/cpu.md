@@ -1,9 +1,8 @@
 ---
-layout: default
+layout: single
+classes: wide
 title: Guest CPU features
 ---
-
-# Guest CPU features
 
 VirtualBox hides CPU instruction set extensions from a guest unless its CPUID sanitizer has been taught about them, so
 guest kernels, crypto libraries and inference libraries take their slower code paths even when the host CPU could run

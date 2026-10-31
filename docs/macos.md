@@ -1,9 +1,8 @@
 ---
-layout: default
+layout: single
+classes: wide
 title: macOS guests
 ---
-
-# macOS guests
 
 VirtualBox only knows macOS guest types up to 10.13 and has no support for running newer releases on a PC that is not a Mac.
 This fork adds the missing pieces so that macOS 10.14 to 26 (Intel builds) can boot, and finds why they booted so slowly on

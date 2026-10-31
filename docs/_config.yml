@@ -1,9 +1,28 @@
 title: VirtualBox fork
 description: Faster VirtualBox on Hyper-V hosts, macOS guests, and a virtio-gpu device that gives Linux guests Vulkan on the host GPU
-theme: jekyll-theme-cayman
-show_downloads: false
+remote_theme: "mmistakes/minimal-mistakes@4.28.1"
+minimal_mistakes_skin: dark
+plugins:
+  - jekyll-remote-theme
+  - jekyll-include-cache
+  - jekyll-seo-tag
 markdown: kramdown
 kramdown:
   input: GFM
+repository: ctrondlp/virtualbox
 exclude:
   - _tools
+footer:
+  links:
+    - label: "GitHub"
+      icon: "fab fa-fw fa-github"
+      url: "https://github.com/ctrondlp/virtualbox"
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: single
+      classes: wide
+      author_profile: false
+      sidebar:
+        nav: "pages"

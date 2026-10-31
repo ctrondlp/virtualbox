@@ -1,9 +1,8 @@
 ---
-layout: default
-title: Home
+layout: single
+classes: wide
+title: "What this fork adds"
 ---
-
-# What this fork adds
 
 This is a fork of VirtualBox (Oracle's open source repository) with these kinds of work:
 
