@@ -1,6 +1,6 @@
 #!/bin/bash
-# Regenerates docs/changes.md from git: one row per merged feature branch, grouped by area, with the commit
-# count, the files changed and the lines added/removed against upstream main.
+# Regenerates docs/changes.md from git: one row per merged feature branch, grouped by area, with what it does
+# and where it stands.  The page does not state commit counts or line counts.
 #
 # Usage (from the repository root):  bash docs/_tools/gen-changes.sh [base-ref]
 # base-ref defaults to origin/main.  The branch refs must exist in this repository.
@@ -61,7 +61,7 @@ Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-test-
     echo
     echo "Generated from git by \`docs/_tools/gen-changes.sh\` against \`$BASE\`. One row per feature branch that is merged into the"
     echo 'integration branch. **Planned for upstream** means the change is written up as a stand-alone contribution that will be sent to VirtualBox; **local** means it stays'
-    echo 'in this fork. "Size" is the number of commits, files changed and lines added/removed against upstream.'
+    echo 'in this fork.'
     echo
     area=
     echo "$ROWS" | while IFS='|' read -r a b st par desc; do
@@ -74,23 +74,16 @@ Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-test-
             [ -n "$area" ] && echo
             echo "## $a"
             echo
-            echo '| Branch | What it does | Size | Status |'
-            echo '|---|---|---|---|'
+            echo '| Branch | What it does | Status |'
+            echo '|---|---|---|'
             area=$a
         fi
         base=$BASE
         [ -n "$par" ] && base=$par
         # the first commit of the branch describes it best (a later one is often just the changelog line)
         subj=$(git log --reverse --no-merges --format=%s "$base..$b" | head -1 | sed 's/, github:gh-[0-9A-Z]*$//; s/|/\\|/g')
-        n=$(git rev-list --count --no-merges "$base..$b")
-        stat=$(git diff --shortstat "$base...$b" | sed 's/^ *//')
-        [ "$n" = 1 ] && cw=commit || cw=commits
         [ -n "$desc" ] && subj=$desc
-        files=$(echo "$stat" | sed -n 's/^\([0-9]*\) files\? changed.*/\1/p')
-        [ "${files:-0}" = 1 ] && fw=file || fw=files
-        ins=$(echo "$stat" | sed -n 's/.* \([0-9]*\) insertions\?(+).*/\1/p')
-        del=$(echo "$stat" | sed -n 's/.* \([0-9]*\) deletions\?(-).*/\1/p')
-        echo "| \`$b\` | $subj | ${n} ${cw}, ${files:-0} ${fw}, +${ins:-0} -${del:-0} | $st |"
+        echo "| \`$b\` | $subj | $st |"
     done
 } > "$OUT"
 echo "wrote $OUT"
