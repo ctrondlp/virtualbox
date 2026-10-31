@@ -23,7 +23,7 @@ in this fork. "Size" is the number of commits, files changed and lines added/rem
 | `nem-win-gim-xcpt-narrowing` | VMM/NEM/win: Intercept #UD and #GP only when needed | 1 commit, 2 files, +33 -15 | Planned for upstream |
 | `726-nem-timer-kick` | VMM/NEM/win: Get the timer EMT out of Hyper-V when a timer is due | 2 commits, 3 files, +250 -6 | Planned for upstream (targets issue [#726](https://github.com/VirtualBox/virtualbox/issues/726)) |
 | `iprt-win-ecoqos-optout` | IPRT/win: Opt VM processes out of power throttling (EcoQoS) | 2 commits, 4 files, +767 -2 | Planned for upstream |
-| `iprt-win-highres-waits` | IPRT/win: High resolution timed waits for semaphores in VM processes | 1 commit, 9 files, +285 -9 | local |
+| `iprt-win-highres-waits` | IPRT/win: High resolution timed waits for semaphores in VM processes | 1 commit, 9 files, +285 -9 | local: the gain was measured only without the kernel driver, so there is no case for official builds ([why](speed.html#6-high-resolution-waits)) |
 
 ## Correctness fixes
 
@@ -40,7 +40,7 @@ in this fork. "Size" is the number of commits, files changed and lines added/rem
 
 | Branch | What it does | Size | Status |
 |---|---|---|---|
-| `virtio-gpu-device` | A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page) | 30 commits, 50 files, +7729 -50 | local |
+| `virtio-gpu-device` | A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page) | 30 commits, 50 files, +7729 -50 | local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html)) |
 | `vmsvga-dx11-gpu-select` | Devices/Graphics/VMSVGA: Create the DX11 device on the high performance GPU, selectable with VMSVGA3dAdapter | 1 commit, 3 files, +225 -3 | Planned for upstream |
 | `devvga-wide-scanline` | DevVGA: Check all pages of a scanline for changes in wide display modes | 1 commit, 2 files, +36 -17 | Planned for upstream |
 
@@ -55,22 +55,22 @@ in this fork. "Size" is the number of commits, files changed and lines added/rem
 
 | Branch | What it does | Size | Status |
 |---|---|---|---|
-| `macos-guest-types` | Main/macOS: Add guest OS types for macOS 10.14 to 26 with Mac platform defaults | 1 commit, 9 files, +324 -3 | local |
-| `macos-cpum-hooks` | VMM/CPUM: Add ForceIntelFamilyModelStep and fudge MSR_CORE_THREAD_COUNT | 1 commit, 2 files, +34 -2 | local |
-| `macos-smc-fixes` | Devices/SMC: Fix key enumeration by index and key writes, add MSSP | 1 commit, 2 files, +110 -9 | local |
-| `macos-smc-diagnostics` | Devices/SMC: Warn when a macOS guest lacks the device key or a usable CPU | 1 commit, 1 file, +185 -2 | local |
-| `macos-efi-apple-features` | Devices/EFI: Make the Apple firmware feature bits configurable | 1 commit, 3 files, +100 -3 | local |
-| `macos-efi-apple-loader` | EFI/BootManager: Find the macOS boot loader on APFS volumes | 1 commit, 1 file, +143 -13 | local |
-| `macos-efi-appleprop-stubs` | EFI/VBoxAppleSim: Don't assert in the device path property protocol stubs | 1 commit, 1 file, +18 -13 | local |
-| `efi-msvc-intrinsics` | EFI/Firmware: Build the X64 firmware with newer MSVC versions | 1 commit, 7 files, +26 -4 | local |
+| `macos-guest-types` | Main/macOS: Add guest OS types for macOS 10.14 to 26 with Mac platform defaults | 1 commit, 9 files, +324 -3 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
+| `macos-cpum-hooks` | VMM/CPUM: Add ForceIntelFamilyModelStep and fudge MSR_CORE_THREAD_COUNT | 1 commit, 2 files, +34 -2 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
+| `macos-smc-fixes` | Devices/SMC: Fix key enumeration by index and key writes, add MSSP | 1 commit, 2 files, +110 -9 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
+| `macos-smc-diagnostics` | Devices/SMC: Warn when a macOS guest lacks the device key or a usable CPU | 1 commit, 1 file, +185 -2 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
+| `macos-efi-apple-features` | Devices/EFI: Make the Apple firmware feature bits configurable | 1 commit, 3 files, +100 -3 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
+| `macos-efi-apple-loader` | EFI/BootManager: Find the macOS boot loader on APFS volumes | 1 commit, 1 file, +143 -13 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
+| `macos-efi-appleprop-stubs` | EFI/VBoxAppleSim: Don't assert in the device path property protocol stubs | 1 commit, 1 file, +18 -13 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
+| `efi-msvc-intrinsics` | EFI/Firmware: Build the X64 firmware with newer MSVC versions | 1 commit, 7 files, +26 -4 | local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html)) |
 
 ## Test tooling (VBoxBFE, the stand-alone front end used for testing)
 
 | Branch | What it does | Size | Status |
 |---|---|---|---|
-| `vboxbfe-config-ctor-rc` | VBoxBFE: Do not fail the CFGM setup when PDM/Drivers already exists | 1 commit, 1 file, +1 -0 | local |
-| `vboxbfe-numcpus` | VBoxBFE: Create the VM with the NumCPUs value from the configuration | 1 commit, 1 file, +26 -2 | local |
-| `vboxbfe-sdl-update-events` | VBoxBFE/Framebuffer: Always update the SDL surface from the SDL thread | 1 commit, 2 files, +5 -11 | local |
-| `vboxbfe-update-clip` | VBoxBFE/Framebuffer: Clip update rectangles to the SDL surface | 1 commit, 1 file, +19 -0 | local |
-| `vboxbfe-vbva-display` | VBoxBFE/Display: Support VBVA and render the VGA screen into a per-mode buffer | 1 commit, 4 files, +440 -9 | local |
-| `vboxbfe-test-hook` | VBoxBFE: Test hook to reset, save and load the VM from the environment | 1 commit, 1 file, +110 -3 | local |
+| `vboxbfe-config-ctor-rc` | VBoxBFE: Do not fail the CFGM setup when PDM/Drivers already exists | 1 commit, 1 file, +1 -0 | local: only used to run the benchmarks and tests of this fork |
+| `vboxbfe-numcpus` | VBoxBFE: Create the VM with the NumCPUs value from the configuration | 1 commit, 1 file, +26 -2 | local: only used to run the benchmarks and tests of this fork |
+| `vboxbfe-sdl-update-events` | VBoxBFE/Framebuffer: Always update the SDL surface from the SDL thread | 1 commit, 2 files, +5 -11 | local: only used to run the benchmarks and tests of this fork |
+| `vboxbfe-update-clip` | VBoxBFE/Framebuffer: Clip update rectangles to the SDL surface | 1 commit, 1 file, +19 -0 | local: only used to run the benchmarks and tests of this fork |
+| `vboxbfe-vbva-display` | VBoxBFE/Display: Support VBVA and render the VGA screen into a per-mode buffer | 1 commit, 4 files, +440 -9 | local: only used to run the benchmarks and tests of this fork |
+| `vboxbfe-test-hook` | VBoxBFE: Test hook to reset, save and load the VM from the environment | 1 commit, 1 file, +110 -3 | local: only used to run the benchmarks and tests of this fork |

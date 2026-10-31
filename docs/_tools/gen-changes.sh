@@ -23,32 +23,32 @@ Speed on Hyper-V (NEM) hosts|nem-win-halt-partial-import|Planned for upstream
 Speed on Hyper-V (NEM) hosts|nem-win-gim-xcpt-narrowing|Planned for upstream|nem-lazy-db-exits
 Speed on Hyper-V (NEM) hosts|726-nem-timer-kick|Planned for upstream (targets issue [#726](https://github.com/VirtualBox/virtualbox/issues/726))
 Speed on Hyper-V (NEM) hosts|iprt-win-ecoqos-optout|Planned for upstream
-Speed on Hyper-V (NEM) hosts|iprt-win-highres-waits|local|iprt-win-ecoqos-optout
+Speed on Hyper-V (NEM) hosts|iprt-win-highres-waits|local: the gain was measured only without the kernel driver, so there is no case for official builds ([why](speed.html#6-high-resolution-waits))|iprt-win-ecoqos-optout
 Correctness fixes|861-x2apic-off-keeps-apic|Planned for upstream (targets issue [#861](https://github.com/VirtualBox/virtualbox/issues/861))
 Correctness fixes|930-iem-riprel-cbimm|[Open PR #931](https://github.com/VirtualBox/virtualbox/pull/931)||Fix RIP-relative memory operand decoding of ADCX/ADOX and VEX imm8 instructions (upstream issue [#930](https://github.com/VirtualBox/virtualbox/issues/930)), with a test tidy-up
 Correctness fixes|932-nem-tpr-low-nibble|[Open PR #933](https://github.com/VirtualBox/virtualbox/pull/933)||Keep the APIC TPR low nibble when syncing CR8 under Hyper-V (upstream issue [#932](https://github.com/VirtualBox/virtualbox/issues/932))
 Correctness fixes|iem-vcvt-256-source-reg|Planned for upstream
 Correctness fixes|nem-lazy-db-exits|Planned for upstream
 Correctness fixes|nem-win-restore-drx-after-debugging|Planned for upstream
-Graphics|virtio-gpu-device|local|fa9e0292a23|A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page)
+Graphics|virtio-gpu-device|local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html))|fa9e0292a23|A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page)
 Graphics|vmsvga-dx11-gpu-select|Planned for upstream
 Graphics|devvga-wide-scanline|Planned for upstream
 Guest CPU model|cpum-isa-exts|Planned for upstream
 Guest CPU model|cpum-intel-microarchs|Planned for upstream
-macOS guests|macos-guest-types|local|macos-cpum-hooks
-macOS guests|macos-cpum-hooks|local|macos-efi-apple-features
-macOS guests|macos-smc-fixes|local
-macOS guests|macos-smc-diagnostics|local|macos-smc-fixes
-macOS guests|macos-efi-apple-features|local|macos-smc-diagnostics
-macOS guests|macos-efi-apple-loader|local
-macOS guests|macos-efi-appleprop-stubs|local
-macOS guests|efi-msvc-intrinsics|local
-Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-config-ctor-rc|local
-Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-numcpus|local
-Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-sdl-update-events|local
-Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-update-clip|local
-Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-vbva-display|local
-Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-test-hook|local
+macOS guests|macos-guest-types|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))|macos-cpum-hooks
+macOS guests|macos-cpum-hooks|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))|macos-efi-apple-features
+macOS guests|macos-smc-fixes|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))
+macOS guests|macos-smc-diagnostics|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))|macos-smc-fixes
+macOS guests|macos-efi-apple-features|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))|macos-smc-diagnostics
+macOS guests|macos-efi-apple-loader|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))
+macOS guests|macos-efi-appleprop-stubs|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))
+macOS guests|efi-msvc-intrinsics|local: unlikely to go upstream, macOS 26 is the last release for Intel ([macOS page](macos.html))
+Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-config-ctor-rc|local: only used to run the benchmarks and tests of this fork
+Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-numcpus|local: only used to run the benchmarks and tests of this fork
+Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-sdl-update-events|local: only used to run the benchmarks and tests of this fork
+Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-update-clip|local: only used to run the benchmarks and tests of this fork
+Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-vbva-display|local: only used to run the benchmarks and tests of this fork
+Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-test-hook|local: only used to run the benchmarks and tests of this fork
 '
 
 {
