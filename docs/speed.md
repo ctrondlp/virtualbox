@@ -98,11 +98,18 @@ processes now opt out of that throttling (the setting can be turned off again wi
 
 ## 6. High resolution waits
 
-*Branch:* `iprt-win-highres-waits` (kept local)
+*Branch:* `iprt-win-highres-waits` (kept local, reason below)
 
 Windows rounds a timed wait up to its timer tick (15.6 ms, or 1 ms), which stretches every short guest halt. VM processes
 use high resolution waits instead. In the driverless set-up, idle host CPU went **1.1 → 0.5 cores** and the "timer
 collapse" runs (wake-ups falling to 1.2–1.6k per second, 5–6 ms late) disappeared.
+
+**Why it is not planned for upstream.** Every one of these numbers was measured without the VirtualBox kernel driver. With
+the driver, which official Windows x64 builds always use, the system timer runs at about 1 ms and a halted virtual CPU waits
+in the kernel, so the coarse waits this change fixes mostly do not occur. The change helps driverless builds like this one
+and Windows on Arm hosts, a narrow group, and it adds a system call to every short wait in every VM process. Without a
+measurement on an official build there is no case for it. The part that does matter there, Windows throttling minimized VMs,
+is item 5 and is planned for upstream.
 
 ## 7. Smaller changes that remove work
 
