@@ -2777,7 +2777,22 @@ static DECLCALLBACK(int) vgpuR3WorkerThread(PPDMDEVINS pDevIns, PPDMTHREAD pThre
             }
             if (pVirtqBuf)
             {
-                int rc = virtioCoreR3VirtqAvailBufGet(pDevIns, &pThis->Virtio, uVirtq, pVirtqBuf, true /*fRemove*/);
+                /* Take the buffer under the queue lock, which a device reset passes through (see
+                   vgpuR3StatusChanged), so the reset never changes the queue state in the middle of the
+                   fetch.  Check that the queue is usable and sample the reset generation inside the lock:
+                   a reset and a new set up of the queue may have happened since the check above, and a
+                   buffer taken from the new rings must not carry the generation of the old ones. */
+                PRTCRITSECT const pCritSectVirtq = &pThisCC->aWorkers[uVirtq].CritSectVirtq;
+                RTCritSectEnter(pCritSectVirtq);
+                int rc;
+                if (vgpuR3IsVirtqReady(pThis, uVirtq))
+                {
+                    pWorker->uCmdGen = ASMAtomicReadU32(&pThis->uResetGen);
+                    rc = virtioCoreR3VirtqAvailBufGet(pDevIns, &pThis->Virtio, uVirtq, pVirtqBuf, true /*fRemove*/);
+                }
+                else
+                    rc = VERR_NOT_AVAILABLE;
+                RTCritSectLeave(pCritSectVirtq);
                 if (RT_SUCCESS(rc))
                 {
                     if (uVirtq == VIRTIOGPU_VIRTQ_CONTROL)
@@ -2853,6 +2868,15 @@ static DECLCALLBACK(void) vgpuR3StatusChanged(PVIRTIOCORE pVirtio, PVIRTIOCORECC
     {
         ASMAtomicWriteBool(&pThis->fVirtioReady, false);
         ASMAtomicIncU32(&pThis->uResetGen);
+        /* VirtioCore resets the queue state (the index shadows) right after this callback returns.  A worker
+           that is in the middle of taking a buffer must be out of the queue by then, or it would leave the
+           state of the new set up of the queue torn.  Passing through the queue locks is enough: the workers
+           check the ready flag inside them, so none can get in again until the driver is ready again. */
+        for (uint16_t uVirtq = 0; uVirtq < VIRTIOGPU_VIRTQ_COUNT; uVirtq++)
+        {
+            RTCritSectEnter(&pThisCC->aWorkers[uVirtq].CritSectVirtq);
+            RTCritSectLeave(&pThisCC->aWorkers[uVirtq].CritSectVirtq);
+        }
         pThis->fNegotiatedFeatures = 0;
         pThis->Config.fEventsRead  = 0;
 
