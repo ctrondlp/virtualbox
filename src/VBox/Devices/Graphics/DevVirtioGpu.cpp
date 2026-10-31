@@ -2874,8 +2874,12 @@ static DECLCALLBACK(void) vgpuR3StatusChanged(PVIRTIOCORE pVirtio, PVIRTIOCORECC
            check the ready flag inside them, so none can get in again until the driver is ready again. */
         for (uint16_t uVirtq = 0; uVirtq < VIRTIOGPU_VIRTQ_COUNT; uVirtq++)
         {
-            RTCritSectEnter(&pThisCC->aWorkers[uVirtq].CritSectVirtq);
-            RTCritSectLeave(&pThisCC->aWorkers[uVirtq].CritSectVirtq);
+            PRTCRITSECT const pCritSectVirtq = &pThisCC->aWorkers[uVirtq].CritSectVirtq;
+            if (RTCritSectIsInitialized(pCritSectVirtq)) /* VirtioCore is set up before the queue locks. */
+            {
+                RTCritSectEnter(pCritSectVirtq);
+                RTCritSectLeave(pCritSectVirtq);
+            }
         }
         pThis->fNegotiatedFeatures = 0;
         pThis->Config.fEventsRead  = 0;
