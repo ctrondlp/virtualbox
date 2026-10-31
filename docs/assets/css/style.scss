@@ -35,3 +35,24 @@ $section-headings-color: #2f3640;
     font-size: 1.1rem;
   }
 }
+
+// The page menu under the title and the GitHub button.
+.site-nav {
+  margin-top: 0.75rem;
+
+  a {
+    display: inline-block;
+    padding: 0.2rem 0.75rem;
+    margin: 0.15rem 0.1rem;
+    font-size: 0.95rem;
+    color: $header-heading-color;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 0.3rem;
+
+    &:hover,
+    &.current {
+      background-color: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.5);
+    }
+  }
+}
