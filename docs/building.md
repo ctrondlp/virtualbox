@@ -1,8 +1,9 @@
 ---
-layout: single
-classes: wide
+layout: default
 title: Build and run it yourself
 ---
+
+# Build and run it yourself
 
 Everything here can be built from this repository and run on your own machine. It is an unofficial build: it is not signed
 by Oracle, and the way it was run for the measurements leaves out the VirtualBox kernel drivers. Read the limits below before

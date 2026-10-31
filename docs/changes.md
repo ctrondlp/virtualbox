@@ -1,8 +1,9 @@
 ---
-layout: single
-classes: wide
+layout: default
 title: All changes
 ---
+
+# All changes
 
 Generated from git by `docs/_tools/gen-changes.sh` against `origin/main`. One row per feature branch that is merged into the
 integration branch. **Planned for upstream** means the change is written up as a stand-alone contribution that will be sent to VirtualBox; **local** means it stays

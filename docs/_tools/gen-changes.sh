@@ -53,10 +53,11 @@ Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-test-
 
 {
     echo '---'
-    echo 'layout: single'
-    echo 'classes: wide'
+    echo 'layout: default'
     echo 'title: All changes'
     echo '---'
+    echo
+    echo '# All changes'
     echo
     echo "Generated from git by \`docs/_tools/gen-changes.sh\` against \`$BASE\`. One row per feature branch that is merged into the"
     echo 'integration branch. **Planned for upstream** means the change is written up as a stand-alone contribution that will be sent to VirtualBox; **local** means it stays'

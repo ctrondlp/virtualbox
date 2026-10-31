@@ -1,8 +1,9 @@
 ---
-layout: single
-classes: wide
+layout: default
 title: virtio-gpu
 ---
+
+# virtio-gpu: Vulkan on the host GPU for Linux guests
 
 A new graphics controller, **VirtioGpu**. As a 2D display it replaces the VGA-style device. With **3D Acceleration** ticked
 (Settings → Display, or `VBoxManage modifyvm <vm> --accelerate-3d on`), a Linux guest with the Mesa Venus driver sees the
