@@ -13,7 +13,8 @@ This is a fork of VirtualBox (Oracle's open source repository) with these kinds 
    GPU compute on it.
 3. **macOS guests.** Support for macOS 10.14 to 26 guests on a PC, and a setting that cut a macOS Sequoia boot from
    more than 200 seconds to about 40.
-4. **Correctness fixes** in the instruction emulator, the guest CPU model, the Hyper-V back end and the settings API,
+4. **Guest CPU features:** newer instruction set extensions that guests could not see before.
+5. **Correctness fixes** in the instruction emulator, the guest CPU model, the Hyper-V back end and the settings API,
    found along the way.
 
 These changes are meant to go back into VirtualBox, see [Upstream](#upstream-we-want-these-changes-in-virtualbox).
@@ -65,10 +66,15 @@ setting, and Tahoe reaches it in about 35 s. Tahoe is the last macOS release for
 fork and is unlikely to go upstream. See the [macOS page](macos.html) for the changes, the numbers and what was not
 tested.
 
+## Guest CPU features
+
+Guests could not see GFNI, VAES, VPCLMULQDQ, AVX-VNNI, AVX-IFMA, AVX-NE-CONVERT, XSAVEOPT/XSAVEC or fast string moves even
+on a host that has them. They are now passed through, each with its own switch. A Linux test program that executes every
+extension went from **11 of 61 checks passing to 61 of 61**; Intel models from Raptor Lake to Panther Lake are also
+recognised. See the [CPU page](cpu.html).
+
 ## Other changes
 
-* **Guest CPU:** GFNI, VAES, VPCLMULQDQ, AVX-VNNI, AVX-IFMA, AVX-NE-CONVERT, XSAVEC and fast string moves are offered to
-  guests, and Intel models from Raptor Lake to Panther Lake are recognised.
 * **Graphics:** VMSVGA can create its DirectX 11 device on the high performance GPU (`VMSVGA3dAdapter`), and VGA modes
   with very wide scanlines no longer miss changed pixels.
 * **Correctness:** wrong source register in two AVX conversions, a RIP-relative decoding bug (pull request
