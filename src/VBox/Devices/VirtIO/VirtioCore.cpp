@@ -2745,7 +2745,20 @@ static DECLCALLBACK(VBOXSTRICTRC) virtioR3PciConfigRead(PPDMDEVINS pDevIns, PPDM
             return VINF_SUCCESS;
         }
 
+        *pu32Value = 0;
         VBOXSTRICTRC rcStrict = virtioMmioRead(pDevIns, pVirtio, pPciCap->uOffset, pu32Value, cb);
+        /* The MMIO handler may answer with the IOM "unused" statuses, which only IOM understands.  A PCI config
+           read has to deliver a value instead; passing them on is an unexpected status for the caller. */
+        if (rcStrict == VINF_IOM_MMIO_UNUSED_00)
+        {
+            *pu32Value = 0;
+            rcStrict   = VINF_SUCCESS;
+        }
+        else if (rcStrict == VINF_IOM_MMIO_UNUSED_FF)
+        {
+            *pu32Value = cb >= sizeof(uint32_t) ? UINT32_MAX : RT_BIT_32(cb * 8) - 1;
+            rcStrict   = VINF_SUCCESS;
+        }
         Log7Func((" Guest read virtio_pci_cfg_cap.pci_cfg_data, bar=%d, offset=%d, length=%d, result=0x%x -> %Rrc\n",
                    pPciCap->uBar, pPciCap->uOffset, uLength, *pu32Value, VBOXSTRICTRC_VAL(rcStrict)));
         return rcStrict;
