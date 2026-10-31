@@ -13,28 +13,28 @@ OUT=docs/changes.md
 # for a branch that is stacked on another one, so only its own commits are counted) | description (optional, replaces the
 # subject of the first commit)
 ROWS='
-Speed on Hyper-V (NEM) hosts|nem-hv-delivers-ints|PR draft
-Speed on Hyper-V (NEM) hosts|nem-win-x2apic|PR draft
-Speed on Hyper-V (NEM) hosts|nem-msr-exit-import|PR draft
-Speed on Hyper-V (NEM) hosts|vmm-halt-poll|PR draft
-Speed on Hyper-V (NEM) hosts|gim-kvm-pv-eoi|PR draft
-Speed on Hyper-V (NEM) hosts|nem-win-register-shadowing|PR draft
-Speed on Hyper-V (NEM) hosts|nem-win-halt-partial-import|PR draft
-Speed on Hyper-V (NEM) hosts|nem-win-gim-xcpt-narrowing|PR draft|nem-lazy-db-exits
-Speed on Hyper-V (NEM) hosts|726-nem-timer-kick|PR draft
-Speed on Hyper-V (NEM) hosts|iprt-win-ecoqos-optout|PR draft
+Speed on Hyper-V (NEM) hosts|nem-hv-delivers-ints|Planned for upstream
+Speed on Hyper-V (NEM) hosts|nem-win-x2apic|Planned for upstream
+Speed on Hyper-V (NEM) hosts|nem-msr-exit-import|Planned for upstream
+Speed on Hyper-V (NEM) hosts|vmm-halt-poll|Planned for upstream
+Speed on Hyper-V (NEM) hosts|gim-kvm-pv-eoi|Planned for upstream
+Speed on Hyper-V (NEM) hosts|nem-win-register-shadowing|Planned for upstream
+Speed on Hyper-V (NEM) hosts|nem-win-halt-partial-import|Planned for upstream
+Speed on Hyper-V (NEM) hosts|nem-win-gim-xcpt-narrowing|Planned for upstream|nem-lazy-db-exits
+Speed on Hyper-V (NEM) hosts|726-nem-timer-kick|Planned for upstream (targets issue [#726](https://github.com/VirtualBox/virtualbox/issues/726))
+Speed on Hyper-V (NEM) hosts|iprt-win-ecoqos-optout|Planned for upstream
 Speed on Hyper-V (NEM) hosts|iprt-win-highres-waits|local|iprt-win-ecoqos-optout
-Correctness fixes|861-x2apic-off-keeps-apic|PR draft
-Correctness fixes|930-iem-riprel-cbimm|PR draft
-Correctness fixes|932-nem-tpr-low-nibble|PR draft
-Correctness fixes|iem-vcvt-256-source-reg|PR draft
-Correctness fixes|nem-lazy-db-exits|PR draft
-Correctness fixes|nem-win-restore-drx-after-debugging|PR draft
+Correctness fixes|861-x2apic-off-keeps-apic|Planned for upstream (targets issue [#861](https://github.com/VirtualBox/virtualbox/issues/861))
+Correctness fixes|930-iem-riprel-cbimm|[Open PR #931](https://github.com/VirtualBox/virtualbox/pull/931)||Fix RIP-relative memory operand decoding of ADCX/ADOX and VEX imm8 instructions (upstream issue [#930](https://github.com/VirtualBox/virtualbox/issues/930)), with a test tidy-up
+Correctness fixes|932-nem-tpr-low-nibble|[Open PR #933](https://github.com/VirtualBox/virtualbox/pull/933)||Keep the APIC TPR low nibble when syncing CR8 under Hyper-V (upstream issue [#932](https://github.com/VirtualBox/virtualbox/issues/932))
+Correctness fixes|iem-vcvt-256-source-reg|Planned for upstream
+Correctness fixes|nem-lazy-db-exits|Planned for upstream
+Correctness fixes|nem-win-restore-drx-after-debugging|Planned for upstream
 Graphics|virtio-gpu-device|local|fa9e0292a23|A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page)
-Graphics|vmsvga-dx11-gpu-select|PR draft
-Graphics|devvga-wide-scanline|PR draft
-Guest CPU model|cpum-isa-exts|PR draft
-Guest CPU model|cpum-intel-microarchs|PR draft
+Graphics|vmsvga-dx11-gpu-select|Planned for upstream
+Graphics|devvga-wide-scanline|Planned for upstream
+Guest CPU model|cpum-isa-exts|Planned for upstream
+Guest CPU model|cpum-intel-microarchs|Planned for upstream
 macOS guests|macos-guest-types|local|macos-cpum-hooks
 macOS guests|macos-cpum-hooks|local|macos-efi-apple-features
 macOS guests|macos-smc-fixes|local
@@ -60,7 +60,7 @@ Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-test-
     echo '# All changes'
     echo
     echo "Generated from git by \`docs/_tools/gen-changes.sh\` against \`$BASE\`. One row per feature branch that is merged into the"
-    echo 'integration branch. **PR draft** means the change is written up as a stand-alone upstream change; **local** means it stays'
+    echo 'integration branch. **Planned for upstream** means the change is written up as a stand-alone contribution that will be sent to VirtualBox; **local** means it stays'
     echo 'in this fork. "Size" is the number of commits, files changed and lines added/removed against upstream.'
     echo
     area=

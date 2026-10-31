@@ -12,6 +12,7 @@ This is a fork of VirtualBox (Oracle's open source repository) with two kinds of
 2. **A virtio-gpu device.** Linux guests get Vulkan on the host's graphics card, so a guest can run an LLM or other
    GPU compute on it.
 
+These changes are meant to go back into VirtualBox, see [Upstream](#upstream-we-want-these-changes-in-virtualbox).
 Everything on this site was measured on one machine, and the pages say how. Nothing here is endorsed by or affiliated
 with Oracle; VirtualBox is Oracle's trademark and the code stays under its original license.
 
@@ -50,6 +51,24 @@ results and the limits. The ones that matter most:
 | Loading a 2 GB model | | **7 seconds** (it was 2 minutes 47 seconds before a cache-mapping fix) |
 
 For ordinary desktop graphics VMSVGA is still better, and the page says so with numbers.
+
+## Upstream: we want these changes in VirtualBox
+
+This fork is a staging ground, not a replacement. The goal is to get the speed and correctness changes into the official
+VirtualBox, so everyone gets them. Each one is written as a stand-alone contribution (a bug or feature issue first, then one
+pull request per change, smallest and best-tested first), with the evidence on the [speed page](speed.html).
+
+* **Open now:** pull request [#931](https://github.com/VirtualBox/virtualbox/pull/931) (a decoding bug in the instruction emulator, issue
+  [#930](https://github.com/VirtualBox/virtualbox/issues/930)) and pull request [#933](https://github.com/VirtualBox/virtualbox/pull/933) (a Hyper-V interrupt priority bug, issue
+  [#932](https://github.com/VirtualBox/virtualbox/issues/932)).
+* **Next, in order:** the other speed and correctness changes marked *Planned for upstream* on the
+  [list of changes](changes.html). Two of them target problems other people already reported upstream, [#861](https://github.com/VirtualBox/virtualbox/issues/861)
+  and [#726](https://github.com/VirtualBox/virtualbox/issues/726).
+* **Staying in this fork for now:** the virtio-gpu device (large and experimental, it may be offered later), macOS guest
+  support, high resolution waits and the test tools.
+
+We will try, but the VirtualBox maintainers decide: a change can be accepted, reworked or declined. This page is updated as
+each one is filed or merged.
 
 ## Everything else
 
