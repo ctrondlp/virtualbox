@@ -5,12 +5,16 @@ title: Home
 
 # What this fork adds
 
-This is a fork of VirtualBox (Oracle's open source repository) with two kinds of work:
+This is a fork of VirtualBox (Oracle's open source repository) with these kinds of work:
 
 1. **Speed.** VirtualBox on a Windows host that runs it on top of Hyper-V (the "NEM" path, which is what you get when
    Hyper-V, WSL2 or Windows Sandbox is on) was slow in specific, measurable ways. Most of the changes below fix that.
 2. **A virtio-gpu device.** Linux guests get Vulkan on the host's graphics card, so a guest can run an LLM or other
    GPU compute on it.
+3. **macOS guests.** Support for macOS 10.14 to 26 guests on a PC, and a setting that cut a macOS Sequoia boot from
+   more than 200 seconds to about 40.
+4. **Correctness fixes** in the instruction emulator, the guest CPU model, the Hyper-V back end and the settings API,
+   found along the way.
 
 These changes are meant to go back into VirtualBox, see [Upstream](#upstream-we-want-these-changes-in-virtualbox).
 Everything on this site was measured on one machine, and the pages say how. Nothing here is endorsed by or affiliated
@@ -52,6 +56,30 @@ results and the limits. The ones that matter most:
 
 For ordinary desktop graphics VMSVGA is still better, and the page says so with numbers.
 
+## macOS guests
+
+VirtualBox stops at macOS 10.13. This fork adds guest types for macOS 10.14 to 26, a CPU model that stops newer Intel
+hosts from panicking the macOS kernel, fixes in the emulated Apple SMC and the EFI firmware, and a boot loader lookup for
+APFS. On this PC a macOS Sequoia guest went from **more than 200 s to 33–44 s to the login screen** with the x2APIC
+setting, and Tahoe reaches it in about 35 s. Tahoe is the last macOS release for Intel processors, so this stays in the
+fork and is unlikely to go upstream. See the [macOS page](macos.html) for the changes, the numbers and what was not
+tested.
+
+## Other changes
+
+* **Guest CPU:** GFNI, VAES, VPCLMULQDQ, AVX-VNNI, AVX-IFMA, AVX-NE-CONVERT, XSAVEC and fast string moves are offered to
+  guests, and Intel models from Raptor Lake to Panther Lake are recognised.
+* **Graphics:** VMSVGA can create its DirectX 11 device on the high performance GPU (`VMSVGA3dAdapter`), and VGA modes
+  with very wide scanlines no longer miss changed pixels.
+* **Correctness:** wrong source register in two AVX conversions, a RIP-relative decoding bug (pull request
+  [#931](https://github.com/VirtualBox/virtualbox/pull/931)), a lost APIC task priority nibble (pull request
+  [#933](https://github.com/VirtualBox/virtualbox/pull/933)), debug registers left armed after debugging, and
+  `--x2apic off` turning the APIC off.
+* **Guidance from measurements:** an NVMe controller gave 51k random-read IOPS against 12–14k for the default SATA
+  controller; NAT is limited by the NAT engine, not the network card (details on the [speed page](speed.html)).
+* **Test tools:** the stand-alone VBoxBFE front end got VBVA support and several crash fixes, used to run the guest
+  benchmarks and the Validation Kit boot sector tests.
+
 ## Upstream: we want these changes in VirtualBox
 
 This fork is a staging ground, not a replacement. The goal is to get the speed and correctness changes into the official
@@ -64,8 +92,9 @@ pull request per change, smallest and best-tested first), with the evidence on t
 * **Next, in order:** the other speed and correctness changes marked *Planned for upstream* on the
   [list of changes](changes.html). Two of them target problems other people already reported upstream, [#861](https://github.com/VirtualBox/virtualbox/issues/861)
   and [#726](https://github.com/VirtualBox/virtualbox/issues/726).
-* **Staying in this fork for now:** the virtio-gpu device (large and experimental, it may be offered later), macOS guest
-  support, high resolution waits and the test tools.
+* **Staying in this fork for now:** the virtio-gpu device (large and experimental, it may be offered later), [macOS guest
+  support](macos.html) (unlikely to go upstream: Tahoe is the last macOS release for Intel processors), high resolution waits
+  and the test tools.
 
 We will try, but the VirtualBox maintainers decide: a change can be accepted, reworked or declined. This page is updated as
 each one is filed or merged.
@@ -73,7 +102,7 @@ each one is filed or merged.
 ## Everything else
 
 Fixes found along the way (a wrong source register in two AVX conversions, a reload of debug registers, an x2APIC
-setting that wrongly turned the APIC off), macOS guest support work and a few test tools are in the
+setting that wrongly turned the APIC off), and a few test tools are in the
 [full list of changes](changes.html), generated from git so it stays accurate.
 
 ## How these numbers were made
