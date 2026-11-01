@@ -2848,7 +2848,9 @@ DECLHIDDEN(int) virtioCoreR3LegacyDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHL
     }
 
     AssertLogRelMsgReturn(cQueues <= VIRTQ_MAX_COUNT, ("cQueues=%u!\n", cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
-    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < cQueues || (!cQueues && !pVirtio->uVirtqSelect),
+    /* The guest may select any queue below VIRTQ_MAX_COUNT (see the write handlers), including ones the device doesn't
+       have (Linux probes past the last queue), so that is what a saved selector has to be checked against. */
+    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < VIRTQ_MAX_COUNT,
                           ("uVirtqSelect=%u cQueues=%u\n", pVirtio->uVirtqSelect, cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
 
     Log(("\nRestoring %d  legacy-only virtio-net device queues from saved state:\n", cQueues));
@@ -2958,7 +2960,9 @@ DECLHIDDEN(int) virtioCoreR3ModernDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHL
     AssertRCReturn(rc, rc);
 
     AssertLogRelMsgReturn(cQueues <= VIRTQ_MAX_COUNT, ("cQueues=%u!\n", cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
-    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < cQueues || (!cQueues && !pVirtio->uVirtqSelect),
+    /* The guest may select any queue below VIRTQ_MAX_COUNT (see the write handlers), including ones the device doesn't
+       have (Linux probes past the last queue), so that is what a saved selector has to be checked against. */
+    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < VIRTQ_MAX_COUNT,
                           ("uVirtqSelect=%u cQueues=%u\n", pVirtio->uVirtqSelect, cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
 
     /** @todo Adapt this loop use cQueues argument instead of static queue count (safely with SSM versioning) */
