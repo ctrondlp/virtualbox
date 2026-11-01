@@ -87,5 +87,11 @@ extern int virtio_scsi_cmd_data_out(void __far *pvHba, uint8_t idTgt, uint8_t __
 extern int virtio_scsi_cmd_data_in(void __far *pvHba, uint8_t idTgt, uint8_t __far *aCDB,
                                    uint8_t cbCDB, uint8_t __far *buffer, uint32_t length);
 
+extern int nvme_scsi_init(void __far *pvHba, uint8_t u8Bus, uint8_t u8DevFn);
+extern int nvme_scsi_cmd_data_out(void __far *pvHba, uint8_t idTgt, uint8_t __far *aCDB,
+                                  uint8_t cbCDB, uint8_t __far *buffer, uint32_t length);
+extern int nvme_scsi_cmd_data_in(void __far *pvHba, uint8_t idTgt, uint8_t __far *aCDB,
+                                 uint8_t cbCDB, uint8_t __far *buffer, uint32_t length);
+
 #endif /* !VBOX_INCLUDED_SRC_PC_BIOS_scsi_h */
 

@@ -251,6 +251,12 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>BIOS: Added support for booting from NVMe disks, so that virtual machines
+          using the legacy BIOS firmware no longer need EFI to start from an NVMe
+          controller</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 
