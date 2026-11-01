@@ -2802,7 +2802,7 @@ static DECLCALLBACK(int) drvNATConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, uin
 
     /* Let libslirp write all the guest TCP data that is pending to the host socket in one go instead of
        once for every guest packet (the host send() is the bottleneck of guest to host transfers). */
-    rc = pDrvIns->pHlpR3->pfnCFGMQueryBoolDef(pCfg, "DeferHostWrites", &pThis->fDeferHostWrites, false);
+    rc = pDrvIns->pHlpR3->pfnCFGMQueryBoolDef(pCfg, "DeferHostWrites", &pThis->fDeferHostWrites, true);
     AssertLogRelRCReturn(rc, rc);
     if (pThis->fDeferHostWrites)
         LogRel(("NAT#%d: Deferring writes to host TCP sockets while more guest frames are queued\n", pDrvIns->iInstance));
