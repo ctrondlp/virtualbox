@@ -99,6 +99,13 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>NAT: Improved the TCP throughput from the guest to the host, by about a
+          quarter for a single connection and several times for many parallel connections
+          on Windows hosts. Set VBoxInternal/Devices/&lt;nic&gt;/0/LUN#0/Config/DeferHostWrites
+          to 0 to restore the previous behavior</para>
+      </listitem>
+
+      <listitem>
         <para>VBoxManage: Added natnetwork log and dhcpserver log commands
           to display NAT network and DHCP server log files</para>
       </listitem>
