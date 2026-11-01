@@ -233,6 +233,9 @@ struct Slirp {
     size_t cIPv6RealNameservers;
     bool fDisableIPv6RA;
     const struct ip4_lomap_desc *mLoopbackMap;
+    /** Don't write guest TCP data to the host socket as soon as it arrives, queue it and let the poll loop write
+     * everything that is pending in one go (one send() per burst of packets instead of one per packet). */
+    bool fDeferHostWrites;
 #endif
 };
 
