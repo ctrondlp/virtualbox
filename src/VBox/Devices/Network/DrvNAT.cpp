@@ -352,6 +352,11 @@ typedef struct DRVNAT
     SlirpTimer *pTimerHead;
     /** Flag from Main API that determines if we pass search domain via DHCP */
     bool fPassDomain;
+    /** Whether guest TCP data may be queued instead of being written to the host socket at once when more frames
+     * are known to follow (the DeferHostWrites config value). */
+    bool fDeferHostWrites;
+    /** Number of guest frames handed to the NAT thread that it hasn't picked up yet. */
+    volatile uint32_t cSendsPending;
     /** Diagnostic state for debugger info output. */
     DRVNATDIAG Diag;
 } DRVNAT;
@@ -645,6 +650,10 @@ static DECLCALLBACK(void) drvNATSendWorker(PDRVNAT pThis, PPDMSCATTERGATHER pSgB
 {
     LogFlowFunc(("pThis=%p pSgBuf=%p\n", pThis, pSgBuf));
 
+    /* Frames queued behind this one: while there are some (or this is a GSO frame that is carved into several
+       segments) it is cheaper to let libslirp write the queued guest data in one go than to write each segment. */
+    bool const fMoreToCome = ASMAtomicDecU32(&pThis->cSendsPending) > 0;
+
     if (pThis->enmLinkState != PDMNETWORKLINKSTATE_UP)
     {
         DRVNAT_DIAG_COUNTER_INC(&pThis->Diag.Counters.cDropLinkDown);
@@ -661,6 +670,7 @@ static DECLCALLBACK(void) drvNATSendWorker(PDRVNAT pThis, PPDMSCATTERGATHER pSgB
         LogFlowFunc(("Normal Frame -> pvAllocator=%p LB %#zx\n", pSgBuf->pvAllocator, pSgBuf->cbUsed));
         DRVNAT_DIAG_COUNTER_INC(&pThis->Diag.Counters.cGuestToNatFrames);
         DRVNAT_DIAG_COUNTER_ADD(&pThis->Diag.Counters.cbGuestToNat, (uint64_t)pSgBuf->cbUsed);
+        slirp_set_defer_host_writes(pThis->pSlirp, pThis->fDeferHostWrites && fMoreToCome);
         slirp_input(pThis->pSlirp, (uint8_t const *)pSgBuf->pvAllocator, (int)pSgBuf->cbUsed);
         drvNATFreeSgBuf(pThis, pSgBuf);
         LogFlowFuncLeave();
@@ -678,6 +688,7 @@ static DECLCALLBACK(void) drvNATSendWorker(PDRVNAT pThis, PPDMSCATTERGATHER pSgB
         Assert(cSegs > 1);
         uint8_t pbSeg[DRVNAT_MAXFRAMESIZE];
         uint8_t const * const pbFrame = (uint8_t const *)pSgBuf->aSegs[0].pvSeg;
+        slirp_set_defer_host_writes(pThis->pSlirp, pThis->fDeferHostWrites);
         LogFlowFunc(("GSO %p LB %#zx - creating %u segments out of it\n", pbFrame, pSgBuf->cbUsed, cSegs));
         for (uint32_t iSeg = 0; iSeg < cSegs; iSeg++)
         {
@@ -840,6 +851,7 @@ static DECLCALLBACK(int) drvNATNetworkUp_SendBuf(PPDMINETWORKUP pInterface, PPDM
     int rc;
     if (pThis->pSlirpThread->enmState == PDMTHREADSTATE_RUNNING)
     {
+        ASMAtomicIncU32(&pThis->cSendsPending);
         rc = RTReqQueueCallEx(pThis->hSlirpReqQueue, NULL /*ppReq*/, 0 /*cMillies*/, RTREQFLAGS_VOID | RTREQFLAGS_NO_WAIT,
                               (PFNRT)drvNATSendWorker, 2, pThis, pSgBuf);
         if (RT_SUCCESS(rc))
@@ -848,6 +860,7 @@ static DECLCALLBACK(int) drvNATNetworkUp_SendBuf(PPDMINETWORKUP pInterface, PPDM
             LogFlowFunc(("leave success\n"));
             return VINF_SUCCESS;
         }
+        ASMAtomicDecU32(&pThis->cSendsPending);
 
         rc = VERR_NET_NO_BUFFER_SPACE;
     }
@@ -2789,12 +2802,10 @@ static DECLCALLBACK(int) drvNATConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, uin
 
     /* Let libslirp write all the guest TCP data that is pending to the host socket in one go instead of
        once for every guest packet (the host send() is the bottleneck of guest to host transfers). */
-    bool fDeferHostWrites = false;
-    rc = pDrvIns->pHlpR3->pfnCFGMQueryBoolDef(pCfg, "DeferHostWrites", &fDeferHostWrites, false);
+    rc = pDrvIns->pHlpR3->pfnCFGMQueryBoolDef(pCfg, "DeferHostWrites", &pThis->fDeferHostWrites, false);
     AssertLogRelRCReturn(rc, rc);
-    slirp_set_defer_host_writes(pSlirp, fDeferHostWrites);
-    if (fDeferHostWrites)
-        LogRel(("NAT#%d: Deferring writes to host TCP sockets\n", pDrvIns->iInstance));
+    if (pThis->fDeferHostWrites)
+        LogRel(("NAT#%d: Deferring writes to host TCP sockets while more guest frames are queued\n", pDrvIns->iInstance));
 
     rc = drvNATConfigPreDefPortForward(pDrvIns->iInstance, pThis, pCfg, &Network);
     AssertLogRelRCReturn(rc, rc);
