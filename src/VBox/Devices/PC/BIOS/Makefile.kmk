@@ -95,7 +95,8 @@ ifdef VBOX_WITH_OPEN_WATCOM
  VBoxPcBios386_DEFS    = $(VBoxPcBiosAll_DEFS) VBOX_BIOS_CPU=80386 \
  	VBOX_WITH_AHCI \
  	VBOX_WITH_SCSI \
- 	VBOX_WITH_VIRTIO_SCSI
+ 	VBOX_WITH_VIRTIO_SCSI \
+ 	VBOX_WITH_NVME
  VBoxPcBios386_SOURCES = $(VBoxPcBiosAll_SOURCES) \
  	pcibios.c \
  	pciutil.c \
@@ -104,6 +105,7 @@ ifdef VBOX_WITH_OPEN_WATCOM
  	buslogic.c \
  	lsilogic.c \
  	virtio.c \
+ 	nvme.c \
  	vds.c \
  	apm_pm.asm \
  	pcibio32.asm \
