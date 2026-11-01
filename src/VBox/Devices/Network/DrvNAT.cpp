@@ -2586,6 +2586,7 @@ static DECLCALLBACK(int) drvNATConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, uin
                                   "|ForwardBroadcast"
                                   "|EnableTFTP"
                                   "|RestrictInternet"
+                                  "|DeferHostWrites"
                                   , "PortForwarding");
 
     /*
