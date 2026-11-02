@@ -111,7 +111,34 @@ and Windows on Arm hosts, a narrow group, and it adds a system call to every sho
 measurement on an official build there is no case for it. The part that does matter there, Windows throttling minimized VMs,
 is item 5 and is planned for upstream.
 
-## 7. Smaller changes that remove work
+## 7. NAT: faster uploads from the guest
+
+*Branch:* `nat-throughput` (kept local for now: it changes the libslirp code that VirtualBox bundles, so it would go to
+libslirp first)
+
+Sampling the VM process while a guest uploaded a file showed that the NAT thread was the limit: it was about 94% busy and
+84% of its time was one host `send()` call per guest packet, roughly 7 µs each on Windows. libslirp writes the data of every
+guest TCP packet to the host connection as soon as it arrives, and its own comment calls that write an optimisation, the
+queued path being the normal one. The change skips the immediate write while more guest frames are already waiting
+behind the current one (or for the segments of one large offloaded frame), so the queued data goes out in one call per
+burst. A lone packet is still written at once, so small interactive messages are not delayed. It is on by default; setting
+the NAT driver's `DeferHostWrites` value to 0 brings the old behavior back.
+
+| Guest to host over NAT (e1000), 3 alternating rounds | Before | After |
+|---|---|---|
+| One connection, upload | 1.67 Gbit/s (1.64–1.72) | **2.09 Gbit/s (2.02–2.15)** |
+| Eight parallel connections, upload | 0.8–1.5 Gbit/s | **4.5–4.6 Gbit/s** |
+| Download (not changed by this) | 2.3–2.6 Gbit/s | 2.2–2.5 Gbit/s, within the noise |
+| 300 MB of random data with odd write sizes | arrives identical | arrives identical (same hash) |
+| Round trip of one byte, median | 87–91 µs | 88–89 µs |
+
+A first run of the round-trip test showed about 30 µs more with the change. It turned out to come from the order of the
+runs (the first boots of a series are slower either way), and a balanced repeat showed no difference.
+
+Downloads are limited by something else: while the host sends to the guest, the NAT thread is mostly idle and the busy
+thread is the virtual CPU running the guest's own receive path, so this change cannot help there.
+
+## 8. Smaller changes that remove work
 
 `nem-win-register-shadowing` skips exporting registers Hyper-V already holds, `nem-win-halt-partial-import` imports only
 the minimal state when the guest halts, and `nem-win-gim-xcpt-narrowing` intercepts #UD and #GP only when needed. They
@@ -121,10 +148,11 @@ are on the [change list](changes.html); they were measured as part of the totals
 
 For guests on this host, from a Debian 13 guest with 8 virtual CPUs:
 
-* **Disk:** at 4 KiB random reads with a queue depth of 32, an NVMe controller reached **51k IOPS**, virtio-SCSI 33–37k and
-  the default SATA (AHCI) 12–14k. Sequential throughput was the same on all (about 2.6 GB/s write, 1.5 GB/s read).
-* **NAT networking:** 1.7 Gbit/s guest to host and 2.6 Gbit/s host to guest, and the virtio network card was no faster
-  than the e1000, so the ceiling is the NAT engine (libslirp), not the card.
+* **Disk:** at 4 KiB random reads with a queue depth of 32, an NVMe controller reached about **48–51k IOPS**, virtio-SCSI
+  33–40k and the default SATA (AHCI) 12–15k, and turning on the host I/O cache raised the small-request numbers a lot
+  more. The details, and what the cache costs, are on the [storage page](storage.html#2-controller-type-and-the-host-io-cache).
+* **NAT networking:** the virtio network card was no faster than the e1000, so the limit is the NAT engine (libslirp), not
+  the card. Item 7 above removes the limit for uploads; downloads are limited by the guest.
 
 ## What did not help, and was dropped
 

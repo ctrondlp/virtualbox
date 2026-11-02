@@ -35,6 +35,19 @@ in this fork.
 | `iem-vcvt-256-source-reg` | IEM: vcvtps2pd and vcvtdq2pd (256-bit) converted the wrong source register | Planned for upstream |
 | `nem-lazy-db-exits` | VMM/NEM/win: Only intercept #DB while debugging (WIP, xcpt-2 TF stepping hangs) | Planned for upstream |
 | `nem-win-restore-drx-after-debugging` | VMM/NEM/win: Reload the guest's debug registers after debugging | Planned for upstream |
+| `virtio-core-restore-queue-select` | VirtIO: Don't refuse to restore a queue select the guest may validly have written | Planned for upstream |
+
+## Storage and boot
+
+| Branch | What it does | Status |
+|---|---|---|
+| `bios-nvme-boot` | BIOS/NVMe: Boot from NVMe disks with the legacy PC BIOS | Planned for upstream ([storage page](storage.html#1-booting-from-nvme-with-the-bios-firmware)) |
+
+## Networking
+
+| Branch | What it does | Status |
+|---|---|---|
+| `nat-throughput` | Guest to host TCP over NAT is faster: libslirp writes the data of a burst of guest packets to the host connection in one call instead of one call per packet (on by default, DeferHostWrites=0 turns it off) | local: it changes the bundled libslirp, so it would go to libslirp first ([speed page](speed.html#7-nat-faster-uploads-from-the-guest)) |
 
 ## Graphics
 

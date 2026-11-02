@@ -14,7 +14,9 @@ This is a fork of VirtualBox (Oracle's open source repository) with these kinds 
 3. **macOS guests.** Support for macOS 10.14 to 26 guests on a PC, and a setting that cut a macOS Sequoia boot from
    more than 200 seconds to about 40.
 4. **Guest CPU features:** newer instruction set extensions that guests could not see before.
-5. **Correctness fixes** in the instruction emulator, the guest CPU model, the Hyper-V back end and the settings API,
+5. **Storage and networking.** The legacy PC BIOS can boot from an NVMe disk, running virtio-SCSI VMs can be saved and
+   restored again, and guest to host uploads through NAT are faster.
+6. **Correctness fixes** in the instruction emulator, the guest CPU model, the Hyper-V back end and the settings API,
    found along the way.
 
 **Where the code is:** all of the work described here has landed on the
@@ -79,16 +81,33 @@ on a host that has them. They are now passed through, each with its own switch. 
 extension went from **11 of 61 checks passing to 61 of 61**; Intel models from Raptor Lake to Panther Lake are also
 recognised. See the [CPU page](cpu.html).
 
+## Storage and networking
+
+* **NVMe boot with the BIOS firmware.** A BIOS virtual machine with its disk on an NVMe controller used to stop with "Could
+  not read from the boot medium". The BIOS now has an NVMe driver, so the faster controller can be the boot disk. On this
+  PC the same disk read 4 KiB random blocks about 3 times faster from NVMe than from SATA with a deep queue, and the
+  boot loader's reading was about half a second quicker.
+* **The host I/O cache.** SATA, NVMe and virtio-SCSI controllers default to no host cache. Turning it on made small random
+  reads about 60% to 2 times faster and large sequential reads about twice as fast, at the price of losing the last
+  writes if the host crashes.
+* **Saved states.** A running virtio-SCSI VM could be saved but not restored; that works now.
+* **NAT.** Guest to host uploads over NAT went from 1.67 to 2.09 Gbit/s on one connection and from about 1 to 4.5 Gbit/s on
+  eight parallel ones. Downloads are limited by the guest and did not change.
+
+The [storage page](storage.html) and the [speed page](speed.html#7-nat-faster-uploads-from-the-guest) have the details and
+the measurements.
+
 ## Other changes
 
 * **Graphics:** VMSVGA can create its DirectX 11 device on the high performance GPU (`VMSVGA3dAdapter`), and VGA modes
   with very wide scanlines no longer miss changed pixels.
-* **Correctness:** wrong source register in two AVX conversions, a RIP-relative decoding bug (pull request
+* **Correctness:** a saved state of a running virtio-SCSI VM that could not be loaded, wrong source register in two AVX conversions, a RIP-relative decoding bug (pull request
   [#931](https://github.com/VirtualBox/virtualbox/pull/931)), a lost APIC task priority nibble (pull request
   [#933](https://github.com/VirtualBox/virtualbox/pull/933)), debug registers left armed after debugging, and
   `--x2apic off` turning the APIC off.
-* **Guidance from measurements:** an NVMe controller gave 51k random-read IOPS against 12–14k for the default SATA
-  controller; NAT is limited by the NAT engine, not the network card (details on the [speed page](speed.html)).
+* **Guidance from measurements:** an NVMe or virtio-SCSI controller is about 3 times faster than the default SATA
+  controller with a deep queue, and the host I/O cache matters a lot ([storage page](storage.html)); NAT uploads were
+  limited by the NAT engine, not the network card ([speed page](speed.html)).
 * **Test tools:** the stand-alone VBoxBFE front end got VBVA support and several crash fixes, used to run the guest
   benchmarks and the Validation Kit boot sector tests.
 
@@ -104,7 +123,8 @@ pull request per change, smallest and best-tested first), with the evidence on t
 * **Next, in order:** the other speed and correctness changes marked *Planned for upstream* on the
   [list of changes](changes.html). Two of them target problems other people already reported upstream, [#861](https://github.com/VirtualBox/virtualbox/issues/861)
   and [#726](https://github.com/VirtualBox/virtualbox/issues/726).
-* **Staying in this fork for now:** the virtio-gpu device (large and experimental, it may be offered later), [macOS guest
+* **Staying in this fork for now:** the NAT upload change (it changes the bundled libslirp, so it would go to libslirp
+  first), the virtio-gpu device (large and experimental, it may be offered later), [macOS guest
   support](macos.html) (unlikely to go upstream: Tahoe is the last macOS release for Intel processors), high resolution waits
   and the test tools.
 
