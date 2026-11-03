@@ -793,6 +793,14 @@
       </xsd:restriction>
     </xsd:simpleType>
   </xsd:attribute>
+  <xsd:attribute name="hostVisibleSize" default="1024"> <!-- VirtioGpu only, in MB, power of two -->
+    <xsd:simpleType>
+      <xsd:restriction base="xsd:unsignedInt">
+        <xsd:minInclusive value="64"/>
+        <xsd:maxInclusive value="16384"/>
+      </xsd:restriction>
+    </xsd:simpleType>
+  </xsd:attribute>
   <xsd:attribute name="monitorCount" type="TMonitorCount" default="1"/>
   <xsd:attribute name="MonitorCount" type="TMonitorCount"/> <!-- deprecated -->
   <xsd:attribute name="accelerate3D" type="xsd:boolean" default="false"/>

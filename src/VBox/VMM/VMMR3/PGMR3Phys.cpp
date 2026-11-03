@@ -4189,6 +4189,8 @@ static int pgmR3PhysMmio2UnmapLocked(PVM pVM, uint32_t const idxFirst, uint32_t 
                                     ("NEMR3NotifyPhysMmioExUnmap failed: %Rrc - GCPhys=%RGp LB %RGp fNemFlags=%#x pbR3=%p %s\n",
                                      rc, pRamRange->GCPhys, pRamRange->cb, fNemFlags, pMmio2->pbR3, pRamRange->pszDesc),
                                     rcRet = rc);
+                if (RT_FAILURE(rc) && (fOldFlags & PGMREGMMIO2RANGE_F_HOST_WINDOW))
+                    pMmio2->fFlags |= PGMREGMMIO2RANGE_F_NEM_UNMAP_FAILED; /* the hypervisor may still map host pages */
                 if (u2State != UINT8_MAX)
                     pgmPhysSetNemStateForPages(pRamRange->aPages, pRamRange->cb >> GUEST_PAGE_SHIFT, u2State);
             }
@@ -4947,6 +4949,14 @@ static int pgmR3PhysMmio2UnmapHostRangeLocked(PVM pVM, PGMR3MMIO2UNMAPHOSTRANGEA
     if (RT_FAILURE(rc))
         return rc;
     PPGMMMIO2HOSTWINDOW const pHostWindow = pMmio2->pHostWindowR3;
+
+    /* A failed hypervisor unmap of the whole window means the guest may still reach the pages. */
+    if (pMmio2->fFlags & PGMREGMMIO2RANGE_F_NEM_UNMAP_FAILED)
+    {
+        LogRel(("PGMR3PhysMmio2UnmapHostRange: %s: the hypervisor did not unmap the window, the host memory must stay\n",
+                pRamRange->pszDesc));
+        return VERR_RESOURCE_BUSY;
+    }
 
     /*
      * The whole range must be backed, and no device may hold a page mapping lock

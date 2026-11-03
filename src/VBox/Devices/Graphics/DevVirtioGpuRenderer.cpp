@@ -298,6 +298,10 @@ static const struct
  * renderer at a time, so waiting longer than this means a call into the library
  * is stuck: the renderer is then declared dead and the library is leaked. */
 #define VGPURENDERER_CALL_LOCK_TIMEOUT_MS       RT_MS_30SEC
+/** How long a caller waits for one call into the library to finish.  A call
+ * that takes longer (a hung or lost GPU) declares the renderer dead, so that
+ * suspend and power off do not wait for ever. */
+#define VGPURENDERER_CALL_TIMEOUT_MS            RT_MS_1MIN
 
 
 /*********************************************************************************************************************************
@@ -693,25 +697,52 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
         RTThreadSleep(10);
     }
     Assert(!pThis->pReqPending);
-    ASMAtomicWritePtr(&pThis->pReqPending, pReq);
+
+    /* The thread works on a heap copy, so that a call stuck in the library can be
+       abandoned without the thread writing to our stack when it returns (or never).
+       The pointers inside (command stream, name) still refer to the caller's
+       memory; a stuck library is leaked and never used again. */
+    PVGPURENDERREQ pReqHeap = (PVGPURENDERREQ)RTMemDup(pReq, sizeof(*pReq));
+    if (!pReqHeap)
+    {
+        RTCritSectLeave(&pThis->CritSectCall);
+        return VERR_NO_MEMORY;
+    }
+    ASMAtomicWritePtr(&pThis->pReqPending, pReqHeap);
     int rc = RTSemEventSignal(pThis->hEvtReq);
-    if (RT_FAILURE(rc) && ASMAtomicCmpXchgPtr(&pThis->pReqPending, (PVGPURENDERREQ)NULL, pReq))
+    if (RT_FAILURE(rc) && ASMAtomicCmpXchgPtr(&pThis->pReqPending, (PVGPURENDERREQ)NULL, pReqHeap))
     {
         /* The thread never saw the request. */
         AssertLogRelMsgFailed(("%Rrc\n", rc));
+        RTMemFree(pReqHeap);
         RTCritSectLeave(&pThis->CritSectCall);
         return rc;
     }
 
-    /* The request lives on our stack, so do not return before the thread is done with it. */
+    uint64_t const msDoneDeadline = RTTimeMilliTS() + VGPURENDERER_CALL_TIMEOUT_MS;
     for (;;)
     {
-        rc = RTSemEventWait(pThis->hEvtDone, RT_INDEFINITE_WAIT);
+        uint64_t const msNow = RTTimeMilliTS();
+        if (msNow >= msDoneDeadline)
+        {
+            /* Leak the request: the thread may still use it. */
+            ASMAtomicWriteBool(&pThis->fDead, true);
+            LogRel(("VirtioGpu: A call into the renderer library (request %d) did not finish in %RU32 ms, giving up on it\n",
+                    (int)pReqHeap->enmType, (uint32_t)VGPURENDERER_CALL_TIMEOUT_MS));
+            RTCritSectLeave(&pThis->CritSectCall);
+            return VERR_TIMEOUT;
+        }
+        rc = RTSemEventWait(pThis->hEvtDone, (RTMSINTERVAL)RT_MIN(msDoneDeadline - msNow, 1000));
         if (RT_SUCCESS(rc))
             break;
-        AssertLogRelMsgFailed(("%Rrc\n", rc));
-        RTThreadSleep(10);
+        if (rc != VERR_TIMEOUT)
+        {
+            AssertLogRelMsgFailed(("%Rrc\n", rc));
+            RTThreadSleep(10);
+        }
     }
+    *pReq = *pReqHeap;
+    RTMemFree(pReqHeap);
     RTCritSectLeave(&pThis->CritSectCall);
     return pReq->rc;
 }

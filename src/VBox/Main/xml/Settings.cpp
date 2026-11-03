@@ -7842,7 +7842,8 @@ void MachineConfigFile::buildHardwareXML(xml::ElementNode &elmParent,
         }
         if (hw.graphicsAdapter.ulVRAMSizeMB != 8)
             pelmDisplay->setAttribute("VRAMSize", hw.graphicsAdapter.ulVRAMSizeMB);
-        if (hw.graphicsAdapter.ulHostVisibleSizeMB != 1024)
+        if (   hw.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu /* older settings versions lack it */
+            && hw.graphicsAdapter.ulHostVisibleSizeMB != 1024)
             pelmDisplay->setAttribute("hostVisibleSize", hw.graphicsAdapter.ulHostVisibleSizeMB);
         if (hw.graphicsAdapter.cMonitors > 1)
             pelmDisplay->setAttribute("monitorCount", hw.graphicsAdapter.cMonitors);

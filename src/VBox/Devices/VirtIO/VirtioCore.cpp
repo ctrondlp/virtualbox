@@ -1376,7 +1376,7 @@ DECLHIDDEN(int) virtioCoreR3VirtqUsedBufPut(PPDMDEVINS pDevIns, PVIRTIOCORE pVir
     while (cbRemain)
     {
         cbCopy = RT_MIN(pSgPhysReturn->cbSegLeft, cbRemain);
-        Assert(cbCopy > 0);
+        AssertReturn(cbCopy > 0, VERR_BUFFER_OVERFLOW); /* A zero length segment must not make this loop forever. */
         virtioCoreGCPhysWrite(pVirtio, pDevIns, (RTGCPHYS)pSgPhysReturn->GCPhysCur, pvBuf, cbCopy);
         virtioCoreGCPhysChainAdvance(pSgPhysReturn, cbCopy);
         pvBuf += cbCopy;
@@ -2289,9 +2289,10 @@ DECLINLINE(VBOXSTRICTRC) virtioDeviceCfgRead(PPDMDEVINS pDevIns, PVIRTIOCORE pVi
          * as a blob, and virtio dev-specific code separates into fields) is READ, it must be compared
          * for deltas from previous read to maintain a config gen. seq. counter (VirtIO 1.0, section 4.1.4.3.1)
          */
-        bool fDevSpecificFieldChanged = RT_BOOL(memcmp(pVirtioCC->pbDevSpecificCfg + offDevCfg,
-                                                 pVirtioCC->pbPrevDevSpecificCfg + offDevCfg,
-                                                 RT_MIN(cb, pVirtioCC->cbDevSpecificCfg - offDevCfg)));
+        bool fDevSpecificFieldChanged = offDevCfg < pVirtioCC->cbDevSpecificCfg /* the subtraction must not wrap */
+                                      && RT_BOOL(memcmp(pVirtioCC->pbDevSpecificCfg + offDevCfg,
+                                                        pVirtioCC->pbPrevDevSpecificCfg + offDevCfg,
+                                                        RT_MIN(cb, pVirtioCC->cbDevSpecificCfg - offDevCfg)));
 
         memcpy(pVirtioCC->pbPrevDevSpecificCfg, pVirtioCC->pbDevSpecificCfg, pVirtioCC->cbDevSpecificCfg);
 

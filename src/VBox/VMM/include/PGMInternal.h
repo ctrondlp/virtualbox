@@ -1681,6 +1681,11 @@ typedef PGMREGMMIO2RANGE *PPGMREGMMIO2RANGE;
 /** Set if this is a host window (PGMPHYS_MMIO2_FLAGS_HOST_WINDOW), see
  * PGMREGMMIO2RANGE::pHostWindowR3.  There is no backing (pbR3 is NULL). */
 #define PGMREGMMIO2RANGE_F_HOST_WINDOW          UINT16_C(0x0200)
+/** Set if the hypervisor refused to unmap this host window when the whole
+ * region was unmapped: the guest may still reach the host pages it holds, so
+ * PGMR3PhysMmio2UnmapHostRange refuses from then on and the owner must not
+ * free the memory. */
+#define PGMREGMMIO2RANGE_F_NEM_UNMAP_FAILED     UINT16_C(0x0400)
 /** @} */
 
 
