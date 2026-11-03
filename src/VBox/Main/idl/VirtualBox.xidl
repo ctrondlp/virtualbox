@@ -6224,19 +6224,6 @@
       <desc>Video memory size in megabytes.</desc>
     </attribute>
 
-    <attribute name="hostVisibleSize" type="unsigned long">
-      <desc>
-        Size in megabytes of the host visible memory window of the virtio-gpu
-        graphics controller, the address space the guest can map host GPU
-        memory into for 3D acceleration.  It must be a power of two from 64 to
-        16384.  The window is address space only and is not backed by memory
-        until the guest maps something into it.
-        <note>
-          Only used by the VirtioGpu graphics controller.
-        </note>
-      </desc>
-    </attribute>
-
     <attribute name="monitorCount" type="unsigned long">
       <desc>
         Number of virtual monitors.
@@ -6277,6 +6264,19 @@
         <desc>@c true if the feature is enabled, @c false if not.</desc>
       </param>
     </method>
+
+    <attribute name="hostVisibleSize" type="unsigned long">
+      <desc>
+        Size in megabytes of the host visible memory window of the virtio-gpu
+        graphics controller, the address space the guest can map host GPU
+        memory into for 3D acceleration.  It must be a power of two from 64 to
+        16384.  The window is address space only and is not backed by memory
+        until the guest maps something into it.
+        <note>
+          Only used by the VirtioGpu graphics controller.
+        </note>
+      </desc>
+    </attribute>
 
   </interface>
 
