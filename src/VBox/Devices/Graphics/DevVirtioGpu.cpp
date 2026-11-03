@@ -166,6 +166,8 @@
  *    directory).
  *  - "HostVisibleSize": size of the host visible window in bytes, a power of
  *    two between 64 MB and 16 GB (default 1 GB).
+ *  - "MaxBlobMemory": limit in bytes for the size of all blob resources
+ *    together, what the guest can make the host allocate (default 16 GB).
  *  - LUN#0: the display driver (MainDisplay).  Without one the device runs
  *    headless.
  */
@@ -252,6 +254,9 @@
 #define VIRTIOGPU_MAX_BLOB_RESOURCES            8192
 /** The maximum size of one blob resource. */
 #define VIRTIOGPU_MAX_BLOB_SIZE                 _4G
+/** The default limit for the size of all blobs together (host GPU and shared
+ * memory the guest can make the host allocate); "MaxBlobMemory" overrides it. */
+#define VIRTIOGPU_MAX_BLOB_MEMORY_DEFAULT       (16 * _1G64)
 /** The maximum host shared memory of all blobs with blob id 0 together (for
  * Venus these are plain host memory the library allocates on request). */
 #define VIRTIOGPU_MAX_SHM_BLOB_MEMORY           _1G
@@ -599,6 +604,10 @@ typedef struct VIRTIOGPUR3
     uint64_t                cbMapped;
     /** Size of all blobs with blob id 0 (host shared memory). */
     uint64_t                cbShmBlobs;
+    /** Size of all blob resources together. */
+    uint64_t                cbBlobTotal;
+    /** The limit for cbBlobTotal (set at construction, read only afterwards). */
+    uint64_t                cbBlobLimit;
     /** @} */
 
     /** @name Venus: owned by the control worker, see the NOTES.
@@ -972,6 +981,7 @@ static void vgpuR3ResourcesDestroyAll(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIR
     pThisCC->cMappedBlobs         = 0;
     pThisCC->cbMapped             = 0;
     pThisCC->cbShmBlobs           = 0;
+    pThisCC->cbBlobTotal          = 0;
     if (fLock)
         vgpuR3StateUnlock(pDevIns, pThis);
 
@@ -1103,6 +1113,7 @@ static uint32_t vgpuR3BlobUnref(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
     vgpuR3StateLock(pDevIns, pThis);
     RTListNodeRemove(&pRes->Node);
     pThisCC->cBlobs--;
+    pThisCC->cbBlobTotal -= pRes->cbBlob;
     if (!pRes->idBlob)
         pThisCC->cbShmBlobs -= pRes->cbBlob;
     vgpuR3StateUnlock(pDevIns, pThis);
@@ -1751,9 +1762,14 @@ static void vgpuR3FencesProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
  * @param   pReqHdr     The request header (host copy).
  * @param   pvResp      The response, header filled in.
  * @param   cbResp      The response size.
+ * @param   fFailed     The command failed.  It has no work of its own, but a
+ *                      fence on a ring signals everything up to its id, so it
+ *                      must not complete before the earlier fences of the same
+ *                      ring: it is parked behind the last of them (and
+ *                      completed at once if there is none).
  */
 static bool vgpuR3FenceDefer(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTQBUF pVirtqBuf,
-                             PCVIRTIOGPUCTRLHDR pReqHdr, void const *pvResp, size_t cbResp)
+                             PCVIRTIOGPUCTRLHDR pReqHdr, void const *pvResp, size_t cbResp, bool fFailed)
 {
     RT_NOREF(pDevIns);
     uint32_t const iCtx = vgpuR3ContextLookup(pThisCC, pReqHdr->uCtxId);
@@ -1761,6 +1777,23 @@ static bool vgpuR3FenceDefer(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC 
         return false; /* No context (any more), e.g. CTX_DESTROY: nothing to wait for. */
     uint32_t const uRingIdx = pReqHdr->fFlags & VIRTIOGPU_FLAG_INFO_RING_IDX ? pReqHdr->uRingIdx : 0;
     AssertReturn(uRingIdx < VIRTIOGPU_MAX_RINGS, false); /* Checked by vgpuR3CtrlCmdProcess. */
+
+    uint64_t uWaitFenceId = pReqHdr->uFenceId;
+    if (fFailed)
+    {
+        /* Behind the newest parked command of this ring, if any. */
+        bool fFound = false;
+        uWaitFenceId = 0;
+        PVIRTIOGPUPENDING pPrev;
+        RTListForEach(&pThisCC->ListPending, pPrev, VIRTIOGPUPENDING, Node)
+            if (pPrev->iCtx == iCtx && pPrev->uRingIdx == uRingIdx && (!fFound || pPrev->uFenceId > uWaitFenceId))
+            {
+                uWaitFenceId = pPrev->uFenceId;
+                fFound       = true;
+            }
+        if (!fFound)
+            return false;
+    }
 
     PVIRTIOGPUPENDING pPend = (PVIRTIOGPUPENDING)RTMemAlloc(RT_UOFFSETOF(VIRTIOGPUPENDING, abResp) + cbResp);
     if (!pPend)
@@ -1770,11 +1803,14 @@ static bool vgpuR3FenceDefer(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC 
         return false;
     }
 
-    int rc = vgpuR3RendererContextFence(pThisCC->pRenderer, pReqHdr->uCtxId, uRingIdx, pReqHdr->uFenceId);
-    if (RT_FAILURE(rc))
+    if (!fFailed)
     {
-        RTMemFree(pPend);
-        return false;
+        int rc = vgpuR3RendererContextFence(pThisCC->pRenderer, pReqHdr->uCtxId, uRingIdx, pReqHdr->uFenceId);
+        if (RT_FAILURE(rc))
+        {
+            RTMemFree(pPend);
+            return false;
+        }
     }
 
     /* The fence may have retired already: the callback then set fFencesSignaled
@@ -1782,7 +1818,7 @@ static bool vgpuR3FenceDefer(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC 
     pPend->pVirtqBuf = pVirtqBuf;
     pPend->iCtx      = iCtx;
     pPend->uRingIdx  = uRingIdx;
-    pPend->uFenceId  = pReqHdr->uFenceId;
+    pPend->uFenceId  = uWaitFenceId;
     pPend->uGen      = pThis->aWorkers[VIRTIOGPU_VIRTQ_CONTROL].uCmdGen;
     pPend->cbResp    = cbResp;
     memcpy(pPend->abResp, pvResp, cbResp);
@@ -1857,10 +1893,28 @@ static void vgpuR3VenusTeardown(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
         }
     }
 
-    /* 2. The contexts, dropping their parked commands: the queues are gone. */
+    /* 2. The contexts, dropping their parked commands: the queues are gone.
+          The library may free a context's blobs with the context, so a context
+          that created a blob the guest can still reach is left alone: its memory
+          must stay valid for as long as the mapping exists. */
     for (uint32_t iCtx = 0; iCtx < VIRTIOGPU_MAX_CONTEXTS; iCtx++)
-        if (pThisCC->paContexts[iCtx].idCtx)
+    {
+        uint32_t const idCtx = pThisCC->paContexts[iCtx].idCtx;
+        if (!idCtx)
+            continue;
+        bool fKeep = false;
+        if (pThisCC->fWindowLeaked)
+            RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
+                if (pRes->fBlob && pRes->fMapLeaked && pRes->idCtxCreator == idCtx)
+                {
+                    fKeep = true;
+                    break;
+                }
+        if (fKeep)
+            LogRel(("%s: Keeping context %RU32, a blob it created is still reachable by the guest\n", pThis->szInstance, idCtx));
+        else
             vgpuR3ContextDestroy(pDevIns, pThis, pThisCC, iCtx, true /*fDropPending*/);
+    }
 
     /* 3. The blob resources, except those whose memory the guest may still reach. */
     RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
@@ -2182,6 +2236,12 @@ static uint32_t vgpuR3CmdResourceCreateBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis
                        pThis->szInstance, idResource, pReq->cbBlob));
         return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
     }
+    if (pReq->cbBlob > pThisCC->cbBlobLimit - RT_MIN(pThisCC->cbBlobTotal, pThisCC->cbBlobLimit))
+    {
+        LogRelMax(16, ("%s: Blob %RU32 (%#RX64 bytes) exceeds the limit for all blobs (%#RX64 of %#RX64 bytes in use)\n",
+                       pThis->szInstance, idResource, pReq->cbBlob, pThisCC->cbBlobTotal, pThisCC->cbBlobLimit));
+        return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+    }
     RT_UNTRUSTED_VALIDATED_FENCE();
 
     PVIRTIOGPURESOURCE pRes = (PVIRTIOGPURESOURCE)RTMemAllocZ(sizeof(*pRes));
@@ -2207,6 +2267,7 @@ static uint32_t vgpuR3CmdResourceCreateBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis
     vgpuR3StateLock(pDevIns, pThis);
     RTListAppend(&pThisCC->ListResources, &pRes->Node);
     pThisCC->cBlobs++;
+    pThisCC->cbBlobTotal += pRes->cbBlob;
     if (!pRes->idBlob)
         pThisCC->cbShmBlobs += pRes->cbBlob;
     vgpuR3StateUnlock(pDevIns, pThis);
@@ -2503,11 +2564,11 @@ static void vgpuR3CtrlCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGP
        renderer to retire a fence created behind it (see the NOTES). */
     bool fParked = false;
     if (   (uReq.Hdr.fFlags & VIRTIOGPU_FLAG_FENCE)
-        && uRespType < VIRTIOGPU_RESP_ERR_UNSPEC
         && (fFeatures & VIRTIOGPU_F_VIRGL)
         && pThisCC->pRenderer
         && uReq.Hdr.uCtxId != 0)
-        fParked = vgpuR3FenceDefer(pDevIns, pThis, pThisCC, pVirtqBuf, &uReq.Hdr, pvResp, cbResp);
+        fParked = vgpuR3FenceDefer(pDevIns, pThis, pThisCC, pVirtqBuf, &uReq.Hdr, pvResp, cbResp,
+                                   uRespType >= VIRTIOGPU_RESP_ERR_UNSPEC /*fFailed*/);
     if (!fParked)
         vgpuR3CmdComplete(pDevIns, pThis, pThisCC, VIRTIOGPU_VIRTQ_CONTROL, pVirtqBuf, pvResp, cbResp,
                           pThis->aWorkers[VIRTIOGPU_VIRTQ_CONTROL].uCmdGen);
@@ -3751,7 +3812,7 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
      * Validate and read the configuration.  MmioBase and Irq are read by VirtioCore
      * (MmioBase also here, Venus needs the PCI transport).
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|RendererPath|HostVisibleSize", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|RendererPath|HostVisibleSize|MaxBlobMemory", "");
 
     uint32_t cMonitors = 1;
     int rc = pHlp->pfnCFGMQueryU32Def(pCfg, "MonitorCount", &cMonitors, 1);
@@ -3787,6 +3848,12 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
         return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_PARAMETER, RT_SRC_POS,
                                    N_("virtio-gpu: \"HostVisibleSize\" is %#RX64, it must be a power of two from 64 MB to 16 GB"),
                                    cbHostVisible);
+
+    uint64_t cbBlobLimit = VIRTIOGPU_MAX_BLOB_MEMORY_DEFAULT;
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "MaxBlobMemory", &cbBlobLimit, VIRTIOGPU_MAX_BLOB_MEMORY_DEFAULT);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc, N_("virtio-gpu: Failed to read \"MaxBlobMemory\""));
+    pThisCC->cbBlobLimit = cbBlobLimit;
 
     /* VirtioCore reads this too; Venus needs the PCI transport for its BAR. */
     RTGCPHYS GCPhysMmioBase = NIL_RTGCPHYS;
