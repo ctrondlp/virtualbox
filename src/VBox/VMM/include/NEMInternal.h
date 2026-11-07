@@ -639,6 +639,8 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatExitExceptionUd;
     STAMCOUNTER                 StatExitExceptionUdHandled;
     STAMCOUNTER                 StatExitApicEoi;
+    STAMCOUNTER                 StatApicMmioDirect;
+    STAMCOUNTER                 StatApicMmioToIem;
     STAMCOUNTER                 StatExitApicSipiInitTrap;
     STAMCOUNTER                 StatExitCanceled;
 # endif
