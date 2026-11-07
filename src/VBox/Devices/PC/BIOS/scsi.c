@@ -93,6 +93,11 @@ void inline high_bits_restore(uint16_t u16EaxHi)
 /* Pointers to the HBA specific access routines. */
 scsi_hba_t hbaacc[] =
 {
+#ifdef VBOX_WITH_NVME
+    /* Must be first: its initialization allocates conventional memory, which moves the EBDA
+     * and thereby the queues of any HBA initialized before it (e.g. virtio-scsi). */
+    { 0x80ee, 0x4e56, NULL,                 nvme_scsi_init,     nvme_scsi_cmd_data_out,     nvme_scsi_cmd_data_in     },
+#endif
     { 0x1000, 0x0030, NULL,                 lsilogic_scsi_init, lsilogic_scsi_cmd_data_out, lsilogic_scsi_cmd_data_in }, /* SPI */
     { 0x1000, 0x0054, NULL,                 lsilogic_scsi_init, lsilogic_scsi_cmd_data_out, lsilogic_scsi_cmd_data_in }, /* SAS */
     { 0x104b, 0x1040, NULL,                 buslogic_scsi_init, buslogic_scsi_cmd_data_out, buslogic_scsi_cmd_data_in }, /* PCI */
@@ -534,7 +539,11 @@ void BIOSCALL scsi_init(void)
             DBG_SCSI("SCSI HBA at Bus %u DevFn 0x%x (raw 0x%x)\n", u8Bus, u8DevFn, busdevfn);
             rc = hbaacc[i].init(hba_seg :> 0, u8Bus, u8DevFn);
             if (!rc)
+            {
+                /* The driver may have allocated memory and thereby moved the EBDA. */
+                hba_seg = read_word(0x0040, 0x000E) + hba_ofs;
                 scsi_enumerate_attached_devices(hba_seg, hba_ofs, i);
+            }
             /** @todo Free memory on error. */
         }
     }

@@ -163,6 +163,14 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VMM: Guests that use the xAPIC run faster on virtual machines
+          with several virtual CPUs on Windows hosts using Hyper-V as the
+          virtualization engine, as accesses to the APIC registers from
+          several virtual CPUs no longer wait for each other
+          (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
@@ -171,6 +179,13 @@ Rules for adding a changelog entry to make them look more uniform:
         <para>VBoxManage: Fixed 'modifyvm --x86-x2apic off' also disabling the
           APIC, which stopped 64-bit VMs, VMs with more than one CPU and VMs
           with an I/O APIC from starting (github:gh-861)</para>
+      </listitem>
+
+      <listitem>
+        <para>NAT: Improved the TCP throughput from the guest to the host, by about a
+          quarter for a single connection and several times for many parallel connections
+          on Windows hosts. Set VBoxInternal/Devices/&lt;nic&gt;/0/LUN#0/Config/DeferHostWrites
+          to 0 to restore the previous behavior</para>
       </listitem>
 
       <listitem>
@@ -248,6 +263,12 @@ Rules for adding a changelog entry to make them look more uniform:
           performance cores with precise timers. Set the environment variable
           VBOX_NO_POWER_THROTTLING_OPTOUT=1 to restore the previous behavior
           (bug #21985)</para>
+      </listitem>
+
+      <listitem>
+        <para>BIOS: Added support for booting from NVMe disks, so that virtual machines
+          using the legacy BIOS firmware no longer need EFI to start from an NVMe
+          controller</para>
       </listitem>
 
       <listitem>

@@ -475,6 +475,7 @@ int slirp_set_vdnssearch(Slirp *, const char * const *);
 void slirp_set_vnameserver(Slirp *, struct in_addr);
 void slirp_set_vnameserver6(Slirp *, struct in6_addr);
 void slirp_set_disable_dns(Slirp *, bool);
+void slirp_set_defer_host_writes(Slirp *, bool);
 void slirp_set_RealNameservers(Slirp *, size_t, struct in_addr *);
 void slirp_set_IPv6RealNameservers(Slirp *, size_t, struct in6_addr *);
 #endif

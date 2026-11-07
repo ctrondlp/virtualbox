@@ -1376,7 +1376,7 @@ DECLHIDDEN(int) virtioCoreR3VirtqUsedBufPut(PPDMDEVINS pDevIns, PVIRTIOCORE pVir
     while (cbRemain)
     {
         cbCopy = RT_MIN(pSgPhysReturn->cbSegLeft, cbRemain);
-        Assert(cbCopy > 0);
+        AssertReturn(cbCopy > 0, VERR_BUFFER_OVERFLOW); /* A zero length segment must not make this loop forever. */
         virtioCoreGCPhysWrite(pVirtio, pDevIns, (RTGCPHYS)pSgPhysReturn->GCPhysCur, pvBuf, cbCopy);
         virtioCoreGCPhysChainAdvance(pSgPhysReturn, cbCopy);
         pvBuf += cbCopy;
@@ -2289,9 +2289,10 @@ DECLINLINE(VBOXSTRICTRC) virtioDeviceCfgRead(PPDMDEVINS pDevIns, PVIRTIOCORE pVi
          * as a blob, and virtio dev-specific code separates into fields) is READ, it must be compared
          * for deltas from previous read to maintain a config gen. seq. counter (VirtIO 1.0, section 4.1.4.3.1)
          */
-        bool fDevSpecificFieldChanged = RT_BOOL(memcmp(pVirtioCC->pbDevSpecificCfg + offDevCfg,
-                                                 pVirtioCC->pbPrevDevSpecificCfg + offDevCfg,
-                                                 RT_MIN(cb, pVirtioCC->cbDevSpecificCfg - offDevCfg)));
+        bool fDevSpecificFieldChanged = offDevCfg < pVirtioCC->cbDevSpecificCfg /* the subtraction must not wrap */
+                                      && RT_BOOL(memcmp(pVirtioCC->pbDevSpecificCfg + offDevCfg,
+                                                        pVirtioCC->pbPrevDevSpecificCfg + offDevCfg,
+                                                        RT_MIN(cb, pVirtioCC->cbDevSpecificCfg - offDevCfg)));
 
         memcpy(pVirtioCC->pbPrevDevSpecificCfg, pVirtioCC->pbDevSpecificCfg, pVirtioCC->cbDevSpecificCfg);
 
@@ -2319,14 +2320,29 @@ DECLINLINE(VBOXSTRICTRC) virtioDeviceCfgRead(PPDMDEVINS pDevIns, PVIRTIOCORE pVi
  *
  * This MMIO handler specifically supports the VIRTIO_PCI_CAP_PCI_CFG capability defined
  * in the VirtIO 1.0 specification, section 4.1.4.7, and as such is restricted to reads
- * of 1, 2 or 4 bytes, only.
+ * of 1, 2 or 4 bytes.  Wider accesses are split into dwords, other sizes read as all ones.
  *
  */
 static DECLCALLBACK(VBOXSTRICTRC) virtioMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
 {
     PVIRTIOCORE   pVirtio   = PDMINS_2_DATA(pDevIns, PVIRTIOCORE);
     PVIRTIOCORECC pVirtioCC = PDMINS_2_DATA_CC(pDevIns, PVIRTIOCORECC);
-    AssertReturn(cb == 1 || cb == 2 || cb == 4, VINF_IOM_MMIO_UNUSED_FF);
+    if (RT_UNLIKELY(cb != 1 && cb != 2 && cb != 4))
+    {
+        /* The specification only has 8, 16 and 32 bit accesses to these structures (4.1.3.1), but the guest decides
+           what its instructions do.  Treat a wider access like a bus would, as a series of dwords.  Anything else
+           reads as all ones.  An error status here would take the whole VM down. */
+        if (cb > 4 && !(cb & 3))
+        {
+            VBOXSTRICTRC rcStrict = VINF_SUCCESS;
+            for (unsigned offPart = 0; offPart < cb && rcStrict == VINF_SUCCESS; offPart += 4)
+                rcStrict = virtioMmioRead(pDevIns, pvUser, off + offPart, (uint8_t *)pv + offPart, 4);
+            return rcStrict;
+        }
+        ASSERT_GUEST_MSG_FAILED(("Unsupported read access size to mapped capabilities region: off=%RGp cb=%u\n", off, cb));
+        memset(pv, 0xFF, cb);
+        return VINF_SUCCESS;
+    }
     Assert(pVirtio == (PVIRTIOCORE)pvUser); RT_NOREF(pvUser);
 
     STAM_PROFILE_ADV_START(&pVirtio->CTX_SUFF(StatRead), a);
@@ -2363,13 +2379,25 @@ static DECLCALLBACK(VBOXSTRICTRC) virtioMmioRead(PPDMDEVINS pDevIns, void *pvUse
  *
  * This MMIO handler specifically supports the VIRTIO_PCI_CAP_PCI_CFG capability defined
  * in the VirtIO 1.0 specification, section 4.1.4.7, and as such is restricted to writes
- * of 1, 2 or 4 bytes, only.
+ * of 1, 2 or 4 bytes.  Wider accesses are split into dwords, other sizes are ignored.
  */
 static DECLCALLBACK(VBOXSTRICTRC) virtioMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
 {
     PVIRTIOCORE   pVirtio   = PDMINS_2_DATA(pDevIns, PVIRTIOCORE);
     PVIRTIOCORECC pVirtioCC = PDMINS_2_DATA_CC(pDevIns, PVIRTIOCORECC);
-    AssertReturn(cb == 1 || cb == 2 || cb == 4, VERR_INVALID_PARAMETER);
+    if (RT_UNLIKELY(cb != 1 && cb != 2 && cb != 4))
+    {
+        /* See virtioMmioRead: split wider accesses into dwords, ignore the rest, never fail. */
+        if (cb > 4 && !(cb & 3))
+        {
+            VBOXSTRICTRC rcStrict = VINF_SUCCESS;
+            for (unsigned offPart = 0; offPart < cb && rcStrict == VINF_SUCCESS; offPart += 4)
+                rcStrict = virtioMmioWrite(pDevIns, pvUser, off + offPart, (uint8_t const *)pv + offPart, 4);
+            return rcStrict;
+        }
+        ASSERT_GUEST_MSG_FAILED(("Unsupported write access size to mapped capabilities region: off=%RGp cb=%u\n", off, cb));
+        return VINF_SUCCESS;
+    }
     Assert(pVirtio == (PVIRTIOCORE)pvUser); RT_NOREF(pvUser);
     STAM_PROFILE_ADV_START(&pVirtio->CTX_SUFF(StatWrite), a);
 
@@ -2718,7 +2746,20 @@ static DECLCALLBACK(VBOXSTRICTRC) virtioR3PciConfigRead(PPDMDEVINS pDevIns, PPDM
             return VINF_SUCCESS;
         }
 
+        *pu32Value = 0;
         VBOXSTRICTRC rcStrict = virtioMmioRead(pDevIns, pVirtio, pPciCap->uOffset, pu32Value, cb);
+        /* The MMIO handler may answer with the IOM "unused" statuses, which only IOM understands.  A PCI config
+           read has to deliver a value instead; passing them on is an unexpected status for the caller. */
+        if (rcStrict == VINF_IOM_MMIO_UNUSED_00)
+        {
+            *pu32Value = 0;
+            rcStrict   = VINF_SUCCESS;
+        }
+        else if (rcStrict == VINF_IOM_MMIO_UNUSED_FF)
+        {
+            *pu32Value = cb >= sizeof(uint32_t) ? UINT32_MAX : RT_BIT_32(cb * 8) - 1;
+            rcStrict   = VINF_SUCCESS;
+        }
         Log7Func((" Guest read virtio_pci_cfg_cap.pci_cfg_data, bar=%d, offset=%d, length=%d, result=0x%x -> %Rrc\n",
                    pPciCap->uBar, pPciCap->uOffset, uLength, *pu32Value, VBOXSTRICTRC_VAL(rcStrict)));
         return rcStrict;
@@ -2808,7 +2849,9 @@ DECLHIDDEN(int) virtioCoreR3LegacyDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHL
     }
 
     AssertLogRelMsgReturn(cQueues <= VIRTQ_MAX_COUNT, ("cQueues=%u!\n", cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
-    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < cQueues || (!cQueues && !pVirtio->uVirtqSelect),
+    /* The guest may select any queue below VIRTQ_MAX_COUNT (see the write handlers), including ones the device doesn't
+       have (Linux probes past the last queue), so that is what a saved selector has to be checked against. */
+    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < VIRTQ_MAX_COUNT,
                           ("uVirtqSelect=%u cQueues=%u\n", pVirtio->uVirtqSelect, cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
 
     Log(("\nRestoring %d  legacy-only virtio-net device queues from saved state:\n", cQueues));
@@ -2918,7 +2961,9 @@ DECLHIDDEN(int) virtioCoreR3ModernDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHL
     AssertRCReturn(rc, rc);
 
     AssertLogRelMsgReturn(cQueues <= VIRTQ_MAX_COUNT, ("cQueues=%u!\n", cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
-    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < cQueues || (!cQueues && !pVirtio->uVirtqSelect),
+    /* The guest may select any queue below VIRTQ_MAX_COUNT (see the write handlers), including ones the device doesn't
+       have (Linux probes past the last queue), so that is what a saved selector has to be checked against. */
+    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < VIRTQ_MAX_COUNT,
                           ("uVirtqSelect=%u cQueues=%u\n", pVirtio->uVirtqSelect, cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
 
     /** @todo Adapt this loop use cQueues argument instead of static queue count (safely with SSM versioning) */

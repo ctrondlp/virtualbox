@@ -62,6 +62,7 @@
 #include <VBox/vmm/dbgf.h>
 #include <VBox/vmm/dbgftrace.h>
 #include <VBox/vmm/gim.h>
+#include <VBox/dis.h>
 #include "NEMInternal.h"
 #include <VBox/vmm/vmcc.h>
 
@@ -2286,6 +2287,8 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitExceptionUdHandled, STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of handled #UD exits",         "/NEM/CPU%u/ExitExceptionUdHandled", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitUnrecoverable,   STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of unrecoverable exits",          "/NEM/CPU%u/ExitUnrecoverable", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitApicEoi,         STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of APIC EOI exits",               "/NEM/CPU%u/ExitApicEoi", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatApicMmioDirect,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of xAPIC page accesses done without IEM", "/NEM/CPU%u/ApicMmioDirect", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatApicMmioToIem,       STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of xAPIC page accesses left to IEM",     "/NEM/CPU%u/ApicMmioToIem", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitApicSipiInitTrap,STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of APIC SIPI/INIT trap exits",    "/NEM/CPU%u/ExitApicSipiInit", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitCanceled,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of canceled exits (host interrupt?)", "/NEM/CPU%u/ExitCanceled", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatGetMsgTimeout,       STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of get message timeouts/alerts",  "/NEM/CPU%u/GetMsgTimeout", idCpu);
@@ -4573,6 +4576,120 @@ DECLINLINE(void) nemR3WinCopyStateFromX64Header(PVMCPUCC pVCpu, WHV_VP_EXIT_CONT
 }
 
 
+/** @callback_method_impl{FNDISREADBYTES, Never has more bytes than the exit gave us.} */
+static DECLCALLBACK(int) nemR3WinApicMmioDisReadBytes(PDISSTATE pDis, uint8_t offInstr, uint8_t cbMinRead, uint8_t cbMaxRead)
+{
+    RT_BZERO(&pDis->Instr.ab[offInstr], cbMaxRead);
+    pDis->cbCachedInstr += cbMaxRead;
+    RT_NOREF(cbMinRead);
+    return VERR_NO_DATA;
+}
+
+
+/**
+ * Tries to do a guest access to the xAPIC page without IEM and the page manager.
+ *
+ * Every EOI, ICR and timer register access of a guest in xAPIC mode ends up
+ * here, from all the vCPUs at once.  Going through IEM costs the PGM lock
+ * several times per access (page info check, mapping the page, committing the
+ * write), and the vCPUs then spend most of their time waiting for each other.
+ *
+ * This handles only what is certain: a plain 32-bit MOV between a register (or
+ * an immediate) and the 16 byte aligned register in the xAPIC page, in 64-bit
+ * code and without a pending single step or breakpoint trap, which IEM would
+ * raise on finishing the instruction.  The access is done by the same
+ * code as for the MMIO region.  Anything else is left to IEM.
+ *
+ * @returns true if the instruction was emulated, @a *prcStrict is the status.
+ *          false if nothing was changed and IEM has to do it.
+ * @param   pVM             The cross context VM structure.
+ * @param   pVCpu           The cross context per CPU structure.
+ * @param   pExit           The VM exit information, state imported for IEM.
+ * @param   offApicPage     The offset of the access into the xAPIC page.
+ * @param   prcStrict       Where to return the strict status code when handled.
+ */
+static bool nemR3WinTryXApicPageAccess(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const *pExit,
+                                       uint16_t offApicPage, VBOXSTRICTRC *prcStrict)
+{
+    PCPUMCTX const pCtx = &pVCpu->cpum.GstCtx;
+    Assert(!(pCtx->fExtrn & (CPUMCTX_EXTRN_GPRS_MASK | CPUMCTX_EXTRN_RIP | CPUMCTX_EXTRN_RFLAGS | CPUMCTX_EXTRN_CS
+                             | CPUMCTX_EXTRN_EFER | CPUMCTX_EXTRN_DR7)));
+
+    /*
+     * Only for 64-bit code, a 16 byte aligned register and no single stepping
+     * or breakpoints (IEM would raise a #DB or DBGF event when finishing the
+     * instruction).  All that IEM does otherwise is clearing RF and the
+     * interrupt shadow.
+     */
+    uint8_t const cbInstrBytes = pExit->MemoryAccess.InstructionByteCount;
+    if (   cbInstrBytes == 0
+        || cbInstrBytes > sizeof(pExit->MemoryAccess.InstructionBytes)
+        || (offApicPage & 0xf)
+        || !CPUMIsGuestIn64BitCodeEx(pCtx)
+        || (pCtx->eflags.uBoth & (X86_EFL_TF | CPUMCTX_DBG_HIT_DRX_MASK | CPUMCTX_DBG_DBGF_MASK))
+        || (pCtx->dr[7] & X86_DR7_ENABLED_MASK)
+        || (DBGFBpGetDR7(pVM) & X86_DR7_ENABLED_MASK))
+        return false;
+
+    /*
+     * Decode the instruction: MOV r32,m32 / MOV m32,r32 / MOV m32,imm32.
+     */
+    DISSTATE Dis;
+    uint32_t cbInstr = 0;
+    int rc = DISInstrWithPrefetchedBytes(pCtx->rip, DISCPUMODE_64BIT, DISOPTYPE_ALL,
+                                         pExit->MemoryAccess.InstructionBytes, cbInstrBytes,
+                                         nemR3WinApicMmioDisReadBytes, NULL /*pvUser*/, &Dis, &cbInstr);
+    if (   RT_FAILURE(rc)
+        || cbInstr == 0
+        || cbInstr > cbInstrBytes
+        || Dis.pCurInstr->uOpcode != OP_MOV
+        || (Dis.x86.fPrefix & DISPREFIX_LOCK))
+        return false;
+
+    bool const fWrite = pExit->MemoryAccess.AccessInfo.AccessType == WHvMemoryAccessWrite;
+    if (!fWrite && pExit->MemoryAccess.AccessInfo.AccessType != WHvMemoryAccessRead)
+        return false;
+
+    PCDISOPPARAM const pParamMem   = fWrite ? &Dis.aParams[0] : &Dis.aParams[1];
+    PCDISOPPARAM const pParamOther = fWrite ? &Dis.aParams[1] : &Dis.aParams[0];
+    if (   !DISUSE_IS_EFFECTIVE_ADDR(pParamMem->fUse)
+        || DISGetParamSize(&Dis, pParamMem) != sizeof(uint32_t))
+        return false;
+    bool const fOtherIsReg = RT_BOOL(pParamOther->fUse & DISUSE_REG_GEN32);
+    if (fOtherIsReg)
+    {
+        if (   DISGetParamSize(&Dis, pParamOther) != sizeof(uint32_t)
+            || pParamOther->x86.Base.idxGenReg >= RT_ELEMENTS(pCtx->aGRegs))
+            return false;
+    }
+    else if (!fWrite || !(pParamOther->fUse & DISUSE_IMMEDIATE32) || (pParamOther->fUse & DISUSE_IMMEDIATE32_SX8))
+        return false;  /* Only MOV m32,imm32 has an immediate, and then it is never a read. */
+
+    uint64_t const uNewRip = pCtx->rip + cbInstr;
+    if (!X86_IS_CANONICAL(uNewRip))
+        return false;
+
+    /*
+     * Do the access like the MMIO region callbacks would and finish the instruction.
+     */
+    uint32_t uValue = 0;
+    if (fWrite)
+        uValue = fOtherIsReg ? pCtx->aGRegs[pParamOther->x86.Base.idxGenReg].u32 : (uint32_t)pParamOther->uValue;
+    VBOXSTRICTRC rcStrict = APICR3XApicPageAccess(pVCpu, offApicPage, fWrite, &uValue);
+    if (RT_FAILURE(rcStrict))
+    {
+        *prcStrict = rcStrict;
+        return true;
+    }
+    if (!fWrite)
+        pCtx->aGRegs[pParamOther->x86.Base.idxGenReg].u64 = uValue; /* 32-bit writes clear the upper half. */
+    pCtx->rip = uNewRip;
+    pCtx->eflags.uBoth &= ~(X86_EFL_RF | CPUMCTX_INHIBIT_SHADOW); /* Like IEM does when finishing an instruction. */
+    *prcStrict = rcStrict;
+    return true;
+}
+
+
 /**
  * Deals with memory access exits (WHvRunVpExitReasonMemoryAccess).
  *
@@ -4593,6 +4710,29 @@ nemR3WinHandleExitMemory(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT cons
      */
     if (pExit->VpContext.ExecutionState.InterruptionPending)
         pVCpu->cpum.GstCtx.fExtrn &= ~CPUMCTX_EXTRN_NEM_WIN_EVENT_INJECT;
+
+    /*
+     * Accesses to the xAPIC page (APIC enabled, in xAPIC mode) are MMIO to the
+     * APIC device, which is what the PGM page info check below would conclude as
+     * well, so we do not have to bother PGM for them.  See
+     * nemR3WinTryXApicPageAccess for the fast way of doing them.
+     */
+    uint64_t const uApicBaseMsr = PDMApicGetBaseMsrNoCheck(pVCpu);
+    bool const     fApicPage    = (uApicBaseMsr & (MSR_IA32_APICBASE_EN | MSR_IA32_APICBASE_EXTD)) == MSR_IA32_APICBASE_EN
+                               && (pExit->MemoryAccess.Gpa & X86_PAGE_4K_BASE_MASK) == MSR_IA32_APICBASE_GET_ADDR(uApicBaseMsr);
+    if (fApicPage && !pVM->nem.s.fLocalApicEmulation)
+    {
+        nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
+        int rcImport = nemHCWinCopyStateFromHyperV(pVM, pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM | CPUMCTX_EXTRN_DS | CPUMCTX_EXTRN_ES);
+        AssertRCReturn(rcImport, rcImport);
+        VBOXSTRICTRC rcStrictApic;
+        if (nemR3WinTryXApicPageAccess(pVM, pVCpu, pExit, (uint16_t)(pExit->MemoryAccess.Gpa & X86_PAGE_OFFSET_MASK), &rcStrictApic))
+        {
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatApicMmioDirect);
+            return rcStrictApic;
+        }
+        STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatApicMmioToIem);
+    }
 
     /*
      * Ask PGM for information about the given GCPhys.  We need to check if we're
@@ -4633,12 +4773,19 @@ nemR3WinHandleExitMemory(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT cons
 
     /*
      * Emulate the memory access, either access handler or special memory.
+     *
+     * The xAPIC page is left out of the exit history: every vCPU of an SMP guest
+     * hits it all the time (EOI, ICR, timer), and the history's re-execution of
+     * the following instructions in IEM (with a flushed IEM TLB) then has all the
+     * EMTs queueing on the PGM lock, which can eat most of the host time.
      */
-    PCEMEXITREC pExitRec = EMHistoryAddExit(pVCpu,
+    PCEMEXITREC pExitRec = !fApicPage
+                         ? EMHistoryAddExit(pVCpu,
                                               pExit->MemoryAccess.AccessInfo.AccessType == WHvMemoryAccessWrite
                                             ? EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_MMIO_WRITE)
                                             : EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_MMIO_READ),
-                                            pExit->VpContext.Rip + pExit->VpContext.Cs.Base, uHostTsc);
+                                            pExit->VpContext.Rip + pExit->VpContext.Cs.Base, uHostTsc)
+                         : NULL;
     nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
     rc = nemHCWinCopyStateFromHyperV(pVM, pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM | CPUMCTX_EXTRN_DS | CPUMCTX_EXTRN_ES);
     AssertRCReturn(rc, rc);

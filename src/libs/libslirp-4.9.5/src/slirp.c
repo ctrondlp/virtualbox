@@ -1884,6 +1884,12 @@ void slirp_set_vnameserver6(Slirp *pSlirp, struct in6_addr mAddr)
     pSlirp->vnameserver_addr6 = mAddr;
 }
 
+/* Enable or disable deferring of the writes to host TCP sockets, see Slirp::fDeferHostWrites. */
+void slirp_set_defer_host_writes(Slirp *pSlirp, bool fDefer)
+{
+    pSlirp->fDeferHostWrites = !!fDefer;
+}
+
 /* Enable or disable built-in DNS proxy support. */
 void slirp_set_disable_dns(Slirp *pSlirp, bool fDisableDNS)
 {

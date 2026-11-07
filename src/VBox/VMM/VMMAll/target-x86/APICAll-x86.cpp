@@ -2718,6 +2718,35 @@ DECLCALLBACK(VBOXSTRICTRC) apicWriteMmio(PPDMDEVINS pDevIns, void *pvUser, RTGCP
 }
 
 
+#ifdef IN_RING3
+/**
+ * Does a 32-bit access to a register of the calling EMT's xAPIC page.
+ *
+ * For execution engines that have already worked out what the guest access to
+ * the xAPIC page is, and so can skip the instruction emulation and the page
+ * manager.  It does exactly what the MMIO region callbacks do.
+ *
+ * @returns Strict VBox status code, as from the MMIO callbacks.
+ * @param   pVCpu       The cross context virtual CPU structure of the calling EMT.
+ * @param   offReg      The offset into the xAPIC page, must be 16 byte aligned.
+ * @param   fWrite      Whether this is a write (@c true) or a read.
+ * @param   puValue     The value to write or where to return the value read.
+ * @note    Only valid with this APIC backend (not the Hyper-V or KVM one) and
+ *          in xAPIC mode.
+ */
+VMM_INT_DECL(VBOXSTRICTRC) APICR3XApicPageAccess(PVMCPUCC pVCpu, uint16_t offReg, bool fWrite, uint32_t *puValue)
+{
+    VMCPU_ASSERT_EMT(pVCpu);
+    Assert(!(offReg & 0xf));
+    Assert(offReg < sizeof(XAPICPAGE));
+    PPDMDEVINS const pDevIns = VMCPU_TO_DEVINS(pVCpu);
+    if (fWrite)
+        return apicWriteMmio(pDevIns, NULL /*pvUser*/, offReg, puValue, sizeof(uint32_t));
+    return apicReadMmio(pDevIns, NULL /*pvUser*/, offReg, puValue, sizeof(uint32_t));
+}
+#endif /* IN_RING3 */
+
+
 /**
  * Sets the interrupt pending force-flag and pokes the EMT if required.
  *

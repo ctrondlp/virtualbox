@@ -80,7 +80,12 @@ void sbappend(struct socket *so, struct mbuf *m)
      * We only write if there's nothing in the buffer,
      * otherwise it'll arrive out of order, and hence corrupt
      */
+#ifdef VBOX
+    /* The direct write is only an optimisation. Skipping it lets sowrite() send everything queued in one go. */
+    if (!so->so_rcv.sb_cc && !so->slirp->fDeferHostWrites) {
+#else
     if (!so->so_rcv.sb_cc) {
+#endif
         slirp_ssize_t n_sent = slirp_send(so, m->m_data, m->m_len, 0);
 
         /* Almost impossible for this g_error() to execute, except in a OS error.  */
