@@ -1087,6 +1087,9 @@ VMM_INT_DECL(uint8_t)       PDMApicGetHighestIrr(PVMCPUCC pVCpu);
 VMM_INT_DECL(void)          PDMApicQueryEoiExitBitmap(PVMCPUCC pVCpu, uint64_t *pau64EoiBitmap);
 VMM_INT_DECL(int)           PDMApicIoApicRteChanged(PVMCC pVM, uint8_t uIoApicPin, uint8_t uDest, uint8_t uDestMode,
                                                     uint8_t uDeliveryMode, uint8_t uVector, uint8_t uTriggerMode);
+#ifdef IN_RING3
+VMM_INT_DECL(VBOXSTRICTRC)  APICR3XApicPageAccess(PVMCPUCC pVCpu, uint16_t offReg, bool fWrite, uint32_t *puValue);
+#endif
 #ifdef IN_RING0
 VMM_INT_DECL(int)           PDMR0ApicGetApicPageForCpu(PCVMCPUCC pVCpu, PRTHCPHYS pHCPhys, PRTR0PTR pR0Ptr, PRTR3PTR pR3Ptr);
 #endif
