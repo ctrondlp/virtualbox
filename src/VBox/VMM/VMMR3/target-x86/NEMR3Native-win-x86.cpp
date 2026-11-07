@@ -4207,12 +4207,22 @@ nemR3WinHandleExitMemory(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT cons
 
     /*
      * Emulate the memory access, either access handler or special memory.
+     *
+     * The xAPIC page is left out of the exit history: every vCPU of an SMP guest
+     * hits it all the time (EOI, ICR, timer), and the history's re-execution of
+     * the following instructions in IEM (with a flushed IEM TLB) then has all the
+     * EMTs queueing on the PGM lock, which can eat most of the host time.
      */
-    PCEMEXITREC pExitRec = EMHistoryAddExit(pVCpu,
-                                              pExit->MemoryAccess.AccessInfo.AccessType == WHvMemoryAccessWrite
-                                            ? EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_MMIO_WRITE)
-                                            : EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_MMIO_READ),
-                                            pExit->VpContext.Rip + pExit->VpContext.Cs.Base, uHostTsc);
+    uint64_t const uApicBaseMsr = PDMApicGetBaseMsrNoCheck(pVCpu);
+    bool const     fApicPage    = (uApicBaseMsr & MSR_IA32_APICBASE_EN)
+                               && (pExit->MemoryAccess.Gpa & X86_PAGE_4K_BASE_MASK) == MSR_IA32_APICBASE_GET_ADDR(uApicBaseMsr);
+    PCEMEXITREC    pExitRec     = !fApicPage
+                          ? EMHistoryAddExit(pVCpu,
+                                               pExit->MemoryAccess.AccessInfo.AccessType == WHvMemoryAccessWrite
+                                             ? EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_MMIO_WRITE)
+                                             : EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_MMIO_READ),
+                                             pExit->VpContext.Rip + pExit->VpContext.Cs.Base, uHostTsc)
+                          : NULL;
     nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
     rc = nemHCWinCopyStateFromHyperV(pVM, pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM | CPUMCTX_EXTRN_DS | CPUMCTX_EXTRN_ES);
     AssertRCReturn(rc, rc);
