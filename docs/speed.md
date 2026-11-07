@@ -144,6 +144,38 @@ thread is the virtual CPU running the guest's own receive path, so this change c
 the minimal state when the guest halts, and `nem-win-gim-xcpt-narrowing` intercepts #UD and #GP only when needed. They
 are on the [change list](changes.html); they were measured as part of the totals above, not on their own.
 
+## 9. xAPIC guests: the APIC registers no longer queue on one lock
+
+*Branches:* `em-apic-mmio-history` and `em-apic-mmio-fastpath`
+
+A guest that uses the xAPIC (not the x2APIC) reaches the interrupt controller through memory: every end-of-interrupt,
+inter-processor interrupt and timer write is an exit into VirtualBox. With several virtual CPUs they all do it at once,
+and each exit took the page manager (PGM) lock several times, so the CPUs mostly waited for each other (in an 8 CPU macOS
+guest, all 8 were seen blocked on that lock at the same moment). Two changes:
+
+* The first keeps these accesses out of the exit history, which re-ran the next instructions in the emulator after each one.
+* The second handles the common case directly: a plain 32-bit `mov` to or from a 16 byte aligned APIC register in 64-bit code
+  goes straight to the APIC's own register code, without the instruction emulator and without the PGM lock. Everything else,
+  in particular real mode and 32-bit guests, other instructions, single stepping and breakpoints, still goes through the
+  emulator unchanged.
+
+Measured with 8 virtual CPUs, xAPIC, the development build without the kernel driver:
+
+| | Trunk | First change | Both changes |
+|---|---|---|---|
+| macOS Tahoe, time to the login screen | not reached in 190 s (2 of 2 runs) | 80–120 s (4 of 4) | **60–70 s** (2 of 2) |
+| PGM lock contentions in 180 s | 42–43M | 3.8–9M | **0.15M** |
+| Linux ping-pong, round trips per second | 3.2–5.1k (3 runs, one with soft lockups) | 18–102k (4 runs) | **84–140k** (5 runs) |
+| Linux TLB-shootdown storm, 8 threads, unmaps per second | | 67k (2 runs) | **78k** (2 runs) |
+
+The Linux timing on trunk is noisy, so read the last two columns against each other: ping-pong is about 1.3× (median 76k → 96k) and the
+shootdown storm about 15% faster. With 4 or 3 threads the storm is unchanged. For comparison the same Linux guest in x2APIC
+mode did 85k (268k on the integration branch), and all APIC accesses of the xAPIC runs took the direct path.
+
+*What is not affected:* x2APIC guests, Windows guests (they use the Hyper-V register path), 32-bit and real-mode guests, and
+hosts where Hyper-V emulates the local APIC. Single-CPU guests were not measured. The real-mode and 32-bit APIC test of the
+Validation Kit (`bs3-apic-1`, two million accesses, all through the emulator) gives the same output line by line as trunk.
+
 ## Measured guidance (no code change)
 
 For guests on this host, from a Debian 13 guest with 8 virtual CPUs:
@@ -166,6 +198,9 @@ Listed because "measured, no gain" is a result too.
   hint bit it was used 70% of the time and exits fell by 57%, but ping-pong did not improve and timers got worse
   (3.9k per second at 1.54 ms against 6.5k at 0.73 ms).
 * **Re-probing hot exits.** Merged, then reverted: no benefit.
+* **A lock-free RAM range lookup in PGM.** The lockless lookup (`pgmPhysGetPageAndRangeExSlowLockless`) has a mistyped
+  comparison, so it always falls back to taking the PGM lock. Fixing it took the fallbacks from 33 to 0, but the macOS login
+  time (80 s) and the lock contentions (4.0M against 3.8M) did not change, so it was dropped. It could still be reported as a plain bug.
 * **A `virtio-net` card instead of e1000:** no change, see above.
 * **Idle host CPU for the interrupt changes:** the one measurement taken was inconclusive (the live ISO was still busy
   2.5 minutes after boot), so it is not claimed.

@@ -46,6 +46,8 @@ cost of interrupts and halts. The details, the caveats and the things that did *
 | Paravirtual EOI | Linux | 93% of end-of-interrupt writes skip the exit; memory exits 294–302k → **197–206k** per run |
 | Stop Windows throttling minimized VMs | Windows 10, VM window minimized | ping-pong **+30%**, barrier **+55%**, timers **2.4k → 5.7k per second**, boot 94–97 s → **86–87 s** |
 | High resolution waits | any | idle host CPU **1.1 → 0.5 cores** |
+| xAPIC accesses without the PGM lock | macOS Tahoe, 8 CPUs, xAPIC | login screen **never in 190 s → 60–70 s**, lock contentions **42M → 0.15M** |
+| The same | Linux, 8 CPUs, xAPIC | ping-pong **3–5k → 84–140k per second** (noisy baseline), TLB-shootdown storm +15% |
 
 A real check: the long-running Fedora 45 VM (15 virtual CPUs) felt "so much faster" in daily use after these changes.
 That is anecdotal, the numbers above are the measured part.

@@ -22,6 +22,8 @@ in this fork.
 | `nem-win-halt-partial-import` | VMM/NEM/win: Import only the minimal state when the guest halts | Planned for upstream |
 | `nem-win-gim-xcpt-narrowing` | VMM/NEM/win: Intercept #UD and #GP only when needed | Planned for upstream |
 | `726-nem-timer-kick` | VMM/NEM/win: Get the timer EMT out of Hyper-V when a timer is due | Planned for upstream (targets issue [#726](https://github.com/VirtualBox/virtualbox/issues/726)) |
+| `em-apic-mmio-history` | VMM/NEM/win: Keep the xAPIC page out of the EM exit history | Planned for upstream |
+| `em-apic-mmio-fastpath` | VMM/NEM/win: Do simple xAPIC page accesses without IEM and the page manager | Planned for upstream |
 | `iprt-win-ecoqos-optout` | IPRT/win: Opt VM processes out of power throttling (EcoQoS) | Planned for upstream |
 | `iprt-win-highres-waits` | IPRT/win: High resolution timed waits for semaphores in VM processes | local: the gain was measured only without the kernel driver, so there is no case for official builds ([why](speed.html#6-high-resolution-waits)) |
 
