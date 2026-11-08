@@ -209,6 +209,11 @@ Listed because "measured, no gain" is a result too.
 * **A lock-free RAM range lookup in PGM.** The lockless lookup (`pgmPhysGetPageAndRangeExSlowLockless`) has a mistyped
   comparison, so it always falls back to taking the PGM lock. Fixing it took the fallbacks from 33 to 0, but the macOS login
   time (80 s) and the lock contentions (4.0M against 3.8M) did not change, so it was dropped. It could still be reported as a plain bug.
+* **Hyper-V VP assist page fixes (Linux on the Hyper-V provider).** Disabling the page raised #GP, the MSR could not be read
+  back and it was missing from the saved state. Fixed and tested (a Linux guest reading and writing the MSR: 24 failures
+  before, none after; save/restore and old/new saved states checked; Windows 10 unchanged). Dropped because nothing
+  uses the page contents, Windows only enables it, and Linux guests default to the KVM provider. Linux on the Hyper-V
+  provider does not even boot today (page fault in the hypercall page), so nobody could hit the fixed case.
 * **A `virtio-net` card instead of e1000:** no change, see above.
 * **Idle host CPU for the interrupt changes:** the one measurement taken was inconclusive (the live ISO was still busy
   2.5 minutes after boot), so it is not claimed.
