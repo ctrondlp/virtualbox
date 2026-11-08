@@ -92,6 +92,9 @@ recognised. See the [CPU page](cpu.html).
 * **The host I/O cache.** SATA, NVMe and virtio-SCSI controllers default to no host cache. Turning it on made small random
   reads about 60% to 2 times faster and large sequential reads about twice as fast, at the price of losing the last
   writes if the host crashes.
+* **Windows on NVMe.** The Windows NVMe driver refused to start on the NVMe controller of a BIOS VM, so a Windows disk could
+  not be on NVMe. The VM configuration now drops the one region it objected to, and Windows 10 read and wrote 4 KiB blocks
+  about 40% faster from NVMe than from SATA in a first measurement.
 * **Saved states.** A running virtio-SCSI VM could be saved but not restored; that works now.
 * **NAT.** Guest to host uploads over NAT went from 1.67 to 2.09 Gbit/s on one connection and from about 1 to 4.5 Gbit/s on
   eight parallel ones. Downloads are limited by the guest and did not change.

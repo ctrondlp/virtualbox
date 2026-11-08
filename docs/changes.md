@@ -44,6 +44,7 @@ in this fork.
 | Branch | What it does | Status |
 |---|---|---|
 | `bios-nvme-boot` | BIOS/NVMe: Boot from NVMe disks with the legacy PC BIOS | Planned for upstream ([storage page](storage.html#1-booting-from-nvme-with-the-bios-firmware)) |
+| `nvme-windows-no-cmb` | Main/NVMe: Leave the controller memory buffer out for Windows guests on BIOS | Planned for upstream ([storage page](storage.html#4-windows-guests-on-an-nvme-controller)) |
 
 ## Networking
 

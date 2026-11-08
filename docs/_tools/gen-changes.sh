@@ -34,6 +34,7 @@ Correctness fixes|nem-lazy-db-exits|Planned for upstream
 Correctness fixes|nem-win-restore-drx-after-debugging|Planned for upstream
 Correctness fixes|virtio-core-restore-queue-select|Planned for upstream
 Storage and boot|bios-nvme-boot|Planned for upstream ([storage page](storage.html#1-booting-from-nvme-with-the-bios-firmware))
+Storage and boot|nvme-windows-no-cmb|Planned for upstream ([storage page](storage.html#4-windows-guests-on-an-nvme-controller))
 Networking|nat-throughput|local: it changes the bundled libslirp, so it would go to libslirp first ([speed page](speed.html#7-nat-faster-uploads-from-the-guest))||Guest to host TCP over NAT is faster: libslirp writes the data of a burst of guest packets to the host connection in one call instead of one call per packet (on by default, DeferHostWrites=0 turns it off)
 Graphics|virtio-gpu-device|local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html))|fa9e0292a23|A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page)
 Graphics|vmsvga-dx11-gpu-select|Planned for upstream

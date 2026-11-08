@@ -5,8 +5,9 @@ title: Storage
 
 # Storage
 
-Three things: the legacy PC BIOS can now boot from an NVMe disk, how much the disk controller type and the host I/O cache
-matter, and a fix so that a running virtio-SCSI VM can be saved and restored. Each item is one feature branch (see
+Four things: the legacy PC BIOS can now boot from an NVMe disk, how much the disk controller type and the host I/O cache
+matter, a fix so that a running virtio-SCSI VM can be saved and restored, and a fix so that Windows can use the NVMe
+controller of a BIOS VM at all. Each item is one feature branch (see
 [all changes](changes.html)). Numbers come from repeated runs of the same guest on the same host, the way the
 [speed page](speed.html) describes.
 
@@ -36,6 +37,7 @@ What was checked:
   not page aligned, buffers that span pages and 126-sector transfers, which need PRP lists. All of them pass.
 * Windows 10 loads its boot manager and loader through the driver. It then needs its own NVMe driver to start at boot,
   which a Windows installation that has never run on NVMe does not do, as with any move to a new storage controller.
+  Windows had a second problem with the NVMe device itself, fixed in [item 4](#4-windows-guests-on-an-nvme-controller).
 * The other controllers still boot with the new BIOS, and the boot times did not change.
 
 Speed: the part of the boot between the BIOS handing over and the kernel starting (it includes the boot loader's menu
@@ -97,3 +99,42 @@ Saving and restoring, measured on a 4 GB Linux guest, with the fix:
   for changes, and the Hyper-V back end can only do that by unmapping every page and mapping the pages back one at a time
   as the guest touches them (about 2,000 pages per second here, so minutes for 4 GB). The graphical front end and
   `VBoxManage snapshot take` without `--live` pause the VM for a few seconds instead and are not affected.
+
+## 4. Windows guests on an NVMe controller
+
+*Branch:* `nvme-windows-no-cmb` (*Planned for upstream*)
+
+In a BIOS virtual machine the in-box Windows NVMe driver (`stornvme`) did not start on the VirtualBox NVMe controller. Device
+Manager showed the controller with code 10, and a Windows VM whose system disk was on NVMe stopped with
+INACCESSIBLE_BOOT_DEVICE. The driver gave up before it read a single controller register, which was visible in a
+temporary trace of the device: Windows never touched it.
+
+The cause is the combination of two regions the device offers: the I/O port pair that the BIOS uses to boot from NVMe, and
+a 5 MB controller memory buffer. With either one removed the driver starts, reads the capabilities, creates its queues and
+identifies the disk. Linux is not affected. The BIOS needs the I/O ports and nothing needs the buffer, so for a Windows
+guest on BIOS firmware the VM configuration now leaves the buffer out (`CtrlMemBufSize` 0). Other guests and EFI VMs are
+unchanged, which also keeps their saved states loadable, because the device compares the buffer size when it restores.
+
+Measured in Windows 10 on a BIOS VM, the same disk once on SATA and once on NVMe (one run each, host I/O cache on, 1 GiB file
+read and written unbuffered from inside the guest):
+
+| | SATA | NVMe |
+|---|---|---|
+| 4 KiB random reads, queue of 1 | 8.2k per second (122 µs) | 11.3k per second (88 µs) |
+| 4 KiB random writes, queue of 1 | 8.0k per second (126 µs) | 11.5k per second (87 µs) |
+| Sequential read | 1530 MB/s | 2302 MB/s |
+| Sequential write | 1073 MB/s | 1127 MB/s |
+
+To move an existing Windows install to NVMe it also needs its NVMe driver to start at boot. Stock Windows sets the driver to
+start on demand and ships an override value, so from an elevated prompt inside the guest, before moving the disk:
+
+    reg add HKLM\SYSTEM\CurrentControlSet\Services\stornvme /v Start /t REG_DWORD /d 0 /f
+    reg delete HKLM\SYSTEM\CurrentControlSet\Services\stornvme\StartOverride /v 0 /f
+
+Then shut the VM down completely (not a hybrid shutdown with Fast Startup) and attach the disk to an NVMe controller. If a
+boot fails once, Windows marks the next boot for repair and goes to its recovery screen, so fix the cause first.
+
+What was not checked: Windows 11 guests, EFI firmware, other host systems, and restoring a saved state of a Windows BIOS VM
+that already had an NVMe controller (it will not load, because the buffer size changed; that controller did not work
+before). The change in the VM configuration code was compiled, but the measured configuration was set through extra data
+(`VBoxInternal/Devices/nvme/0/Config/CtrlMemBufSize` = 0), which is what the code produces.
