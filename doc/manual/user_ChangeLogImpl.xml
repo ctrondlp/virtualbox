@@ -272,6 +272,14 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>NVMe: Windows guests on virtual machines using the legacy BIOS firmware can
+          now use an NVMe controller. The Windows NVMe driver refused to start (device
+          problem code 10) when the controller offered both the I/O port index/data
+          region and a controller memory buffer, so the buffer is no longer offered to
+          these guests</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 
