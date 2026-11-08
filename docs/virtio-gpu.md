@@ -39,6 +39,11 @@ the CPU renderer:
 | OpenGL on virtio-gpu (Zink, on the Intel GPU) | about 1,700 |
 | CPU renderer (llvmpipe) | about 1,440 |
 
+Zink also runs on the NVIDIA card, with a newer guest Mesa (see Limits). A shorter off-screen run (build, texture, shading
+and terrain tests, one run) gave 1,434, 1,468, 1,446 and 792 frames per second. The terrain test, which is heavy on the GPU,
+is about 46 times faster than the CPU renderer (17); the light tests are no faster than it, because every frame costs a
+round trip to the host (about 0.7 ms).
+
 Windowed vkmark scored 213–277 through virtio-gpu and 933 on the CPU renderer, because a windowed frame has to be copied
 to the guest compositor. Off-screen Vulkan is fast (vkcube about 800 frames per second). So: virtio-gpu for compute and
 off-screen Vulkan, VMSVGA for the desktop.
@@ -79,7 +84,8 @@ device was empty again and the VM was still running; on a fresh guest the guest 
 
 * Linux guests with Mesa's Venus driver only (tested with Fedora 44; no Windows or macOS guest support).
 * The saved state of a VM that uses it cannot be saved yet, and there is one monitor.
-* Zink (OpenGL over Vulkan) cannot use the NVIDIA device: the guest Mesa does not tell it which device belongs to which
-  display node.
+* Zink (OpenGL over Vulkan) needs a recent guest Mesa. Fedora 44's 26.0.3 fails with "failed to choose pdev" (the Venus device
+  does not tell it which display node it belongs to); after upgrading to Mesa 26.2.6 it picks the NVIDIA device and
+  `glxinfo` reports the RTX 5070. Windowed OpenGL also needs `MESA_VK_WSI_DEBUG=sw` (below). Nothing in VirtualBox had to change.
 * Windowed Vulkan to a software-rendered guest compositor needs `MESA_VK_WSI_DEBUG=sw` in the guest.
 * A window larger than 1 GiB is untested.
