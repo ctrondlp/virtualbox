@@ -4585,6 +4585,21 @@ int Console::i_configStorageCtrls(ComPtr<IMachine> pMachine, BusAssignmentManage
                 hrc = ctrls[i]->COMGETTER(PortCount)(&cPorts);                          H();
                 InsertConfigInteger(pCfg, "NamespacesMax", cPorts);
 
+                /*
+                 * The Windows NVMe driver (stornvme) fails to start (code 10, status
+                 * 0xC000000D) when the device exposes both the I/O port index/data BAR
+                 * and the controller memory buffer.  The legacy BIOS needs the former
+                 * to boot from NVMe, and nothing needs the latter, so leave the buffer
+                 * out for Windows guests on BIOS firmware.
+                 */
+                if (pBiosCfg)
+                {
+                    Bstr bstrOsTypeId;
+                    hrc = pMachine->COMGETTER(OSTypeId)(bstrOsTypeId.asOutParam());     H();
+                    if (bstrOsTypeId.startsWith(GUEST_OS_ID_STR_PARTIAL("Windows")))
+                        InsertConfigInteger(pCfg, "CtrlMemBufSize", 0);
+                }
+
                 /* Attach the status driver */
                 i_attachStatusDriver(pCtlInst, RT_BIT_32(DeviceType_HardDisk),
                                      cPorts, NULL, &mapMediumAttachments, pszCtrlDev, ulInstance);
