@@ -700,11 +700,36 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
 
     /* The thread works on a heap copy, so that a call stuck in the library can be
        abandoned without the thread writing to our stack when it returns (or never).
-       The pointers inside (command stream, name) still refer to the caller's
-       memory; a stuck library is leaked and never used again. */
+       The data the request points to (command stream, name) is copied as well, as
+       the caller frees or reuses its own copy once we give up on the call.  After a
+       timeout both copies are leaked, as the library may still be reading them. */
     PVGPURENDERREQ pReqHeap = (PVGPURENDERREQ)RTMemDup(pReq, sizeof(*pReq));
     if (!pReqHeap)
     {
+        RTCritSectLeave(&pThis->CritSectCall);
+        return VERR_NO_MEMORY;
+    }
+    void *pvPayload = NULL;
+    if (pReq->enmType == kVGpuRenderReq_Submit && pReq->u.Submit.cDWords)
+    {
+        pvPayload = RTMemDup(pReq->u.Submit.pvCmds, (size_t)pReq->u.Submit.cDWords * 4); /* 8 byte aligned, the library wants 4. */
+        pReqHeap->u.Submit.pvCmds = pvPayload;
+    }
+    else if (pReq->enmType == kVGpuRenderReq_ContextCreate)
+    {
+        pvPayload = RTMemAlloc((size_t)pReq->u.ContextCreate.cchName + 1);
+        if (pvPayload)
+        {
+            memcpy(pvPayload, pReq->u.ContextCreate.pachName, pReq->u.ContextCreate.cchName);
+            ((char *)pvPayload)[pReq->u.ContextCreate.cchName] = '\0';
+        }
+        pReqHeap->u.ContextCreate.pachName = (const char *)pvPayload;
+    }
+    if (   !pvPayload
+        && (   (pReq->enmType == kVGpuRenderReq_Submit && pReq->u.Submit.cDWords)
+            || pReq->enmType == kVGpuRenderReq_ContextCreate))
+    {
+        RTMemFree(pReqHeap);
         RTCritSectLeave(&pThis->CritSectCall);
         return VERR_NO_MEMORY;
     }
@@ -714,6 +739,7 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
     {
         /* The thread never saw the request. */
         AssertLogRelMsgFailed(("%Rrc\n", rc));
+        RTMemFree(pvPayload);
         RTMemFree(pReqHeap);
         RTCritSectLeave(&pThis->CritSectCall);
         return rc;
@@ -725,7 +751,7 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
         uint64_t const msNow = RTTimeMilliTS();
         if (msNow >= msDoneDeadline)
         {
-            /* Leak the request: the thread may still use it. */
+            /* Leak the request and its data: the thread may still use them. */
             ASMAtomicWriteBool(&pThis->fDead, true);
             LogRel(("VirtioGpu: A call into the renderer library (request %d) did not finish in %RU32 ms, giving up on it\n",
                     (int)pReqHeap->enmType, (uint32_t)VGPURENDERER_CALL_TIMEOUT_MS));
@@ -741,7 +767,15 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
             RTThreadSleep(10);
         }
     }
+    /* Hand the results back, but keep the caller's own pointers. */
+    void const * const pvOrgCmds = pReq->enmType == kVGpuRenderReq_Submit ? pReq->u.Submit.pvCmds : NULL;
+    const char * const pachOrgName = pReq->enmType == kVGpuRenderReq_ContextCreate ? pReq->u.ContextCreate.pachName : NULL;
     *pReq = *pReqHeap;
+    if (pReq->enmType == kVGpuRenderReq_Submit)
+        pReq->u.Submit.pvCmds = (void *)pvOrgCmds;
+    else if (pReq->enmType == kVGpuRenderReq_ContextCreate)
+        pReq->u.ContextCreate.pachName = pachOrgName;
+    RTMemFree(pvPayload);
     RTMemFree(pReqHeap);
     RTCritSectLeave(&pThis->CritSectCall);
     return pReq->rc;
