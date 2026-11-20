@@ -490,6 +490,7 @@ VMMR3DECL(int)              VMR3WaitForDeviceReady(PVM pVM, VMCPUID idCpu);
 VMMR3_INT_DECL(int)         VMR3AsyncPdmNotificationWaitU(PUVMCPU pUVCpu);
 VMMR3_INT_DECL(void)        VMR3AsyncPdmNotificationWakeupU(PUVM pUVM);
 VMMR3_INT_DECL(RTCPUID)     VMR3GetVMCPUId(PVM pVM);
+VMMR3_INT_DECL(void)        VMR3HaltPollHint(PUVM pUVM, uint64_t cNsValid);
 VMMR3_INT_DECL(bool)        VMR3IsLongModeAllowed(PVM pVM);
 VMMR3_INT_DECL(RTTHREAD)    VMR3GetThreadHandle(PUVMCPU pUVCpu);
 VMMR3DECL(RTTHREAD)         VMR3GetVMCPUThread(PUVM pUVM);

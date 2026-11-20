@@ -57,6 +57,10 @@
 *********************************************************************************************************************************/
 /** The default maximum halt poll time (nano secs), see vmR3HaltMethod1Poll. */
 #define VM_HALT_POLL_MAX_NS_DEFAULT     UINT32_C(50000)
+/** The default halt poll time (nano secs) while a device hint is active, see VMR3HaltPollHint. */
+#define VM_HALT_POLL_HINT_MAX_NS_DEFAULT UINT32_C(1000000)
+/** The longest halt poll time (nano secs) the configuration may ask for while a device hint is active. */
+#define VM_HALT_POLL_HINT_MAX_NS_LIMIT  UINT32_C(4000000)
 
 
 /*********************************************************************************************************************************
@@ -500,6 +504,8 @@ static int vmR3HaltMethod12ReadConfigU(PUVM pUVM)
                                                     ? VM_HALT_POLL_MAX_NS_DEFAULT : 0;
 #endif
     pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg    = 10000;
+    pUVM->vm.s.Halt.Method12.cNsPollHintMaxCfg      = VM_HALT_POLL_HINT_MAX_NS_DEFAULT;
+    pUVM->vm.s.Halt.Method12.nsPollHintUntil        = 0;
 
     /*
      * Query overrides.
@@ -530,6 +536,12 @@ static int vmR3HaltMethod12ReadConfigU(PUVM pUVM)
          * The poll time to start with after it shrank to zero. */
         if (RT_SUCCESS(CFGMR3QueryU32(pCfg, "PollGrowStart", &u32)))
             pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg = RT_MIN(RT_MAX(u32, RT_NS_1US), RT_NS_1MS);
+        /** @cfgm{/VMM/HaltedMethod1/PollHintMax, uint32_t, nanoseconds, 0, 4000000, 1000000}
+         * The halt poll time while a device hint is active (a device told us
+         * that work it started will complete soon, see VMR3HaltPollHint).  Only
+         * used when halt polling is enabled; 0 means no longer than PollMax. */
+        if (RT_SUCCESS(CFGMR3QueryU32(pCfg, "PollHintMax", &u32)))
+            pUVM->vm.s.Halt.Method12.cNsPollHintMaxCfg = RT_MIN(u32, VM_HALT_POLL_HINT_MAX_NS_LIMIT);
         LogRel(("VMEmt: HaltedMethod1 config: %d/%d/%d/%d/%d\n",
                 pUVM->vm.s.Halt.Method12.u32LagBlockIntervalDivisorCfg,
                 pUVM->vm.s.Halt.Method12.u32MinBlockIntervalCfg,
@@ -537,8 +549,9 @@ static int vmR3HaltMethod12ReadConfigU(PUVM pUVM)
                 pUVM->vm.s.Halt.Method12.u32StartSpinningCfg,
                 pUVM->vm.s.Halt.Method12.u32StopSpinningCfg));
     }
-    LogRel(("VMEmt: Halt polling: max %u ns, grow start %u ns\n",
-            pUVM->vm.s.Halt.Method12.cNsPollMaxCfg, pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg));
+    LogRel(("VMEmt: Halt polling: max %u ns, grow start %u ns, max with a device hint %u ns\n",
+            pUVM->vm.s.Halt.Method12.cNsPollMaxCfg, pUVM->vm.s.Halt.Method12.cNsPollGrowStartCfg,
+            pUVM->vm.s.Halt.Method12.cNsPollHintMaxCfg));
 
     return VINF_SUCCESS;
 }
@@ -637,6 +650,30 @@ static void vmR3HaltMethod1AdjustPoll(PUVM pUVM, PUVMCPU pUVCpu, uint64_t cNsHal
 
 
 /**
+ * Lets a device tell the halt code that work it started will complete soon.
+ *
+ * While the hint holds, a halting EMT whose next timer is no further away than
+ * the configured hint poll time (/VMM/HaltedMethod1/PollHintMax) polls until
+ * that timer instead of for the adaptive poll time.  This is for guests that
+ * wait for a host side completion
+ * (a GPU command) in sleeps shorter than a millisecond, where a blocked EMT is
+ * woken late by the host's timer resolution on every sleep.  The hint runs out
+ * by itself, so a device that goes quiet costs nothing.
+ *
+ * @param   pUVM        Pointer to the user mode VM structure.
+ * @param   cNsValid    How long from now the hint holds (nano secs), 0 ends it.
+ *                      Each call replaces the previous one.
+ * @thread  Any.
+ */
+VMMR3_INT_DECL(void) VMR3HaltPollHint(PUVM pUVM, uint64_t cNsValid)
+{
+    UVM_ASSERT_VALID_EXT_RETURN_VOID(pUVM);
+    cNsValid = RT_MIN(cNsValid, 100 * RT_NS_1MS); /* a hint is short lived by design */
+    ASMAtomicWriteU64(&pUVM->vm.s.Halt.Method12.nsPollHintUntil, cNsValid ? RTTimeNanoTS() + cNsValid : 0);
+}
+
+
+/**
  * Initialize halt method 1.
  *
  * @return VBox status code.
@@ -708,6 +745,7 @@ static DECLCALLBACK(int) vmR3HaltMethod1Halt(PUVMCPU pUVCpu, const uint64_t fMas
     /* Halt polling (once per halt, not while catching up). */
     bool const fPollEnabled = pUVM->vm.s.Halt.Method12.cNsPollMaxCfg != 0 && !fSpinning;
     bool       fPolled      = !fPollEnabled;
+    bool       fHinted      = false;    /* The poll time came from a device hint (VMR3HaltPollHint). */
 
     /*
      * Halt loop.
@@ -773,7 +811,22 @@ static DECLCALLBACK(int) vmR3HaltMethod1Halt(PUVMCPU pUVCpu, const uint64_t fMas
             if (!fPolled)
             {
                 fPolled = true;
-                uint32_t const cNsPoll = pUVCpu->vm.s.Halt.Method12.cNsPoll;
+                uint32_t cNsPoll = pUVCpu->vm.s.Halt.Method12.cNsPoll;
+
+                /* A device hint (the guest waits for something the host does within a
+                   millisecond or so) lifts the poll time for as long as it holds, but
+                   only for a sleep the longer poll covers completely: when the next
+                   timer is further away the poll would only burn host CPU and then the
+                   EMT would block as it does without the hint. */
+                uint64_t const nsHintUntil = ASMAtomicReadU64(&pUVM->vm.s.Halt.Method12.nsPollHintUntil);
+                if (   nsHintUntil
+                    && u64NanoTS <= pUVM->vm.s.Halt.Method12.cNsPollHintMaxCfg
+                    && pUVM->vm.s.Halt.Method12.cNsPollHintMaxCfg > cNsPoll
+                    && RTTimeNanoTS() < nsHintUntil)
+                {
+                    cNsPoll = pUVM->vm.s.Halt.Method12.cNsPollHintMaxCfg;
+                    fHinted = true;
+                }
                 if (cNsPoll)
                 {
                     if (vmR3HaltMethod1Poll(pUVCpu, fMask, RT_MIN(cNsPoll, u64NanoTS)))
@@ -842,7 +895,7 @@ static DECLCALLBACK(int) vmR3HaltMethod1Halt(PUVMCPU pUVCpu, const uint64_t fMas
     }
     //if (fSpinning) RTLogRelPrintf("spun for %RU64 ns %u loops; lag=%RU64 pct=%d\n", RTTimeNanoTS() - u64Now, cLoops, TMVirtualSyncGetLag(pVM), u32CatchUpPct);
 
-    if (fPollEnabled)
+    if (fPollEnabled && !fHinted) /* A hinted halt says nothing about how long the ordinary poll should be. */
         vmR3HaltMethod1AdjustPoll(pUVM, pUVCpu, RTTimeNanoTS() - u64Now);
 
 #ifdef VBOX_VMM_TARGET_ARMV8
