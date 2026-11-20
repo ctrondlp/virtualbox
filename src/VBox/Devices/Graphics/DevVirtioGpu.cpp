@@ -213,8 +213,11 @@
 /*********************************************************************************************************************************
 *   Defined Constants And Macros                                                                                                 *
 *********************************************************************************************************************************/
-/** The saved state version (saving is refused, see vgpuR3SavePrep). */
+/** The saved state version.  The state can only be saved while the guest uses
+ * no Venus state, see vgpuR3SavePrep. */
 #define VIRTIOGPU_SAVED_STATE_VERSION           UINT32_C(1)
+/** Marks the start of the device part of the saved state. */
+#define VIRTIOGPU_SAVED_STATE_MARKER            UINT32_C(0x47505532)
 /** The device specific features offered to the driver without Venus: none, 2D only. */
 #define VIRTIOGPU_FEATURES_OFFERED_2D           UINT64_C(0)
 /** The device specific features offered to the driver with Venus.  RESOURCE_BLOB
@@ -3447,23 +3450,31 @@ static DECLCALLBACK(void *) vgpuR3QueryInterface(PPDMIBASE pInterface, const cha
 
 
 /*********************************************************************************************************************************
- *
- * Not reached because vgpuR3SavePrep refuses to save; it only keeps the
- * saved state unit well formed.
 *   Saved state                                                                                                                  *
 *********************************************************************************************************************************/
 
 /**
  * @callback_method_impl{FNSSMDEVSAVEPREP}
  *
- * Refuses to save: the resources and the guest backing are not saved yet.
+ * What can be saved is the 2D state: the resources with their guest backing
+ * (the pixels are in guest memory), the scanout and the virtio queues.  The
+ * Venus state lives in the renderer library and in the host's graphics driver
+ * (contexts, host memory, command streams in flight) and cannot be saved, so
+ * the VM state can only be saved while the guest uses none of it.
  */
 static DECLCALLBACK(int) vgpuR3SavePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
+    PVIRTIOGPUCC pThisCC = PDMDEVINS_2_DATA_CC(pDevIns, PVIRTIOGPUCC);
     RT_NOREF(pSSM);
-    /* Note! pfnSSMSetCfgError only works while loading, so report it as a VM error. */
-    return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
-                               N_("virtio-gpu does not support saving the VM state yet"));
+    if (pThisCC->cContexts || pThisCC->cBlobs || ASMAtomicReadU32(&pThisCC->cPending))
+    {
+        /* Note! pfnSSMSetCfgError only works while loading, so report it as a VM error. */
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("virtio-gpu cannot save the VM state while the guest uses the host GPU (%u contexts, "
+                                      "%u buffers): close the programs that use Vulkan in the guest first"),
+                                   pThisCC->cContexts, pThisCC->cBlobs);
+    }
+    return VINF_SUCCESS;
 }
 
 
@@ -3472,20 +3483,198 @@ static DECLCALLBACK(int) vgpuR3SavePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
  */
 static DECLCALLBACK(int) vgpuR3SaveExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
-    PVIRTIOGPU pThis = PDMDEVINS_2_DATA(pDevIns, PVIRTIOGPU);
-    return virtioCoreR3SaveExec(&pThis->Virtio, pDevIns->pHlpR3, pSSM, VIRTIOGPU_SAVED_STATE_VERSION, VIRTIOGPU_VIRTQ_COUNT);
+    PVIRTIOGPU   pThis   = PDMDEVINS_2_DATA(pDevIns, PVIRTIOGPU);
+    PVIRTIOGPUCC pThisCC = PDMDEVINS_2_DATA_CC(pDevIns, PVIRTIOGPUCC);
+    PCPDMDEVHLPR3 pHlp   = pDevIns->pHlpR3;
+
+    vgpuR3StateLock(pDevIns, pThis);
+    pHlp->pfnSSMPutU32(pSSM, VIRTIOGPU_SAVED_STATE_MARKER);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->cResources);
+    uint32_t cSaved = 0;
+    PVIRTIOGPURESOURCE pRes;
+    RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
+    {
+        if (pRes->fBlob)
+            continue; /* Not reached: vgpuR3SavePrep refuses to save with blobs. */
+        pHlp->pfnSSMPutU32(pSSM, pRes->idResource);
+        pHlp->pfnSSMPutU32(pSSM, pRes->uFormat);
+        pHlp->pfnSSMPutU32(pSSM, pRes->cx);
+        pHlp->pfnSSMPutU32(pSSM, pRes->cy);
+        pHlp->pfnSSMPutU32(pSSM, pRes->cEntries);
+        for (uint32_t i = 0; i < pRes->cEntries; i++)
+        {
+            pHlp->pfnSSMPutU64(pSSM, pRes->paEntries[i].GCPhysAddr);
+            pHlp->pfnSSMPutU32(pSSM, pRes->paEntries[i].cb);
+        }
+        cSaved++;
+    }
+    Assert(cSaved == pThisCC->cResources);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->pScanoutRes ? pThisCC->pScanoutRes->idResource : 0);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->ScanoutRect.x);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->ScanoutRect.y);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->ScanoutRect.cx);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->ScanoutRect.cy);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->cxHint);
+    pHlp->pfnSSMPutU32(pSSM, pThisCC->cyHint);
+    pHlp->pfnSSMPutU32(pSSM, pThis->Config.fEventsRead);
+    pHlp->pfnSSMPutU64(pSSM, pThis->fNegotiatedFeatures);
+    vgpuR3StateUnlock(pDevIns, pThis);
+
+    return virtioCoreR3SaveExec(&pThis->Virtio, pHlp, pSSM, VIRTIOGPU_SAVED_STATE_VERSION, VIRTIOGPU_VIRTQ_COUNT);
 }
 
 
 /**
  * @callback_method_impl{FNSSMDEVLOADEXEC}
+ *
+ * Everything read here is untrusted (a saved state can be edited): the
+ * resources are created through the same checks as the guest's commands.
  */
 static DECLCALLBACK(int) vgpuR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uint32_t uVersion, uint32_t uPass)
 {
-    PVIRTIOGPU pThis = PDMDEVINS_2_DATA(pDevIns, PVIRTIOGPU);
-    RT_NOREF(pSSM, uPass);
-    LogRel(("%s: Saved states are not supported (unit version %RU32)\n", pThis->szInstance, uVersion));
-    return VERR_SSM_UNSUPPORTED_DATA_UNIT_VERSION;
+    PVIRTIOGPU    pThis   = PDMDEVINS_2_DATA(pDevIns, PVIRTIOGPU);
+    PVIRTIOGPUCC  pThisCC = PDMDEVINS_2_DATA_CC(pDevIns, PVIRTIOGPUCC);
+    PCPDMDEVHLPR3 pHlp    = pDevIns->pHlpR3;
+    AssertReturn(uPass == SSM_PASS_FINAL, VERR_WRONG_ORDER);
+
+    if (uVersion != VIRTIOGPU_SAVED_STATE_VERSION)
+    {
+        LogRel(("%s: Unsupported saved state unit version %RU32\n", pThis->szInstance, uVersion));
+        return VERR_SSM_UNSUPPORTED_DATA_UNIT_VERSION;
+    }
+    AssertReturn(RTListIsEmpty(&pThisCC->ListResources) && !pThisCC->pScanoutRes, VERR_WRONG_ORDER);
+
+    uint32_t uMarker = 0;
+    int rc = pHlp->pfnSSMGetU32(pSSM, &uMarker);
+    AssertRCReturn(rc, rc);
+    if (uMarker != VIRTIOGPU_SAVED_STATE_MARKER)
+        return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, RT_SRC_POS,
+                                        N_("virtio-gpu: Expected marker %#RX32, found %#RX32"), VIRTIOGPU_SAVED_STATE_MARKER, uMarker);
+
+    uint32_t cResources = 0;
+    rc = pHlp->pfnSSMGetU32(pSSM, &cResources);
+    AssertRCReturn(rc, rc);
+    if (cResources > VIRTIOGPU_MAX_RESOURCES)
+        return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, RT_SRC_POS,
+                                        N_("virtio-gpu: %RU32 resources in the saved state"), cResources);
+
+    for (uint32_t iRes = 0; iRes < cResources; iRes++)
+    {
+        uint32_t idResource, uFormat, cx, cy, cEntries;
+        pHlp->pfnSSMGetU32(pSSM, &idResource);
+        pHlp->pfnSSMGetU32(pSSM, &uFormat);
+        pHlp->pfnSSMGetU32(pSSM, &cx);
+        pHlp->pfnSSMGetU32(pSSM, &cy);
+        rc = pHlp->pfnSSMGetU32(pSSM, &cEntries);
+        AssertRCReturn(rc, rc);
+
+        VIRTIOGPURESOURCECREATE2D Create2d;
+        RT_ZERO(Create2d);
+        Create2d.idResource = idResource;
+        Create2d.uFormat    = uFormat;
+        Create2d.cx         = cx;
+        Create2d.cy         = cy;
+        if (   vgpuR3CmdResourceCreate2d(pDevIns, pThis, pThisCC, &Create2d) != VIRTIOGPU_RESP_OK_NODATA
+            || cEntries > VIRTIOGPU_MAX_BACKING_ENTRIES
+            || cEntries > VIRTIOGPU_MAX_TOTAL_BACKING_ENTRIES - pThisCC->cTotalBackingEntries)
+            return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                            N_("virtio-gpu: Invalid resource %RU32 (%RU32x%RU32, format %RU32, %RU32 entries) in the saved state"),
+                                            idResource, cx, cy, uFormat, cEntries);
+        if (!cEntries)
+            continue;
+
+        VIRTIOGPUMEMENTRY *paEntries = (VIRTIOGPUMEMENTRY *)RTMemAllocZ((size_t)cEntries * sizeof(VIRTIOGPUMEMENTRY));
+        if (!paEntries)
+            return VERR_NO_MEMORY;
+        uint64_t cbBacking = 0;
+        for (uint32_t i = 0; i < cEntries; i++)
+        {
+            pHlp->pfnSSMGetU64(pSSM, &paEntries[i].GCPhysAddr);
+            rc = pHlp->pfnSSMGetU32(pSSM, &paEntries[i].cb);
+            if (   RT_FAILURE(rc)
+                || paEntries[i].cb > UINT64_MAX - paEntries[i].GCPhysAddr
+                || paEntries[i].cb > VIRTIOGPU_MAX_BACKING_SIZE - cbBacking)
+            {
+                RTMemFree(paEntries);
+                return RT_FAILURE(rc) ? rc
+                     : pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                                N_("virtio-gpu: Invalid backing entry %RU32 of resource %RU32 in the saved state"),
+                                                i, idResource);
+            }
+            cbBacking += paEntries[i].cb;
+        }
+        PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, idResource);
+        AssertReturnStmt(pRes, RTMemFree(paEntries), VERR_INTERNAL_ERROR);
+        pRes->paEntries  = paEntries;
+        pRes->cEntries   = cEntries;
+        pRes->cbBacking  = cbBacking;
+        pThisCC->cTotalBackingEntries += cEntries;
+    }
+
+    uint32_t idScanoutRes = 0;
+    VIRTIOGPUSETSCANOUT SetScanout;
+    RT_ZERO(SetScanout);
+    pHlp->pfnSSMGetU32(pSSM, &idScanoutRes);
+    pHlp->pfnSSMGetU32(pSSM, &SetScanout.r.x);
+    pHlp->pfnSSMGetU32(pSSM, &SetScanout.r.y);
+    pHlp->pfnSSMGetU32(pSSM, &SetScanout.r.cx);
+    pHlp->pfnSSMGetU32(pSSM, &SetScanout.r.cy);
+    pHlp->pfnSSMGetU32(pSSM, &pThisCC->cxHint);
+    pHlp->pfnSSMGetU32(pSSM, &pThisCC->cyHint);
+    pHlp->pfnSSMGetU32(pSSM, &pThis->Config.fEventsRead);
+    rc = pHlp->pfnSSMGetU64(pSSM, &pThis->fNegotiatedFeatures);
+    AssertRCReturn(rc, rc);
+    if (idScanoutRes)
+    {
+        SetScanout.idScanout  = 0;
+        SetScanout.idResource = idScanoutRes;
+        if (vgpuR3CmdSetScanout(pDevIns, pThis, pThisCC, &SetScanout) != VIRTIOGPU_RESP_OK_NODATA)
+            return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                            N_("virtio-gpu: Invalid scanout (resource %RU32) in the saved state"), idScanoutRes);
+    }
+
+    return virtioCoreR3ModernDeviceLoadExec(&pThis->Virtio, pHlp, pSSM, uVersion, VIRTIOGPU_SAVED_STATE_VERSION,
+                                            VIRTIOGPU_VIRTQ_COUNT);
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADDONE}
+ *
+ * Guest memory is back now: refill the host copies of the resources from the
+ * guest backing, so the display shows what the guest had, and restart the
+ * workers if the driver was running.
+ */
+static DECLCALLBACK(int) vgpuR3LoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVIRTIOGPU   pThis   = PDMDEVINS_2_DATA(pDevIns, PVIRTIOGPU);
+    PVIRTIOGPUCC pThisCC = PDMDEVINS_2_DATA_CC(pDevIns, PVIRTIOGPUCC);
+    RT_NOREF(pSSM);
+
+    vgpuR3StateLock(pDevIns, pThis);
+    PVIRTIOGPURESOURCE pRes;
+    RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
+    {
+        if (pRes->fBlob || !pRes->cEntries)
+            continue;
+        VIRTIOGPUTRANSFERTOHOST2D Transfer;
+        RT_ZERO(Transfer);
+        Transfer.idResource = pRes->idResource;
+        Transfer.r.cx       = pRes->cx;
+        Transfer.r.cy       = pRes->cy;
+        uint32_t const uResp = vgpuR3CmdTransferToHost2d(pDevIns, pThis, pThisCC, &Transfer);
+        if (uResp != VIRTIOGPU_RESP_OK_NODATA)
+            LogRel(("%s: Refilling resource %RU32 after loading the saved state failed (%#RX32), it stays black until the guest updates it\n",
+                    pThis->szInstance, pRes->idResource, uResp));
+    }
+    vgpuR3DirtyAll(pThisCC);
+    vgpuR3StateUnlock(pDevIns, pThis);
+
+    /* The driver state: the core restored the status register, the queues and the features. */
+    pThis->Virtio.fPrevDeviceStatus = pThis->Virtio.fDeviceStatus;
+    if (pThis->Virtio.fDeviceStatus & VIRTIO_STATUS_DRIVER_OK)
+        vgpuR3StatusChanged(&pThis->Virtio, &pThisCC->Virtio, 1 /*fDriverOk*/);
+    return VINF_SUCCESS;
 }
 
 
@@ -4072,7 +4261,7 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
     rc = PDMDevHlpSSMRegisterEx(pDevIns, VIRTIOGPU_SAVED_STATE_VERSION, sizeof(*pThis), NULL /*pszBefore*/,
                                 NULL /*pfnLivePrep*/, NULL /*pfnLiveExec*/, NULL /*pfnLiveVote*/,
                                 vgpuR3SavePrep, vgpuR3SaveExec, NULL /*pfnSaveDone*/,
-                                NULL /*pfnLoadPrep*/, vgpuR3LoadExec, NULL /*pfnLoadDone*/);
+                                NULL /*pfnLoadPrep*/, vgpuR3LoadExec, vgpuR3LoadDone);
     AssertRCReturn(rc, rc);
 
     PDMDevHlpDBGFInfoRegister(pDevIns, "virtiogpu", "virtio-gpu state: resources, scanout, Venus contexts and queues.", vgpuR3Info);
