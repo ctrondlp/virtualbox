@@ -168,6 +168,9 @@
  *    two between 64 MB and 16 GB (default 1 GB).
  *  - "MaxBlobMemory": limit in bytes for the size of all blob resources
  *    together, what the guest can make the host allocate (default 16 GB).
+ *  - "HaltPollHint": how long in milliseconds after a Venus command a halted
+ *    virtual CPU may poll for longer than usual before it blocks, 0 to turn
+ *    it off, at most 100 (default 10).  See PDMDevHlpVMHaltPollHint.
  *  - LUN#0: the display driver (MainDisplay).  Without one the device runs
  *    headless.
  */
@@ -257,6 +260,10 @@
 /** The default limit for the size of all blobs together (host GPU and shared
  * memory the guest can make the host allocate); "MaxBlobMemory" overrides it. */
 #define VIRTIOGPU_MAX_BLOB_MEMORY_DEFAULT       (16 * _1G64)
+/** The default time in milliseconds a Venus command tells the VM that the
+ * guest is likely to wait for the host GPU, so halted virtual CPUs poll for
+ * wake-ups for longer (PDMDevHlpVMHaltPollHint); "HaltPollHint" overrides it. */
+#define VIRTIOGPU_HALT_POLL_HINT_MS_DEFAULT     10
 /** The maximum host shared memory of all blobs with blob id 0 together (for
  * Venus these are plain host memory the library allocates on request). */
 #define VIRTIOGPU_MAX_SHM_BLOB_MEMORY           _1G
@@ -608,6 +615,9 @@ typedef struct VIRTIOGPUR3
     uint64_t                cbBlobTotal;
     /** The limit for cbBlobTotal (set at construction, read only afterwards). */
     uint64_t                cbBlobLimit;
+    /** How long a Venus submit hints that the guest will wait for the host GPU,
+     * in nanoseconds, 0 for no hint (set at construction, read only afterwards). */
+    uint64_t                cNsHaltPollHint;
     /** @} */
 
     /** @name Venus: owned by the control worker, see the NOTES.
@@ -2191,6 +2201,9 @@ static uint32_t vgpuR3CmdSubmit3d(PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTQ
     RTMemFree(pvCmds);
     STAM_REL_COUNTER_INC(&pThis->StatSubmits);
     STAM_REL_COUNTER_ADD(&pThis->StatSubmitBytes, cbData);
+    /* The guest is about to wait for the host GPU in short sleeps: let a halting virtual CPU poll for longer. */
+    if (RT_SUCCESS(rc) && pThisCC->cNsHaltPollHint)
+        PDMDevHlpVMHaltPollHint(pThisCC->pDevIns, pThisCC->cNsHaltPollHint);
     return RT_SUCCESS(rc) ? VIRTIOGPU_RESP_OK_NODATA : VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
 }
 
@@ -3428,6 +3441,9 @@ static DECLCALLBACK(void *) vgpuR3QueryInterface(PPDMIBASE pInterface, const cha
 
 
 /*********************************************************************************************************************************
+ *
+ * Not reached because vgpuR3SavePrep refuses to save; it only keeps the
+ * saved state unit well formed.
 *   Saved state                                                                                                                  *
 *********************************************************************************************************************************/
 
@@ -3447,9 +3463,6 @@ static DECLCALLBACK(int) vgpuR3SavePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 
 /**
  * @callback_method_impl{FNSSMDEVSAVEEXEC}
- *
- * Not reached because vgpuR3SavePrep refuses to save; it only keeps the
- * saved state unit well formed.
  */
 static DECLCALLBACK(int) vgpuR3SaveExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
@@ -3812,7 +3825,7 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
      * Validate and read the configuration.  MmioBase and Irq are read by VirtioCore
      * (MmioBase also here, Venus needs the PCI transport).
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|RendererPath|HostVisibleSize|MaxBlobMemory", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|RendererPath|HostVisibleSize|MaxBlobMemory|HaltPollHint", "");
 
     uint32_t cMonitors = 1;
     int rc = pHlp->pfnCFGMQueryU32Def(pCfg, "MonitorCount", &cMonitors, 1);
@@ -3854,6 +3867,13 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
     if (RT_FAILURE(rc))
         return PDMDEV_SET_ERROR(pDevIns, rc, N_("virtio-gpu: Failed to read \"MaxBlobMemory\""));
     pThisCC->cbBlobLimit = cbBlobLimit;
+
+    uint32_t cMsHaltPollHint = VIRTIOGPU_HALT_POLL_HINT_MS_DEFAULT;
+    rc = pHlp->pfnCFGMQueryU32Def(pCfg, "HaltPollHint", &cMsHaltPollHint, VIRTIOGPU_HALT_POLL_HINT_MS_DEFAULT);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc, N_("virtio-gpu: Failed to read \"HaltPollHint\""));
+    pThisCC->cNsHaltPollHint = (uint64_t)RT_MIN(cMsHaltPollHint, 100) * RT_NS_1MS;
+
 
     /* VirtioCore reads this too; Venus needs the PCI transport for its BAR. */
     RTGCPHYS GCPhysMmioBase = NIL_RTGCPHYS;
