@@ -1605,6 +1605,11 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 hrc = pGraphicsAdapter->IsFeatureEnabled(GraphicsFeature_Acceleration3D, &f3DEnabled); H();
                 InsertConfigInteger(pCfg,  "Venus",               f3DEnabled ? 1 : 0);
 
+                ULONG cGpuMemoryLimitMB;
+                hrc = pGraphicsAdapter->COMGETTER(GpuMemoryLimit)(&cGpuMemoryLimitMB);              H();
+                if (cGpuMemoryLimitMB)
+                    InsertConfigInteger(pCfg, "MaxHostMemory",    (uint64_t)cGpuMemoryLimitMB * _1M);
+
                 /* Attach the display. */
                 InsertConfigNode(pInst,    "LUN#0", &pLunL0);
                 InsertConfigString(pLunL0, "Driver",               "MainDisplay");
@@ -1615,6 +1620,37 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 AssertMsgFailed(("Invalid graphicsController=%d\n", enmGraphicsController));
                 return pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
                                              N_("Invalid graphics controller type '%d'"), enmGraphicsController);
+        }
+
+        /*
+         * The compute-only virtio-gpu: a second graphics device without a display that offers the host's graphics
+         * card to Linux guests as a Vulkan device (Venus), next to whatever graphics controller shows the screen.
+         * The VirtioGpu controller has its own 3D acceleration setting for this.
+         */
+        if (enmGraphicsController != GraphicsControllerType_VirtioGpu)
+        {
+            BOOL fComputeGpu = FALSE;
+            hrc = pGraphicsAdapter->COMGETTER(ComputeGpu)(&fComputeGpu);                            H();
+            if (fComputeGpu)
+            {
+                InsertConfigNode(pDevices, "virtio-gpu", &pDev);
+                InsertConfigNode(pDev,     "0", &pInst);
+                InsertConfigInteger(pInst, "Trusted",              1); /* boolean, loads the renderer library into this process */
+                hrc = pBusMgr->assignPCIDevice("virtio-gpu", pInst);                                H();
+                InsertConfigNode(pInst,    "Config", &pCfg);
+                InsertConfigInteger(pCfg,  "Venus",                1);
+                InsertConfigInteger(pCfg,  "MonitorCount",         1);
+
+                ULONG cHostVisibleMB;
+                hrc = pGraphicsAdapter->COMGETTER(HostVisibleSize)(&cHostVisibleMB);                H();
+                InsertConfigInteger(pCfg,  "HostVisibleSize",      (uint64_t)cHostVisibleMB * _1M);
+
+                ULONG cGpuMemoryLimitMB;
+                hrc = pGraphicsAdapter->COMGETTER(GpuMemoryLimit)(&cGpuMemoryLimitMB);              H();
+                if (cGpuMemoryLimitMB)
+                    InsertConfigInteger(pCfg, "MaxHostMemory",     (uint64_t)cGpuMemoryLimitMB * _1M);
+                /* No LUN#0: the device runs headless. */
+            }
         }
 
 #if defined(VBOX_WITH_TPM)

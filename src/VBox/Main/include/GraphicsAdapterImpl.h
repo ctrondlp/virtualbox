@@ -76,6 +76,10 @@ private:
     HRESULT setVRAMSize(ULONG aVRAMSize);
     HRESULT getHostVisibleSize(ULONG *aHostVisibleSize);
     HRESULT setHostVisibleSize(ULONG aHostVisibleSize);
+    HRESULT getComputeGpu(BOOL *aComputeGpu);
+    HRESULT setComputeGpu(BOOL aComputeGpu);
+    HRESULT getGpuMemoryLimit(ULONG *aGpuMemoryLimit);
+    HRESULT setGpuMemoryLimit(ULONG aGpuMemoryLimit);
     HRESULT setFeature(GraphicsFeature_T aFeature, BOOL aEnabled);
     HRESULT isFeatureEnabled(GraphicsFeature_T aFeature, BOOL *aEnabled);
     HRESULT getMonitorCount(ULONG *aMonitorCount);

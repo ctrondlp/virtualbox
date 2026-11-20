@@ -101,13 +101,17 @@ Rules for adding a changelog entry to make them look more uniform:
       <listitem>
         <para>Graphics: Added the VirtioGpu graphics controller for x86 VMs, a
           virtio-gpu display for guests with a virtio-gpu driver. It has no
-          VGA compatibility, and the state of VMs using it cannot be saved
-          yet. With 3D acceleration enabled, Linux guests with the Mesa Venus
+          VGA compatibility. The state of a VM using it can be saved as long
+          as the guest does not use the host graphics card for Vulkan at that
+          moment. With 3D acceleration enabled, Linux guests with the Mesa Venus
           driver can use the Vulkan capabilities of the host graphics card
           (this loads the Venus renderer library into the VM process). The
           size of its host visible memory window can be set in the Display
-          settings or with VBoxManage modifyvm --host-visible-size
-          (github:gh-NNN)</para>
+          settings or with VBoxManage modifyvm --host-visible-size. Any VM
+          can get a second compute-only virtio-gpu for Vulkan compute in
+          Linux guests (VBoxManage modifyvm --compute-gpu), and the memory
+          the guest can allocate on the host graphics card can be limited
+          (--gpu-memory-limit) (github:gh-NNN)</para>
       </listitem>
 
     </itemizedlist>

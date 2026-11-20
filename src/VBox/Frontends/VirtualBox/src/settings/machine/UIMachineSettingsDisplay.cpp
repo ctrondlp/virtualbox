@@ -71,6 +71,7 @@ struct UIDataSettingsMachineDisplay
         , m_graphicsControllerType(KGraphicsControllerType_Null)
 #ifdef VBOX_WITH_3D_ACCELERATION
         , m_f3dAccelerationEnabled(false)
+        , m_fComputeGpu(false)
 #endif
         , m_fRemoteDisplayServerEnabled(false)
         , m_strRemoteDisplayPort(QString())
@@ -101,6 +102,7 @@ struct UIDataSettingsMachineDisplay
                && (m_graphicsControllerType == other.m_graphicsControllerType)
 #ifdef VBOX_WITH_3D_ACCELERATION
                && (m_f3dAccelerationEnabled == other.m_f3dAccelerationEnabled)
+               && (m_fComputeGpu == other.m_fComputeGpu)
 #endif
                && (m_fRemoteDisplayServerEnabled == other.m_fRemoteDisplayServerEnabled)
                && (m_strRemoteDisplayPort == other.m_strRemoteDisplayPort)
@@ -139,6 +141,8 @@ struct UIDataSettingsMachineDisplay
 #ifdef VBOX_WITH_3D_ACCELERATION
     /** Holds whether the 3D acceleration is enabled. */
     bool                     m_f3dAccelerationEnabled;
+    /** Holds whether the VM gets the compute-only GPU. */
+    bool                     m_fComputeGpu;
 #endif
     /** Holds whether the remote display server is enabled. */
     bool                     m_fRemoteDisplayServerEnabled;
@@ -279,6 +283,7 @@ void UIMachineSettingsDisplay::loadToCacheFrom(QVariant &data)
         oldDisplayData.m_graphicsControllerType = comGraphics.GetGraphicsControllerType();
 #ifdef VBOX_WITH_3D_ACCELERATION
         oldDisplayData.m_f3dAccelerationEnabled = comGraphics.IsFeatureEnabled(KGraphicsFeature_Acceleration3D);
+        oldDisplayData.m_fComputeGpu = comGraphics.GetComputeGpu();
 #endif
     }
 
@@ -373,7 +378,10 @@ void UIMachineSettingsDisplay::getFromCache()
         m_pEditorHostVisibleSize->setValue(oldDisplayData.m_iCurrentHostVisibleSize);
 #ifdef VBOX_WITH_3D_ACCELERATION
     if (m_pEditorDisplayScreenFeatures)
+    {
         m_pEditorDisplayScreenFeatures->setEnable3DAcceleration(oldDisplayData.m_f3dAccelerationEnabled);
+        m_pEditorDisplayScreenFeatures->setComputeGpu(oldDisplayData.m_fComputeGpu);
+    }
 #endif
     /* Push required value to m_pEditorVideoMemorySize: */
     sltHandleMonitorCountChange();
@@ -452,7 +460,10 @@ void UIMachineSettingsDisplay::putToCache()
         newDisplayData.m_graphicsControllerType = m_pEditorGraphicsController->value();
 #ifdef VBOX_WITH_3D_ACCELERATION
     if (m_pEditorDisplayScreenFeatures)
+    {
         newDisplayData.m_f3dAccelerationEnabled = m_pEditorDisplayScreenFeatures->isEnabled3DAcceleration();
+        newDisplayData.m_fComputeGpu = m_pEditorDisplayScreenFeatures->isComputeGpu();
+    }
 #endif
 
     if (m_pEditorVRDESettings)
@@ -547,6 +558,8 @@ bool UIMachineSettingsDisplay::validate(QList<UIValidationMessage> &messages)
 
     /* The tool-tip of the check-box tells what it means for the virtio-gpu: */
     m_pEditorDisplayScreenFeatures->setVirtioGpuMode(graphicsControllerTypeCurrent() == KGraphicsControllerType_VirtioGpu);
+    /* The compute-only GPU is for the other controllers, the virtio-gpu one has the 3D acceleration check-box for this: */
+    m_pEditorDisplayScreenFeatures->setComputeGpuVisible(graphicsControllerTypeCurrent() != KGraphicsControllerType_VirtioGpu);
 
     /* Pass whether 3D acceleration is supported into Video Memory Editor: */
     m_pEditorVideoMemorySize->set3DAccelerationSupported(m_f3DAccelerationSupported);
@@ -1045,6 +1058,12 @@ bool UIMachineSettingsDisplay::saveScreenData()
             if (fSuccess && isMachineOffline() && newDisplayData.m_f3dAccelerationEnabled != oldDisplayData.m_f3dAccelerationEnabled)
             {
                 comGraphics.SetFeature(KGraphicsFeature_Acceleration3D, newDisplayData.m_f3dAccelerationEnabled);
+                fSuccess = comGraphics.isOk();
+            }
+            /* Save whether the VM gets the compute-only GPU: */
+            if (fSuccess && isMachineOffline() && newDisplayData.m_fComputeGpu != oldDisplayData.m_fComputeGpu)
+            {
+                comGraphics.SetComputeGpu(newDisplayData.m_fComputeGpu);
                 fSuccess = comGraphics.isOk();
             }
 #endif
