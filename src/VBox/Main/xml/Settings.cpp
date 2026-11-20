@@ -3458,6 +3458,8 @@ GraphicsAdapter::GraphicsAdapter() :
     graphicsControllerType(GraphicsControllerType_VBoxVGA),
     ulVRAMSizeMB(8),
     ulHostVisibleSizeMB(1024),
+    fComputeGpu(false),
+    ulGpuMemoryLimitMB(0),
     cMonitors(1),
     fAccelerate3D(false),
     fAccelerate2DVideo(false)
@@ -3472,6 +3474,8 @@ bool GraphicsAdapter::areDefaultSettings() const
     return graphicsControllerType == GraphicsControllerType_VBoxVGA
         && ulVRAMSizeMB == 8
         && ulHostVisibleSizeMB == 1024
+        && !fComputeGpu
+        && ulGpuMemoryLimitMB == 0
         && cMonitors <= 1
         && !fAccelerate3D
         && !fAccelerate2DVideo;
@@ -3488,6 +3492,8 @@ bool GraphicsAdapter::operator==(const GraphicsAdapter &g) const
         || (   graphicsControllerType         == g.graphicsControllerType
             && ulVRAMSizeMB                   == g.ulVRAMSizeMB
             && ulHostVisibleSizeMB            == g.ulHostVisibleSizeMB
+            && fComputeGpu                    == g.fComputeGpu
+            && ulGpuMemoryLimitMB             == g.ulGpuMemoryLimitMB
             && cMonitors                      == g.cMonitors
             && fAccelerate3D                  == g.fAccelerate3D
             && fAccelerate2DVideo             == g.fAccelerate2DVideo);
@@ -5861,6 +5867,8 @@ void MachineConfigFile::readHardware(const xml::ElementNode &elmHardware,
             }
             pelmHwChild->getAttributeValue("VRAMSize", hw.graphicsAdapter.ulVRAMSizeMB);
             pelmHwChild->getAttributeValue("hostVisibleSize", hw.graphicsAdapter.ulHostVisibleSizeMB);
+            pelmHwChild->getAttributeValue("computeGpu", hw.graphicsAdapter.fComputeGpu);
+            pelmHwChild->getAttributeValue("gpuMemoryLimit", hw.graphicsAdapter.ulGpuMemoryLimitMB);
             if (!pelmHwChild->getAttributeValue("monitorCount", hw.graphicsAdapter.cMonitors))
                 pelmHwChild->getAttributeValue("MonitorCount", hw.graphicsAdapter.cMonitors);       // pre-v1.5 variant
             if (!pelmHwChild->getAttributeValue("accelerate3D", hw.graphicsAdapter.fAccelerate3D))
@@ -7842,9 +7850,17 @@ void MachineConfigFile::buildHardwareXML(xml::ElementNode &elmParent,
         }
         if (hw.graphicsAdapter.ulVRAMSizeMB != 8)
             pelmDisplay->setAttribute("VRAMSize", hw.graphicsAdapter.ulVRAMSizeMB);
-        if (   hw.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu /* older settings versions lack it */
+        if (   (   hw.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu /* older settings versions lack it */
+                || hw.graphicsAdapter.fComputeGpu)
             && hw.graphicsAdapter.ulHostVisibleSizeMB != 1024)
             pelmDisplay->setAttribute("hostVisibleSize", hw.graphicsAdapter.ulHostVisibleSizeMB);
+        if (m->sv >= SettingsVersion_v1_22) /* older settings versions lack these (see bumpSettingsVersionIfNeeded) */
+        {
+            if (hw.graphicsAdapter.fComputeGpu)
+                pelmDisplay->setAttribute("computeGpu", hw.graphicsAdapter.fComputeGpu);
+            if (hw.graphicsAdapter.ulGpuMemoryLimitMB != 0)
+                pelmDisplay->setAttribute("gpuMemoryLimit", hw.graphicsAdapter.ulGpuMemoryLimitMB);
+        }
         if (hw.graphicsAdapter.cMonitors > 1)
             pelmDisplay->setAttribute("monitorCount", hw.graphicsAdapter.cMonitors);
         if (hw.graphicsAdapter.fAccelerate3D)
@@ -9758,6 +9774,14 @@ void MachineConfigFile::bumpSettingsVersionIfNeeded()
 
         // VirtualBox 7.3 (settings v1.22) adds the virtio-gpu graphics controller.
         if (hardwareMachine.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu)
+        {
+            m->sv = SettingsVersion_v1_22;
+            return;
+        }
+
+        // VirtualBox 7.3 (settings v1.22) adds the compute-only virtio-gpu and the GPU memory limit.
+        if (   hardwareMachine.graphicsAdapter.fComputeGpu
+            || hardwareMachine.graphicsAdapter.ulGpuMemoryLimitMB != 0)
         {
             m->sv = SettingsVersion_v1_22;
             return;

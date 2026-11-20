@@ -324,6 +324,14 @@ typedef struct VMINTUSERPERVM
             /** Halt polling: the poll time to start with when growing it from
              * zero (nano secs). */
             uint32_t                cNsPollGrowStartCfg;
+            /** Halt polling: the poll time while a device hint is active, see
+             * VMR3HaltPollHint (nano secs). */
+            uint32_t                cNsPollHintMaxCfg;
+            /** Alignment padding. */
+            uint32_t                u32Padding;
+            /** Halt polling: when the last device hint runs out (RTTimeNanoTS
+             * time), 0 if none.  See VMR3HaltPollHint. */
+            uint64_t volatile       nsPollHintUntil;
         }                           Method12;
 
        /**

@@ -293,6 +293,65 @@ HRESULT GraphicsAdapter::setHostVisibleSize(ULONG aHostVisibleSize)
     return S_OK;
 }
 
+HRESULT GraphicsAdapter::getComputeGpu(BOOL *aComputeGpu)
+{
+    AutoReadLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    *aComputeGpu = mData->fComputeGpu;
+
+    return S_OK;
+}
+
+HRESULT GraphicsAdapter::setComputeGpu(BOOL aComputeGpu)
+{
+    /* the machine needs to be mutable */
+    AutoMutableStateDependency adep(mParent);
+    if (FAILED(adep.hrc())) return adep.hrc();
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    if (RT_BOOL(aComputeGpu) != mData->fComputeGpu)
+    {
+        mParent->i_setModified(Machine::IsModified_GraphicsAdapter);
+        mData.backup();
+        mData->fComputeGpu = RT_BOOL(aComputeGpu);
+    }
+
+    return S_OK;
+}
+
+HRESULT GraphicsAdapter::getGpuMemoryLimit(ULONG *aGpuMemoryLimit)
+{
+    AutoReadLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    *aGpuMemoryLimit = mData->ulGpuMemoryLimitMB;
+
+    return S_OK;
+}
+
+HRESULT GraphicsAdapter::setGpuMemoryLimit(ULONG aGpuMemoryLimit)
+{
+    /* the machine needs to be mutable */
+    AutoMutableStateDependency adep(mParent);
+    if (FAILED(adep.hrc())) return adep.hrc();
+
+    /* Anything from 0 (no limit) up to the 16 TB the device can address is fine; the host decides what fits. */
+    if (aGpuMemoryLimit > 16 * _1M)
+        return setError(E_INVALIDARG, tr("Invalid GPU memory limit: %lu MB (0 for no limit, or at most 16777216 MB)"),
+                        aGpuMemoryLimit);
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    if (aGpuMemoryLimit != mData->ulGpuMemoryLimitMB)
+    {
+        mParent->i_setModified(Machine::IsModified_GraphicsAdapter);
+        mData.backup();
+        mData->ulGpuMemoryLimitMB = aGpuMemoryLimit;
+    }
+
+    return S_OK;
+}
+
 HRESULT GraphicsAdapter::setFeature(GraphicsFeature_T aFeature, BOOL aEnabled)
 {
     /* the machine needs to be mutable */

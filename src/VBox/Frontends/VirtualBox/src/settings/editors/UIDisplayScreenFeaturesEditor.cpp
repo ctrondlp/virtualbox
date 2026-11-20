@@ -38,10 +38,38 @@ UIDisplayScreenFeaturesEditor::UIDisplayScreenFeaturesEditor(QWidget *pParent /*
     : UIEditor(pParent)
     , m_fEnable3DAcceleration(false)
     , m_fVirtioGpuMode(false)
+    , m_fComputeGpu(false)
     , m_pLabel(0)
     , m_pCheckBoxEnable3DAcceleration(0)
+    , m_pCheckBoxComputeGpu(0)
 {
     prepare();
+}
+
+void UIDisplayScreenFeaturesEditor::setComputeGpu(bool fOn)
+{
+    if (m_pCheckBoxComputeGpu)
+    {
+        /* Update cached value and check-box if value has changed: */
+        if (m_fComputeGpu != fOn)
+        {
+            m_fComputeGpu = fOn;
+            m_pCheckBoxComputeGpu->setCheckState(m_fComputeGpu ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+}
+
+bool UIDisplayScreenFeaturesEditor::isComputeGpu() const
+{
+    return   m_pCheckBoxComputeGpu
+           ? m_pCheckBoxComputeGpu->checkState() == Qt::Checked
+           : m_fComputeGpu;
+}
+
+void UIDisplayScreenFeaturesEditor::setComputeGpuVisible(bool fOn)
+{
+    if (m_pCheckBoxComputeGpu)
+        m_pCheckBoxComputeGpu->setVisible(fOn);
 }
 
 void UIDisplayScreenFeaturesEditor::setEnable3DAcceleration(bool fOn)
@@ -101,6 +129,16 @@ void UIDisplayScreenFeaturesEditor::sltRetranslateUI()
             m_pCheckBoxEnable3DAcceleration->setToolTip(tr("The VM will be given access to the 3D graphics "
                                                            "capabilities available on the host"));
     }
+    if (m_pCheckBoxComputeGpu)
+    {
+        m_pCheckBoxComputeGpu->setText(tr("&Compute GPU (Vulkan for Linux guests)"));
+        m_pCheckBoxComputeGpu->setToolTip(tr("The VM gets a second, compute-only graphics device that offers the host "
+                                             "graphics card to Linux guests with the Mesa Venus driver as a Vulkan "
+                                             "device, for GPU compute such as running a language model. This loads the "
+                                             "Venus renderer library into the VM process and hands the Vulkan commands "
+                                             "of the guest to the host graphics driver: use it only for guests you "
+                                             "trust."));
+    }
 }
 
 void UIDisplayScreenFeaturesEditor::prepare()
@@ -123,6 +161,10 @@ void UIDisplayScreenFeaturesEditor::prepare()
         m_pCheckBoxEnable3DAcceleration = new QCheckBox(this);
         if (m_pCheckBoxEnable3DAcceleration)
             m_pLayout->addWidget(m_pCheckBoxEnable3DAcceleration, 0, 1);
+        /* Prepare 'compute-only GPU' check-box: */
+        m_pCheckBoxComputeGpu = new QCheckBox(this);
+        if (m_pCheckBoxComputeGpu)
+            m_pLayout->addWidget(m_pCheckBoxComputeGpu, 1, 1);
     }
 
     /* Prepare connections: */

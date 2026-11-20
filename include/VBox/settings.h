@@ -860,6 +860,8 @@ struct GraphicsAdapter
     GraphicsControllerType_T graphicsControllerType;
     uint32_t            ulVRAMSizeMB;
     uint32_t            ulHostVisibleSizeMB;    /**< virtio-gpu host visible window, in MB */
+    bool                fComputeGpu;            /**< second, compute-only virtio-gpu next to the graphics controller */
+    uint32_t            ulGpuMemoryLimitMB;     /**< limit for the guest's host GPU memory, in MB, 0 for none */
     uint32_t            cMonitors;
     bool                fAccelerate3D,
                         fAccelerate2DVideo;     // requires settings version 1.8 (VirtualBox 3.1)

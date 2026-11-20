@@ -65,6 +65,11 @@
         </group></arg>
       <arg>--vram=<replaceable>size-in-MB</replaceable></arg>
       <arg>--host-visible-size=<replaceable>size-in-MB</replaceable></arg>
+      <arg>--compute-gpu=<group choice="plain">
+          <arg choice="plain">on</arg>
+          <arg choice="plain">off</arg>
+        </group></arg>
+      <arg>--gpu-memory-limit=<replaceable>size-in-MB</replaceable></arg>
       <arg>--acpi=<group choice="plain">
           <arg choice="plain">on</arg>
           <arg choice="plain">off</arg>
@@ -808,6 +813,36 @@ it unless this changes. -->
               of two from 64 to 16384; the default is 1024. The window is
               address space only, it is not backed by memory until the
               guest maps something into it.
+            </para></listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--compute-gpu=on | off</option></term>
+          <listitem><para>
+              Gives the VM a second, compute-only graphics device next to
+              its graphics controller: a virtio-gpu without a display that
+              offers the host graphics card to Linux guests with the Mesa
+              Venus driver as a Vulkan device, for GPU compute such as
+              running a language model, while the graphics controller
+              keeps showing the screen. The default is off. This loads the
+              Venus renderer library into the VM process and hands the
+              Vulkan commands of the guest to the host graphics driver, so
+              turn it on only for guests you trust. The
+              <option>--host-visible-size</option> and
+              <option>--gpu-memory-limit</option> settings apply to it.
+              The virtiogpu graphics controller itself uses
+              <option>--accelerate-3d</option> instead.
+            </para></listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--gpu-memory-limit=<replaceable>size</replaceable></option></term>
+          <listitem><para>
+              Limits in megabytes the memory the Vulkan programs of the
+              guest can allocate on the host graphics card together, for the
+              virtiogpu graphics controller with 3D acceleration and for the
+              compute GPU. An allocation over the limit fails in the guest
+              as it does when the card is full, so the guest cannot take
+              the memory the host programs need. The default 0 means no
+              limit.
             </para></listitem>
         </varlistentry>
         <varlistentry>

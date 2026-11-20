@@ -253,6 +253,13 @@ typedef struct VGPUVIRGLFNS
     DECLCALLBACKMEMBER(int,  pfnResourceUnmap,(uint32_t idResource));
     /** virgl_renderer_resource_get_map_info (:433) */
     DECLCALLBACKMEMBER(int,  pfnResourceGetMapInfo,(uint32_t idResource, uint32_t *pfMapInfo));
+    /** @name Optional, NULL in a library without them (see g_aVirglOptionalSymbols).
+     * @{ */
+    /** virgl_renderer_set_vk_memory_limit: limit for the memory all contexts can allocate on the host. */
+    DECLCALLBACKMEMBER(void,     pfnSetVkMemoryLimit,(uint64_t cbLimit));
+    /** virgl_renderer_get_vk_memory_used: what counts against that limit. */
+    DECLCALLBACKMEMBER(uint64_t, pfnGetVkMemoryUsed,(void));
+    /** @} */
 } VGPUVIRGLFNS;
 
 /** Symbol name to VGPUVIRGLFNS member mapping. */
@@ -277,6 +284,17 @@ static const struct
     { "virgl_renderer_resource_map",                RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceMap) },
     { "virgl_renderer_resource_unmap",              RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceUnmap) },
     { "virgl_renderer_resource_get_map_info",       RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceGetMapInfo) },
+};
+
+/** Symbols a library may lack (an older build of it); the members stay NULL then. */
+static const struct
+{
+    const char *pszName;
+    uint32_t    offMember;
+} g_aVirglOptionalSymbols[] =
+{
+    { "virgl_renderer_set_vk_memory_limit",         RT_UOFFSETOF(VGPUVIRGLFNS, pfnSetVkMemoryLimit) },
+    { "virgl_renderer_get_vk_memory_used",          RT_UOFFSETOF(VGPUVIRGLFNS, pfnGetVkMemoryUsed) },
 };
 
 
@@ -842,6 +860,10 @@ DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENC
             if (RT_FAILURE(rc))
                 RTErrInfoSetF(pErrInfo, rc, "Symbol '%s' not found in '%s'", g_aVirglSymbols[i].pszName, pszLibrary);
         }
+        for (unsigned i = 0; i < RT_ELEMENTS(g_aVirglOptionalSymbols) && RT_SUCCESS(rc); i++)
+            if (RT_FAILURE(RTLdrGetSymbol(pThis->hLdrMod, g_aVirglOptionalSymbols[i].pszName,
+                                          (void **)((uint8_t *)&pThis->Fns + g_aVirglOptionalSymbols[i].offMember))))
+                *(void **)((uint8_t *)&pThis->Fns + g_aVirglOptionalSymbols[i].offMember) = NULL;
     }
     else
         RTErrInfoAddF(pErrInfo, rc, " (loading '%s')", pszLibrary);
@@ -876,6 +898,42 @@ DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENC
     }
     vgpuR3RendererDestroy(pThis, true /*fCleanup*/);
     return rc;
+}
+
+
+/**
+ * Limits the host memory all Venus contexts together can allocate.
+ *
+ * An allocation that would go over the limit fails in the guest with
+ * VK_ERROR_OUT_OF_DEVICE_MEMORY, as it does when the card is full, instead of
+ * the guest taking the memory the host's own programs need.
+ *
+ * @returns VINF_SUCCESS, VERR_NOT_SUPPORTED if the library has no such limit.
+ * @param   pRenderer   The renderer instance.
+ * @param   cbLimit     The limit in bytes, 0 for none.
+ * @note    The library only reads and writes atomic counters for this, so it
+ *          needs no call through the renderer thread.
+ */
+DECLHIDDEN(int) vgpuR3RendererSetMemoryLimit(PVGPURENDERER pRenderer, uint64_t cbLimit)
+{
+    AssertPtrReturn(pRenderer, VERR_INVALID_POINTER);
+    if (!pRenderer->Fns.pfnSetVkMemoryLimit)
+        return VERR_NOT_SUPPORTED;
+    pRenderer->Fns.pfnSetVkMemoryLimit(cbLimit);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Gets the host memory the Venus contexts have allocated that counts against the limit.
+ *
+ * @returns Bytes, 0 if the library cannot tell.
+ * @param   pRenderer   The renderer instance.
+ */
+DECLHIDDEN(uint64_t) vgpuR3RendererGetMemoryUsed(PVGPURENDERER pRenderer)
+{
+    AssertPtrReturn(pRenderer, 0);
+    return pRenderer->Fns.pfnGetVkMemoryUsed ? pRenderer->Fns.pfnGetVkMemoryUsed() : 0;
 }
 
 

@@ -5096,6 +5096,14 @@ static DECLCALLBACK(void) pdmR3DevHlp_GCMTriggerPatch(PPDMDEVINS pDevIns, GCMGST
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnVMHaltPollHint} */
+static DECLCALLBACK(void) pdmR3DevHlp_VMHaltPollHint(PPDMDEVINS pDevIns, uint64_t cNsValid)
+{
+    PDMDEV_ASSERT_DEVINS(pDevIns);
+    VMR3HaltPollHint(pDevIns->Internal.s.pVMR3->pUVM, cNsValid);
+}
+
+
 /**
  * The device helper structure for trusted devices.
  */
@@ -5497,6 +5505,7 @@ const PDMDEVHLPR3 g_pdmR3DevHlpTrusted =
     pdmR3DevHlp_GIMGetDebugSetup,
     pdmR3DevHlp_GIMGetMmio2Regions,
     pdmR3DevHlp_GCMTriggerPatch,
+    pdmR3DevHlp_VMHaltPollHint,
     PDM_DEVHLPR3_VERSION /* the end */
 };
 
@@ -5903,6 +5912,7 @@ const PDMDEVHLPR3 g_pdmR3DevHlpTracing =
     pdmR3DevHlp_GIMGetDebugSetup,
     pdmR3DevHlp_GIMGetMmio2Regions,
     pdmR3DevHlp_GCMTriggerPatch,
+    pdmR3DevHlp_VMHaltPollHint,
     PDM_DEVHLPR3_VERSION /* the end */
 };
 #endif /* VBOX_WITH_DBGF_TRACING */
@@ -6661,6 +6671,7 @@ const PDMDEVHLPR3 g_pdmR3DevHlpUnTrusted =
     pdmR3DevHlp_Untrusted_GIMGetDebugSetup,
     pdmR3DevHlp_Untrusted_GIMGetMmio2Regions,
     pdmR3DevHlp_GCMTriggerPatch,
+    pdmR3DevHlp_VMHaltPollHint,
     PDM_DEVHLPR3_VERSION /* the end */
 };
 

@@ -69,6 +69,8 @@ enum
     MODIFYVM_PAGEFUSION,
     MODIFYVM_VRAM,
     MODIFYVM_HOST_VISIBLE_SIZE,
+    MODIFYVM_COMPUTE_GPU,
+    MODIFYVM_GPU_MEMORY_LIMIT,
     MODIFYVM_FIRMWARE,
     MODIFYVM_ACPI,
     MODIFYVM_IOAPIC,
@@ -299,6 +301,8 @@ static const RTGETOPTDEF g_aModifyVMOptions[] =
     OPT2("--page-fusion",                   "--pagefusion",             MODIFYVM_PAGEFUSION,                RTGETOPT_REQ_BOOL_ONOFF),
     OPT1("--vram",                                                      MODIFYVM_VRAM,                      RTGETOPT_REQ_UINT32),
     OPT1("--host-visible-size",                                         MODIFYVM_HOST_VISIBLE_SIZE,         RTGETOPT_REQ_UINT32),
+    OPT1("--compute-gpu",                                               MODIFYVM_COMPUTE_GPU,               RTGETOPT_REQ_BOOL_ONOFF),
+    OPT1("--gpu-memory-limit",                                          MODIFYVM_GPU_MEMORY_LIMIT,          RTGETOPT_REQ_UINT32),
     OPT1("--firmware",                                                  MODIFYVM_FIRMWARE,                  RTGETOPT_REQ_STRING),
     OPT1("--acpi",                                                      MODIFYVM_ACPI,                      RTGETOPT_REQ_BOOL_ONOFF),
     OPT1("--ioapic",                                                    MODIFYVM_IOAPIC,                    RTGETOPT_REQ_BOOL_ONOFF),
@@ -1011,6 +1015,18 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
             case MODIFYVM_HOST_VISIBLE_SIZE:
             {
                 CHECK_ERROR(pGraphicsAdapter, COMSETTER(HostVisibleSize)(ValueUnion.u32));
+                break;
+            }
+
+            case MODIFYVM_COMPUTE_GPU:
+            {
+                CHECK_ERROR(pGraphicsAdapter, COMSETTER(ComputeGpu)(ValueUnion.f));
+                break;
+            }
+
+            case MODIFYVM_GPU_MEMORY_LIMIT:
+            {
+                CHECK_ERROR(pGraphicsAdapter, COMSETTER(GpuMemoryLimit)(ValueUnion.u32));
                 break;
             }
 

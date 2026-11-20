@@ -6209,7 +6209,7 @@
     uuid="13ee6eb4-06fe-406b-ad69-f6e08b0587a3"
     wsmap="managed"
     rest="managed"
-    reservedMethods="4" reservedAttributes="7"
+    reservedMethods="4" reservedAttributes="5"
     >
     <desc>
         The IGraphicsAdapter interface represents the graphics adapter
@@ -6273,8 +6273,39 @@
         16384.  The window is address space only and is not backed by memory
         until the guest maps something into it.
         <note>
-          Only used by the VirtioGpu graphics controller.
+          Only used by the VirtioGpu graphics controller and the compute
+          device (see <link to="IGraphicsAdapter::computeGpu"/>).
         </note>
+      </desc>
+    </attribute>
+
+    <attribute name="computeGpu" type="boolean">
+      <desc>
+        Whether the VM gets a second, compute-only graphics device next to its
+        graphics controller: a virtio-gpu that offers the host's graphics card
+        to Linux guests as a Vulkan device (Mesa's Venus driver) for GPU
+        compute such as running a language model, while the graphics
+        controller keeps the display.  Off by default.  Vulkan commands of the
+        guest then reach the host's graphics driver, see the VirtualBox
+        manual before turning this on for a guest you do not trust.
+        <note>
+          Not used by the VirtioGpu graphics controller, which has its own
+          3D acceleration setting (see <link to="IGraphicsAdapter::setFeature"/>).
+          Only the host visible size and the GPU memory limit of this
+          interface apply to the compute device.
+        </note>
+      </desc>
+    </attribute>
+
+    <attribute name="gpuMemoryLimit" type="unsigned long">
+      <desc>
+        Limit in megabytes for the memory the guest's Vulkan programs can
+        allocate on the host's graphics card together, for the VirtioGpu
+        graphics controller with 3D acceleration and for the compute device
+        (see <link to="IGraphicsAdapter::computeGpu"/>).  An allocation over
+        the limit fails in the guest as it does when the card is full, so the
+        guest cannot take the memory the host's own programs need.  0 means no
+        limit, which is the default.
       </desc>
     </attribute>
 
