@@ -68,6 +68,8 @@ typedef FNVGPURENDERERFENCE *PFNVGPURENDERERFENCE;
 DECLHIDDEN(int)  vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENCE pfnFence, void *pvFenceUser,
                                       PVGPURENDERER *ppRenderer, PRTERRINFO pErrInfo);
 DECLHIDDEN(void) vgpuR3RendererDestroy(PVGPURENDERER pRenderer, bool fCleanup);
+DECLHIDDEN(int)  vgpuR3RendererSetMemoryLimit(PVGPURENDERER pRenderer, uint64_t cbLimit);
+DECLHIDDEN(uint64_t) vgpuR3RendererGetMemoryUsed(PVGPURENDERER pRenderer);
 DECLHIDDEN(int)  vgpuR3RendererQueryCapset(PVGPURENDERER pRenderer, uint32_t idCapset, uint32_t *puMaxVersion,
                                            uint32_t *pcbCapset, uint8_t const **ppbCapset);
 DECLHIDDEN(int)  vgpuR3RendererContextCreate(PVGPURENDERER pRenderer, uint32_t idCtx, uint32_t fContextInit,

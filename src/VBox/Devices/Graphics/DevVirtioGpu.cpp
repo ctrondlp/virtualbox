@@ -168,6 +168,12 @@
  *    two between 64 MB and 16 GB (default 1 GB).
  *  - "MaxBlobMemory": limit in bytes for the size of all blob resources
  *    together, what the guest can make the host allocate (default 16 GB).
+ *  - "MaxHostMemory": limit in bytes for the memory the guest's Vulkan
+ *    programs can allocate on the host GPU together (default 0: no limit).
+ *    An allocation over the limit fails in the guest with
+ *    VK_ERROR_OUT_OF_DEVICE_MEMORY, as it does when the card is full, so a
+ *    guest cannot take the memory the host's own programs need.  Needs a
+ *    renderer library that supports it, otherwise it is logged and ignored.
  *  - "HaltPollHint": how long in milliseconds after a Venus command a halted
  *    virtual CPU may poll for longer than usual before it blocks, 0 to turn
  *    it off, at most 100 (default 10).  See PDMDevHlpVMHaltPollHint.
@@ -3825,7 +3831,7 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
      * Validate and read the configuration.  MmioBase and Irq are read by VirtioCore
      * (MmioBase also here, Venus needs the PCI transport).
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|RendererPath|HostVisibleSize|MaxBlobMemory|HaltPollHint", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|RendererPath|HostVisibleSize|MaxBlobMemory|HaltPollHint|MaxHostMemory", "");
 
     uint32_t cMonitors = 1;
     int rc = pHlp->pfnCFGMQueryU32Def(pCfg, "MonitorCount", &cMonitors, 1);
@@ -3874,6 +3880,10 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
         return PDMDEV_SET_ERROR(pDevIns, rc, N_("virtio-gpu: Failed to read \"HaltPollHint\""));
     pThisCC->cNsHaltPollHint = (uint64_t)RT_MIN(cMsHaltPollHint, 100) * RT_NS_1MS;
 
+    uint64_t cbMaxHostMemory = 0;
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "MaxHostMemory", &cbMaxHostMemory, 0);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc, N_("virtio-gpu: Failed to read \"MaxHostMemory\""));
 
     /* VirtioCore reads this too; Venus needs the PCI transport for its BAR. */
     RTGCPHYS GCPhysMmioBase = NIL_RTGCPHYS;
@@ -3942,6 +3952,17 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
                 pThis->cbHostVisible   = cbHostVisible;
                 pThis->Config.cCapsets = 1;
                 fFeatures              = VIRTIOGPU_FEATURES_OFFERED_VENUS;
+
+                /* Limit what the guest can allocate on the host GPU (default: no limit). */
+                if (cbMaxHostMemory)
+                {
+                    int rcLimit = vgpuR3RendererSetMemoryLimit(pThisCC->pRenderer, cbMaxHostMemory);
+                    if (RT_SUCCESS(rcLimit))
+                        LogRel(("%s: Guest GPU memory limited to %RU64 MB\n", pThis->szInstance, cbMaxHostMemory / _1M));
+                    else
+                        LogRel(("%s: \"MaxHostMemory\" is set but renderer '%s' cannot limit memory (%Rrc), no limit\n",
+                                pThis->szInstance, szPath, rcLimit));
+                }
 
                 /* Announced to the driver as a virtio shared memory region (PCI capability). */
                 pThisCC->Virtio.cShmRegions          = 1;
