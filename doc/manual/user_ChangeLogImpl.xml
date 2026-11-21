@@ -189,6 +189,19 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VMM: Disk and other device I/O is much faster with several virtual
+          CPUs, as threads waiting briefly for a busy internal lock no longer go
+          to sleep right away (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
+        <para>VMM: Windows guests with the Hyper-V paravirtualization interface can
+          use the Hyper-V synthetic timers also with several virtual CPUs
+          (VBoxInternal/GIM/HyperV/SyntheticTimers), which makes their timers
+          more precise and costs less host CPU (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>

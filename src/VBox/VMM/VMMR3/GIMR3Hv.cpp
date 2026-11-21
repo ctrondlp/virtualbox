@@ -62,7 +62,9 @@
 /**
  * GIM Hyper-V saved-state version.
  */
-#define GIM_HV_SAVED_STATE_VERSION                      UINT32_C(4)
+#define GIM_HV_SAVED_STATE_VERSION                      UINT32_C(5)
+/** Saved states, prior to saving the synthetic timers, SCONTROL, SIEFP and VP assist MSRs. */
+#define GIM_HV_SAVED_STATE_VERSION_PRE_STIMER           UINT32_C(4)
 /** Saved states, priot to saving debug UDP source/destination ports.  */
 #define GIM_HV_SAVED_STATE_VERSION_PRE_DEBUG_UDP_PORTS  UINT32_C(3)
 /** Saved states, prior to any synthetic interrupt controller support. */
@@ -199,6 +201,7 @@ static void   gimR3HvTermHypercallSupport(PVM pVM);
 static int    gimR3HvInitDebugSupport(PVM pVM);
 static void   gimR3HvTermDebugSupport(PVM pVM);
 static DECLCALLBACK(void) gimR3HvTimerCallback(PVM pVM, TMTIMERHANDLE pTimer, void *pvUser);
+static void   gimR3HvStimerQueueExpiry(PVM pVM, PGIMHVSTIMER pHvStimer);
 
 /**
  * Initializes the Hyper-V GIM provider.
@@ -241,7 +244,8 @@ VMMR3_INT_DECL(int) gimR3HvInit(PVM pVM, PCFGMNODE pGimCfg)
         int rc2 = CFGMR3ValidateConfig(pCfgHv, "/HyperV/",
                                   "VendorID"
                                   "|VSInterface"
-                                  "|HypercallDebugInterface",
+                                  "|HypercallDebugInterface"
+                                  "|SyntheticTimers",
                                   "" /* pszValidNodes */, "GIM/HyperV" /* pszWho */, 0 /* uInstance */);
         if (RT_FAILURE(rc2))
             return rc2;
@@ -275,6 +279,14 @@ VMMR3_INT_DECL(int) gimR3HvInit(PVM pVM, PCFGMNODE pGimCfg)
     rc = CFGMR3QueryBoolDef(pCfgHv, "HypercallDebugInterface", &pHv->fDbgHypercallInterface, false);
     AssertLogRelRCReturn(rc, rc);
 
+    /** @cfgm{/GIM/HyperV/SyntheticTimers, bool, false}
+     * Whether to offer the synthetic interrupt controller (SynIC) and the synthetic
+     * timers to the guest.  Windows then uses a synthetic timer for its clock
+     * instead of the RTC, which costs far fewer exits. */
+    bool fSyntheticTimers = false;
+    rc = CFGMR3QueryBoolDef(pCfgHv, "SyntheticTimers", &fSyntheticTimers, false);
+    AssertLogRelRCReturn(rc, rc);
+
     /*
      * Determine interface capabilities based on the version.
      */
@@ -296,6 +308,13 @@ VMMR3_INT_DECL(int) gimR3HvInit(PVM pVM, PCFGMNODE pGimCfg)
                        | GIM_HV_BASE_FEAT_TIMER_FREQ_MSRS
                      //| GIM_HV_BASE_FEAT_DEBUG_MSRS
                        ;
+        if (fSyntheticTimers)
+        {
+            /* Both are required for synthetic timers.  The timers deliver their messages on the
+               EMT owning them (gimR3HvTimerCallback), so they work for SMP VMs too. */
+            pHv->uBaseFeat |= GIM_HV_BASE_FEAT_BASIC_SYNIC_MSRS | GIM_HV_BASE_FEAT_STIMER_MSRS;
+            LogRel(("GIM: HyperV: Offering the synthetic interrupt controller and timers\n"));
+        }
 
         /* Miscellaneous features. */
         pHv->uMiscFeat = 0
@@ -516,30 +535,36 @@ VMMR3_INT_DECL(int) gimR3HvInit(PVM pVM, PCFGMNODE pGimCfg)
 
     /*
      * Setup up the per-VCPU synthetic timers.
+     *
+     * They are created even when the guest isn't offered them, so that saved states,
+     * reset and termination don't depend on the (saved) feature bits.  An unused timer
+     * costs nothing.
      */
-    if (   (pHv->uBaseFeat & GIM_HV_BASE_FEAT_STIMER_MSRS)
-        || (pHv->uBaseFeat & GIM_HV_BASE_FEAT_BASIC_SYNIC_MSRS))
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
     {
-        for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+        PVMCPU       pVCpu     = pVM->apCpusR3[idCpu];
+        PGIMHVCPU    pHvCpu    = &pVCpu->gim.s.u.HvCpu;
+
+        for (uint8_t idxStimer = 0; idxStimer < RT_ELEMENTS(pHvCpu->aStimers); idxStimer++)
         {
-            PVMCPU       pVCpu     = pVM->apCpusR3[idCpu];
-            PGIMHVCPU    pHvCpu    = &pVCpu->gim.s.u.HvCpu;
+            PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
 
-            for (uint8_t idxStimer = 0; idxStimer < RT_ELEMENTS(pHvCpu->aStimers); idxStimer++)
-            {
-                PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
+            /* Paranoia. */
+            Assert(pHvStimer->idCpu     == pVCpu->idCpu);
+            Assert(pHvStimer->idxStimer == idxStimer);
 
-                /* Paranoia. */
-                Assert(pHvStimer->idCpu     == pVCpu->idCpu);
-                Assert(pHvStimer->idxStimer == idxStimer);
-
-                /* Create the timer and associate the context pointers. */
-                char szName[32];
-                RTStrPrintf(szName, sizeof(szName), "Hyper-V[%u] Timer%u", pVCpu->idCpu, idxStimer);
-                rc = TMR3TimerCreate(pVM, TMCLOCK_VIRTUAL_SYNC, gimR3HvTimerCallback, pHvStimer /* pvUser */,
-                                     TMTIMER_FLAGS_RING0, szName, &pHvStimer->hTimer);
-                AssertLogRelRCReturn(rc, rc);
-            }
+            /* Create the timer and associate the context pointers.  The vCPU owning the timer
+               re-arms it while the timer EMT may be running guest code; with Windows using the
+               timer as its clock it must not wait for the timer EMT's next exit. */
+            char szName[32];
+            RTStrPrintf(szName, sizeof(szName), "Hyper-V[%u] Timer%u", pVCpu->idCpu, idxStimer);
+            uint32_t fTimerFlags = TMTIMER_FLAGS_RING0;
+#ifdef TMTIMER_FLAGS_POKE_TIMER_EMT
+            fTimerFlags |= TMTIMER_FLAGS_POKE_TIMER_EMT;
+#endif
+            rc = TMR3TimerCreate(pVM, TMCLOCK_VIRTUAL_SYNC, gimR3HvTimerCallback, pHvStimer /* pvUser */,
+                                 fTimerFlags, szName, &pHvStimer->hTimer);
+            AssertLogRelRCReturn(rc, rc);
         }
     }
 
@@ -566,6 +591,11 @@ VMMR3_INT_DECL(int) gimR3HvInit(PVM pVM, PCFGMNODE pGimCfg)
             rc2 = STAMR3RegisterF(pVM, &pHvCpu->aStatStimerCountWrite[idxStimer], STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS,
                                      STAMUNIT_OCCURENCES, "Number of times the STIMER_COUNT MSR was written.",
                                      "/GIM/HyperV/%u/Stimer%u/CountWrite", idCpu, idxStimer);
+            AssertLogRelRCReturn(rc2, rc2);
+
+            rc2 = STAMR3RegisterF(pVM, &pHvCpu->aStatStimerDeferred[idxStimer], STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS,
+                                     STAMUNIT_OCCURENCES, "Number of expiries handed to the owning EMT.",
+                                     "/GIM/HyperV/%u/Stimer%u/Deferred", idCpu, idxStimer);
             AssertLogRelRCReturn(rc2, rc2);
         }
     }
@@ -631,16 +661,14 @@ VMMR3_INT_DECL(int) gimR3HvTerm(PVM pVM)
     gimR3HvTermHypercallSupport(pVM);
     gimR3HvTermDebugSupport(pVM);
 
-    PCGIMHV pHv = &pVM->gim.s.u.Hv;
-    if (   (pHv->uBaseFeat & GIM_HV_BASE_FEAT_STIMER_MSRS)
-        || (pHv->uBaseFeat & GIM_HV_BASE_FEAT_BASIC_SYNIC_MSRS))
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
     {
-        for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+        PGIMHVCPU pHvCpu = &pVM->apCpusR3[idCpu]->gim.s.u.HvCpu;
+        for (uint8_t idxStimer = 0; idxStimer < RT_ELEMENTS(pHvCpu->aStimers); idxStimer++)
         {
-            PGIMHVCPU pHvCpu = &pVM->apCpusR3[idCpu]->gim.s.u.HvCpu;
-            for (uint8_t idxStimer = 0; idxStimer < RT_ELEMENTS(pHvCpu->aStimers); idxStimer++)
+            PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
+            if (pHvStimer->hTimer != NIL_TMTIMERHANDLE)
             {
-                PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
                 TMR3TimerDestroy(pVM, pHvStimer->hTimer);
                 pHvStimer->hTimer = NIL_TMTIMERHANDLE;
             }
@@ -726,10 +754,23 @@ VMMR3_INT_DECL(void) gimR3HvReset(PVM pVM)
             PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
             Assert(pHvStimer->idCpu == idCpu);
             Assert(pHvStimer->idxStimer == idxStimer);
+
+            /* Stop an armed timer, or it fires into the reset guest. */
+            if (pHvStimer->hTimer != NIL_TMTIMERHANDLE)
+            {
+                int rc = TMTimerLock(pVM, pHvStimer->hTimer, VERR_IGNORED);
+                AssertRC(rc);
+                if (TMTimerIsActive(pVM, pHvStimer->hTimer))
+                    TMTimerStop(pVM, pHvStimer->hTimer);
+                TMTimerUnlock(pVM, pHvStimer->hTimer);
+            }
+
             pHvStimer->uStimerConfigMsr = 0;
             pHvStimer->uStimerCountMsr  = 0;
             pHvStimer->uExpirationTime  = 0;
             pHvStimer->fMsgPending      = false;
+            /* A request still queued on the owning EMT finds nothing to do (and clears fDeliveryQueued). */
+            ASMAtomicWriteBool(&pHvStimer->fExpiredPending, false);
         }
     }
 }
@@ -887,6 +928,28 @@ VMMR3_INT_DECL(int) gimR3HvSave(PVM pVM, PSSMHANDLE pSSM)
             SSMR3PutU64(pSSM, pHvCpu->auSintMsrs[idxSintMsr]);
     }
 
+    /*
+     * Save the rest of the synthetic interrupt controller and the synthetic timers (version 5).
+     */
+    for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+    {
+        PGIMHVCPU pHvCpu = &pVM->apCpusR3[idCpu]->gim.s.u.HvCpu;
+        SSMR3PutU64(pSSM, pHvCpu->uSControlMsr);
+        SSMR3PutU64(pSSM, pHvCpu->uSiefpMsr);
+        SSMR3PutU64(pSSM, pHvCpu->uVpAssistMsr);
+        for (size_t idxStimer = 0; idxStimer < RT_ELEMENTS(pHvCpu->aStimers); idxStimer++)
+        {
+            PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
+            SSMR3PutU64(pSSM,  pHvStimer->uStimerConfigMsr);
+            SSMR3PutU64(pSSM,  pHvStimer->uStimerCountMsr);
+            SSMR3PutU64(pSSM,  pHvStimer->uExpirationTime);
+            SSMR3PutBool(pSSM, pHvStimer->fMsgPending);
+            SSMR3PutBool(pSSM, ASMAtomicReadBool(&pHvStimer->fExpiredPending));
+            int rc = TMR3TimerSave(pVM, pHvStimer->hTimer, pSSM);
+            AssertRCReturn(rc, rc);
+        }
+    }
+
     return SSMR3PutU8(pSSM, UINT8_MAX);
 }
 
@@ -907,6 +970,7 @@ VMMR3_INT_DECL(int) gimR3HvLoad(PVM pVM, PSSMHANDLE pSSM)
     int rc = SSMR3GetU32(pSSM, &uHvSavedStateVersion);
     AssertRCReturn(rc, rc);
     if (   uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION
+        && uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION_PRE_STIMER
         && uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION_PRE_DEBUG_UDP_PORTS
         && uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION_PRE_SYNIC
         && uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION_PRE_DEBUG)
@@ -1029,6 +1093,33 @@ VMMR3_INT_DECL(int) gimR3HvLoad(PVM pVM, PSSMHANDLE pSSM)
             }
         }
 
+        /* The rest of the synthetic interrupt controller and the synthetic timers. Older saved
+           states don't have them; their guests weren't offered the synthetic timers, and the
+           fields keep their reset values. */
+        if (uHvSavedStateVersion > GIM_HV_SAVED_STATE_VERSION_PRE_STIMER)
+        {
+            for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+            {
+                PGIMHVCPU pHvCpu = &pVM->apCpusR3[idCpu]->gim.s.u.HvCpu;
+                SSMR3GetU64(pSSM, &pHvCpu->uSControlMsr);
+                SSMR3GetU64(pSSM, &pHvCpu->uSiefpMsr);
+                SSMR3GetU64(pSSM, &pHvCpu->uVpAssistMsr);
+                for (size_t idxStimer = 0; idxStimer < RT_ELEMENTS(pHvCpu->aStimers); idxStimer++)
+                {
+                    PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
+                    bool         fExpiredPending = false;
+                    SSMR3GetU64(pSSM,  &pHvStimer->uStimerConfigMsr);
+                    SSMR3GetU64(pSSM,  &pHvStimer->uStimerCountMsr);
+                    SSMR3GetU64(pSSM,  &pHvStimer->uExpirationTime);
+                    SSMR3GetBool(pSSM, &pHvStimer->fMsgPending);
+                    SSMR3GetBool(pSSM, &fExpiredPending);
+                    ASMAtomicWriteBool(&pHvStimer->fExpiredPending, fExpiredPending);
+                    rc = TMR3TimerLoad(pVM, pHvStimer->hTimer, pSSM);
+                    AssertRCReturn(rc, rc);
+                }
+            }
+        }
+
         uint8_t bDelim;
         rc = SSMR3GetU8(pSSM, &bDelim);
     }
@@ -1059,6 +1150,22 @@ VMMR3_INT_DECL(int) gimR3HvLoadDone(PVM pVM, PSSMHANDLE pSSM)
         else
             for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
                 EMSetHypercallInstructionsEnabled(pVM->apCpusR3[idCpu], false);
+
+        /*
+         * Hand synthetic timer expiries that were waiting for their EMT when the state
+         * was saved to that EMT again.
+         */
+        for (VMCPUID idCpu = 0; idCpu < pVM->cCpus; idCpu++)
+        {
+            PGIMHVCPU pHvCpu = &pVM->apCpusR3[idCpu]->gim.s.u.HvCpu;
+            for (size_t idxStimer = 0; idxStimer < RT_ELEMENTS(pHvCpu->aStimers); idxStimer++)
+            {
+                PGIMHVSTIMER pHvStimer = &pHvCpu->aStimers[idxStimer];
+                ASMAtomicWriteBool(&pHvStimer->fDeliveryQueued, false);
+                if (ASMAtomicReadBool(&pHvStimer->fExpiredPending))
+                    gimR3HvStimerQueueExpiry(pVM, pHvStimer);
+            }
+        }
     }
     return VINF_SUCCESS;
 }
@@ -1113,7 +1220,63 @@ VMMR3_INT_DECL(int) gimR3HvDisableVpAssistPage(PVMCPU pVCpu)
 
 
 /**
+ * Handles a synthetic timer expiry that the timer callback handed over to the
+ * EMT owning the timer.
+ *
+ * @returns VINF_SUCCESS.
+ * @param   pVM         The cross context VM structure.
+ * @param   pHvStimer   Pointer to the Hyper-V synthetic timer.
+ * @thread  EMT(pHvStimer->idCpu), called through VMR3ReqCallNoWait.
+ */
+static DECLCALLBACK(int) gimR3HvStimerExpiredOnEmt(PVM pVM, PGIMHVSTIMER pHvStimer)
+{
+    PVMCPU pVCpu = pVM->apCpusR3[pHvStimer->idCpu];
+    VMCPU_ASSERT_EMT(pVCpu);
+
+    /* Clear this first: an expiry after this point queues a new request. */
+    ASMAtomicWriteBool(&pHvStimer->fDeliveryQueued, false);
+
+    int rc = TMTimerLock(pVM, pHvStimer->hTimer, VERR_IGNORED);
+    AssertRCReturn(rc, VINF_SUCCESS);
+    if (ASMAtomicXchgBool(&pHvStimer->fExpiredPending, false)) /* Cleared by a reprogramming or reset meanwhile. */
+        gimHvStimerExpired(pVCpu, pHvStimer);
+    TMTimerUnlock(pVM, pHvStimer->hTimer);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Queues the handling of a pending expiry on the EMT owning the timer, unless
+ * a request for it is queued already.
+ *
+ * @param   pVM         The cross context VM structure.
+ * @param   pHvStimer   Pointer to the Hyper-V synthetic timer, with
+ *                      fExpiredPending set.
+ */
+static void gimR3HvStimerQueueExpiry(PVM pVM, PGIMHVSTIMER pHvStimer)
+{
+    if (!ASMAtomicXchgBool(&pHvStimer->fDeliveryQueued, true))
+    {
+        int rc = VMR3ReqCallNoWait(pVM, pHvStimer->idCpu, (PFNRT)gimR3HvStimerExpiredOnEmt, 2, pVM, pHvStimer);
+        if (RT_FAILURE(rc))
+        {
+            ASMAtomicWriteBool(&pHvStimer->fDeliveryQueued, false);
+            LogRelMax(10, ("GIM%u: HyperV: Failed to queue the expiry of STIMER%u. rc=%Rrc\n",
+                           pHvStimer->idCpu, pHvStimer->idxStimer, rc));
+        }
+    }
+}
+
+
+/**
  * @callback_method_impl{FNTMTIMERINT, Hyper-V synthetic timer callback.}
+ *
+ * TM runs all timer callbacks on one EMT, but the SIM page, the timer
+ * configuration and the guest reference time all belong to the virtual CPU
+ * owning the timer, and delivering a message from another EMT races with the
+ * guest consuming the previous one.  So the expiry is handled right here only
+ * on the owning EMT, otherwise it is marked pending and handed to the owner
+ * with a request (the same as KVM marks the timer pending and kicks the vCPU).
  */
 static DECLCALLBACK(void) gimR3HvTimerCallback(PVM pVM, TMTIMERHANDLE hTimer, void *pvUser)
 {
@@ -1124,25 +1287,15 @@ static DECLCALLBACK(void) gimR3HvTimerCallback(PVM pVM, TMTIMERHANDLE hTimer, vo
     Assert(pHvStimer->hTimer == hTimer);
     RT_NOREF(hTimer);
 
-    /** @todo This is currently broken for SMP and single-VCPU only because
-     *        this callback NEEDS to be executed on the VCPU EMT owning the
-     *        timer. Hence the release assertion below.
-     */
-    if (pVM->cCpus > 1)
-        AssertReleaseMsgFailed(("Hyper-V Synthetic Timers not yet implemented for SMP VMs!"));
-    PVMCPU pVCpu = pVM->apCpusR3[pHvStimer->idCpu];
-    gimHvDeliverTimerMsg(pVCpu, pHvStimer);
-
-    /* Re-arm the timer if it's periodic. Disable the timer if it's one-shot. */
-    uint64_t const uStimerConfig = pHvStimer->uStimerConfigMsr;
-    if (MSR_GIM_HV_STIMER_IS_PERIODIC(uStimerConfig))
-    {
-        uint64_t const uTimerCount  = pHvStimer->uStimerCountMsr;    /* in 100-ns units. */
-        uint64_t const cNanosToNext = uTimerCount * 100 /* ns */;   /* number of nanos to expiry. */
-        TMTimerSetNano(pVM, hTimer, cNanosToNext);
-    }
+    VMCPUID const idCpu = pHvStimer->idCpu;
+    if (VMMGetCpuId(pVM) == idCpu)
+        gimHvStimerExpired(pVM->apCpusR3[idCpu], pHvStimer);
     else
-        pHvStimer->uStimerConfigMsr &= ~MSR_GIM_HV_STIMER_ENABLE;
+    {
+        STAM_REL_COUNTER_INC(&pVM->apCpusR3[idCpu]->gim.s.u.HvCpu.aStatStimerDeferred[pHvStimer->idxStimer]);
+        ASMAtomicWriteBool(&pHvStimer->fExpiredPending, true);
+        gimR3HvStimerQueueExpiry(pVM, pHvStimer);
+    }
 }
 
 
