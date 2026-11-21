@@ -488,6 +488,9 @@ typedef struct VMINTUSERPERVMCPU
     STAMCOUNTER                     StatHaltPollHits;
     /** Halt polls that timed out (the EMT blocked afterwards). */
     STAMCOUNTER                     StatHaltPollMisses;
+    /** Halts a device hint (VMR3HaltPollHint) made poll until the next timer
+     * instead of blocking. */
+    STAMCOUNTER                     StatHaltPollHinted;
     /** @} */
 } VMINTUSERPERVMCPU;
 AssertCompileMemberAlignment(VMINTUSERPERVMCPU, u64HaltsStartTS, 8);

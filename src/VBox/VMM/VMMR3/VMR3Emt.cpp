@@ -866,6 +866,7 @@ static DECLCALLBACK(int) vmR3HaltMethod1Halt(PUVMCPU pUVCpu, const uint64_t fMas
                 {
                     cNsPoll = (uint32_t)u64NanoTS; /* <= VM_HALT_POLL_HINT_MAX_NS_LIMIT */
                     fHinted = true;
+                    STAM_REL_COUNTER_INC(&pUVCpu->vm.s.StatHaltPollHinted);
                 }
                 if (cNsPoll)
                 {
@@ -1010,6 +1011,7 @@ static DECLCALLBACK(int) vmR3HaltGlobal1Halt(PUVMCPU pUVCpu, const uint64_t fMas
     //u64Start = u64NowLog = RTTimeNanoTS();
     int rc = VINF_SUCCESS;
     ASMAtomicWriteBool(&pUVCpu->vm.s.fWait, true);
+    bool fHintCounted = false;
     unsigned cLoops = 0;
     for (;; cLoops++)
     {
@@ -1042,6 +1044,11 @@ static DECLCALLBACK(int) vmR3HaltGlobal1Halt(PUVMCPU pUVCpu, const uint64_t fMas
          */
         bool const fHintSpin =    u64Delta >= pUVM->vm.s.Halt.Global1.cNsSpinBlockThresholdCfg
                                && vmR3HaltPollHintCovers(pUVM, u64Delta);
+        if (fHintSpin && !fHintCounted)
+        {
+            fHintCounted = true; /* once per halt, like method 1 */
+            STAM_REL_COUNTER_INC(&pUVCpu->vm.s.StatHaltPollHinted);
+        }
         if (   u64Delta >= pUVM->vm.s.Halt.Global1.cNsSpinBlockThresholdCfg
             && !fHintSpin)
         {
