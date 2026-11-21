@@ -93,6 +93,11 @@ typedef enum TMCLOCK
 #define TMTIMER_FLAGS_NO_CRIT_SECT      RT_BIT_32(0)
 /** Used in ring-0.  Must set this or TMTIMER_FLAGS_NO_RING0. */
 #define TMTIMER_FLAGS_RING0             RT_BIT_32(1)
+/** Wake up or poke the timer EMT when another thread arms the timer clearly
+ *  before the timer EMT would run the timers next, so the timer runs in time.
+ *  For per-vCPU timers that are the guest's main clock (ring-3, internal timers
+ *  only).  Costs the timer EMT an exit per poke. */
+#define TMTIMER_FLAGS_POKE_TIMER_EMT    RT_BIT_32(2)
 /** Not used in ring-0 (for refactoring and doc purposes). */
 #define TMTIMER_FLAGS_NO_RING0          RT_BIT_32(31)
 /** @} */
