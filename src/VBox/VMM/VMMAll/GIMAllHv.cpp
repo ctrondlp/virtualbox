@@ -598,17 +598,15 @@ VMM_INT_DECL(void) gimHvDeliverTimerMsg(PVMCPUCC pVCpu, PGIMHVSTIMER pHvStimer)
 
     /* Get the VCPU's synthetic timer config and timer index.  */
     uint64_t const uStimerConfig = pHvStimer->uStimerConfigMsr;
-#if defined(RT_STRICT) || defined(VBOX_WITH_STATISTICS)
     uint16_t const idxStimer     = pHvStimer->idxStimer;
-#endif
 
     /* Sanity. */
-    Assert(idxStimer < RT_ELEMENTS(pHvCpu->aStatStimerFired));
-    Assert(idxStimer < RT_ELEMENTS(pHvCpu->aStimers));
+    AssertReturnVoid(idxStimer < RT_ELEMENTS(pHvCpu->aStimers));
+    AssertCompile(RT_ELEMENTS(pHvCpu->aStatStimerFired) == RT_ELEMENTS(pHvCpu->aStimers));
     AssertCompile(MSR_GIM_HV_STIMER_SINT_MASK < RT_ELEMENTS(pHvCpu->auSintMsrs));
     AssertCompile(RT_ELEMENTS(pHvCpu->auSintMsrs) * GIM_HV_MSG_SIZE == GIM_HV_PAGE_SIZE);
 
-    STAM_COUNTER_INC(&pHvCpu->aStatStimerFired[idxStimer]);
+    STAM_REL_COUNTER_INC(&pHvCpu->aStatStimerFired[idxStimer]);
 
     /* For direct mode, send the interrupt directly, no messing with the SIM page. */
     if (MSR_GIM_HV_STIMER_IS_DIRECT_MODE(uStimerConfig))
@@ -1350,7 +1348,7 @@ VMM_INT_DECL(VBOXSTRICTRC) gimHvWriteMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUMM
                         pHvStimer->uStimerConfigMsr = uRawValue;
                         Log(("GIM%u: HyperV: Set STIMER_CONFIG%u=%#RX64\n", pVCpu->idCpu, idxStimer, uRawValue));
 
-                        STAM_COUNTER_INC(&pHvCpu->aStatStimerConfigWrite[idxStimer]);
+                        STAM_REL_COUNTER_INC(&pHvCpu->aStatStimerConfigWrite[idxStimer]);
 
                         /* An expiry still waiting for this EMT belongs to the old configuration. */
                         ASMAtomicWriteBool(&pHvStimer->fExpiredPending, false);
@@ -1420,7 +1418,7 @@ VMM_INT_DECL(VBOXSTRICTRC) gimHvWriteMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUMM
                 pHvStimer->uStimerCountMsr = uRawValue;
                 ASMAtomicWriteBool(&pHvStimer->fExpiredPending, false); /* Belongs to the old count. */
 
-                STAM_COUNTER_INC(&pHvCpu->aStatStimerCountWrite[idxStimer]);
+                STAM_REL_COUNTER_INC(&pHvCpu->aStatStimerCountWrite[idxStimer]);
 
                 /*
                  * Writing zero to this MSR disables the timer regardless of whether the

@@ -1286,7 +1286,7 @@ static DECLCALLBACK(void) gimR3HvTimerCallback(PVM pVM, TMTIMERHANDLE hTimer, vo
         gimHvStimerExpired(pVM->apCpusR3[idCpu], pHvStimer);
     else
     {
-        STAM_COUNTER_INC(&pVM->apCpusR3[idCpu]->gim.s.u.HvCpu.aStatStimerDeferred[pHvStimer->idxStimer]);
+        STAM_REL_COUNTER_INC(&pVM->apCpusR3[idCpu]->gim.s.u.HvCpu.aStatStimerDeferred[pHvStimer->idxStimer]);
         ASMAtomicWriteBool(&pHvStimer->fExpiredPending, true);
         gimR3HvStimerQueueExpiry(pVM, pHvStimer);
     }
