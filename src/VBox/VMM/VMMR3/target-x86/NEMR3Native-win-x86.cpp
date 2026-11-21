@@ -3215,9 +3215,12 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
         aenmNames[iReg++] = WHvX64RegisterRip;
     }
 
-    /* event injection */
+    /* Event injection.  The pending (ExtInt) event is only used with the Hyper-V
+       APIC (see nemHCWinCopyStateToHyperV), and reading it is expensive: it takes
+       longer than all the other registers of a full import together. */
     aenmNames[iReg++] = WHvRegisterPendingInterruption;
-    aenmNames[iReg++] = WHvRegisterPendingEvent;
+    if (pVM->nem.s.fLocalApicEmulation)
+        aenmNames[iReg++] = WHvRegisterPendingEvent;
 
     size_t const cRegs = iReg;
     Assert(cRegs < RT_ELEMENTS(aenmNames));
@@ -3650,20 +3653,22 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
     }
     iReg++;
 
-    Assert(aenmNames[iReg] == WHvRegisterPendingEvent);
-    WHV_X64_PENDING_EXT_INT_EVENT const *pEventPending = &aValues[iReg].ExtIntEvent;
-    if (pEventPending->EventPending)
+    if (pVM->nem.s.fLocalApicEmulation)
     {
-        /* Currently this should only happen when injecting PIC interrupts using the Hyper-V APIC. */
-        Assert(pVM->nem.s.fLocalApicEmulation);
-        Assert(aValues[iReg - 1].PendingInterruption.InterruptionPending == 0); /* PendingInterruption shouldn't also be set. */
-        AssertLogRelMsgReturn(pEventPending->EventType == WHvX64PendingEventExtInt,
-                              ("%u: Unexpected pending event type %#x\n", pEventPending->EventType),
-                              VERR_NEM_IPE_8);
-        int rc = TRPMAssertTrap(pVCpu, pEventPending->Vector, TRPM_HARDWARE_INT);
-        AssertMsgReturn(rc == VINF_SUCCESS, ("rc=%Rrc\n", rc), RT_FAILURE_NP(rc) ? rc : VERR_NEM_IPE_3);
+        Assert(aenmNames[iReg] == WHvRegisterPendingEvent);
+        WHV_X64_PENDING_EXT_INT_EVENT const *pEventPending = &aValues[iReg].ExtIntEvent;
+        if (pEventPending->EventPending)
+        {
+            /* Currently this should only happen when injecting PIC interrupts using the Hyper-V APIC. */
+            Assert(aValues[iReg - 1].PendingInterruption.InterruptionPending == 0); /* PendingInterruption shouldn't also be set. */
+            AssertLogRelMsgReturn(pEventPending->EventType == WHvX64PendingEventExtInt,
+                                  ("%u: Unexpected pending event type %#x\n", pEventPending->EventType),
+                                  VERR_NEM_IPE_8);
+            int rc = TRPMAssertTrap(pVCpu, pEventPending->Vector, TRPM_HARDWARE_INT);
+            AssertMsgReturn(rc == VINF_SUCCESS, ("rc=%Rrc\n", rc), RT_FAILURE_NP(rc) ? rc : VERR_NEM_IPE_3);
+        }
+        iReg++;
     }
-    iReg++;
 
     /* Almost done, just update extrn flags and maybe change PGM mode. */
     pVCpu->cpum.GstCtx.fExtrn &= ~fWhat;
