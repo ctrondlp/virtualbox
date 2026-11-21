@@ -555,7 +555,7 @@ AssertCompile(MSR_GIM_HV_RANGE11_FIRST <= MSR_GIM_HV_RANGE11_LAST);
 /** The Stimer direct-mode APIC vector mask (bits 11:4). */
 #define MSR_GIM_HV_STIMER_VECTOR_MASK             UINT64_C(0xff0)
 /** Gets the APIC vector when direct-mode is used. */
-#define MSR_GIM_HV_STIMER_GET_VECTOR(a)           ((a) & MSR_GIM_HV_STIMER_VECTOR_MASK)
+#define MSR_GIM_HV_STIMER_GET_VECTOR(a)           (((a) & MSR_GIM_HV_STIMER_VECTOR_MASK) >> 4)
 /** The Stimer SINTx mask (bits 16:19). */
 #define MSR_GIM_HV_STIMER_SINTX                   UINT64_C(0xf0000)
 /** The Stimer direct mode mask. */
@@ -1334,8 +1334,13 @@ typedef struct GIMHVSTIMER
     uint64_t                    uExpirationTime;
     /** Whether a message is pending for delivery. */
     bool                        fMsgPending;
+    /** Set by the timer callback when the timer expired on another EMT than the
+     *  owning one; the owning EMT handles the expiry (see gimR3HvTimerCallback). */
+    bool volatile               fExpiredPending;
+    /** Whether a request to handle the expiry is queued on the owning EMT. */
+    bool volatile               fDeliveryQueued;
     /** Padding. */
-    bool                        afAlignment0[7];
+    bool                        afAlignment0[5];
 } GIMHVSTIMER;
 /** Pointer to per-VCPU Hyper-V synthetic timer. */
 typedef GIMHVSTIMER *PGIMHVSTIMER;
@@ -1372,6 +1377,8 @@ typedef struct GIMHVCPU
     STAMCOUNTER                 aStatStimerConfigWrite[GIM_HV_STIMER_COUNT];
     /** Number of STIMERN_COUNT writes. */
     STAMCOUNTER                 aStatStimerCountWrite[GIM_HV_STIMER_COUNT];
+    /** Number of expiries handed to the owning EMT because the timer fired on another one. */
+    STAMCOUNTER                 aStatStimerDeferred[GIM_HV_STIMER_COUNT];
     /** @} */
 } GIMHVCPU;
 /** Pointer to per-VCPU GIM Hyper-V instance data. */
@@ -1429,6 +1436,7 @@ VMM_INT_DECL(VBOXSTRICTRC)      gimHvXcptUD(PVMCPUCC pVCpu, PCPUMCTX pCtx, PDISS
 VMM_INT_DECL(VBOXSTRICTRC)      gimHvHypercall(PVMCPUCC pVCpu, PCPUMCTX pCtx);
 VMM_INT_DECL(VBOXSTRICTRC)      gimHvHypercallEx(PVMCPUCC pVCpu, PCPUMCTX pCtx, unsigned uDisOpcode, uint8_t cbInstr);
 VMM_INT_DECL(void)              gimHvDeliverTimerMsg(PVMCPUCC pVCpu, PGIMHVSTIMER pHvStimer);
+VMM_INT_DECL(void)              gimHvStimerExpired(PVMCPUCC pVCpu, PGIMHVSTIMER pHvStimer);
 #if !defined(VBOX_VMM_TARGET_ARMV8)
 VMM_INT_DECL(VBOXSTRICTRC)      gimHvReadMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUMMSRRANGE pRange, uint64_t *puValue);
 VMM_INT_DECL(VBOXSTRICTRC)      gimHvWriteMsr(PVMCPUCC pVCpu, uint32_t idMsr, PCCPUMMSRRANGE pRange, uint64_t uRawValue);
