@@ -7850,7 +7850,8 @@ void MachineConfigFile::buildHardwareXML(xml::ElementNode &elmParent,
         }
         if (hw.graphicsAdapter.ulVRAMSizeMB != 8)
             pelmDisplay->setAttribute("VRAMSize", hw.graphicsAdapter.ulVRAMSizeMB);
-        if (   (   hw.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu /* older settings versions lack it */
+        /* Only with a virtio-gpu (older settings versions lack the attribute): */
+        if (   (   hw.graphicsAdapter.graphicsControllerType == GraphicsControllerType_VirtioGpu
                 || hw.graphicsAdapter.fComputeGpu)
             && hw.graphicsAdapter.ulHostVisibleSizeMB != 1024)
             pelmDisplay->setAttribute("hostVisibleSize", hw.graphicsAdapter.ulHostVisibleSizeMB);

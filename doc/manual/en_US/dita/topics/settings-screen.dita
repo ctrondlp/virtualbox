@@ -38,7 +38,7 @@
           </li>
           <li>
             <p><b outputclass="bold">VirtioGpu:</b> Use this graphics controller to emulate a 2D virtio-gpu display device, for guests that have a virtio-gpu driver, such as recent Linux guests. It has no VGA compatibility: guests that boot with the 64-bit EFI firmware get a display from the firmware's virtio-gpu driver, but with the BIOS the VM shows nothing until the guest OS loads its virtio-gpu driver.</p>
-            <p>3D acceleration is experimental for this graphics controller, and the state of a VM that uses it cannot be saved yet.</p>
+            <p>3D acceleration is experimental for this graphics controller. With it, Linux guests with the Mesa Venus driver can use the Vulkan capabilities of the host graphics card. The state of a VM that uses this controller can be saved, but not while a program in the guest uses Vulkan on the host graphics card: close such programs first.</p>
           </li>
           <li>
             <p><b outputclass="bold">None:</b> Does not emulate a graphics adapter type.</p>
@@ -47,6 +47,16 @@
       </li>
       <li>
         <p><b outputclass="bold">3D Acceleration</b>: If a virtual machine has Guest Additions installed, you can enable accelerated 3D graphics on the VM. With 3D acceleration enabled, the VM also uses video decoding acceleration if the host also supports video decoding acceleration. See <xref href="guestadd-video.dita"/>.</p>
+      </li>
+      <li>
+        <p><b outputclass="bold">Compute GPU (Vulkan for Linux guests)</b>: Gives the VM a second, compute-only graphics device next to its graphics controller. It offers the host graphics card to Linux guests with the Mesa Venus driver as a Vulkan device, for GPU compute such as running a language model, while the graphics controller keeps showing the screen. This setting is not shown for the VirtioGpu graphics controller, which uses its 3D Acceleration setting for the same purpose.</p>
+        <p>The Vulkan commands of the guest are handed to the host graphics driver, so only turn this on for guests you trust.</p>
+      </li>
+      <li>
+        <p><b outputclass="bold">Host Visible Memory</b>: Only shown when the VM has a virtio-gpu. Sets the size of the address window the guest can map host graphics memory into. It is address space only and is not backed by memory until the guest maps something into it.</p>
+      </li>
+      <li>
+        <p><b outputclass="bold">GPU Memory Limit</b>: Only shown when the VM has a virtio-gpu. Limits the memory the Vulkan programs of the guest can allocate on the host graphics card together. An allocation over the limit fails in the guest as it does when the card is full, so the guest cannot take the memory the programs on the host need. <b outputclass="bold">No limit</b> is the default. Most Linux guests allocate this memory asynchronously and then stop the program instead of reporting the failure; setting the environment variable <codeph>VN_PERF=no_async_mem_alloc</codeph> in the guest lets the program see the error and handle it.</p>
       </li>
     </ul>
   </body>

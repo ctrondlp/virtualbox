@@ -170,6 +170,8 @@ void UIDisplayScreenFeaturesEditor::prepare()
     /* Prepare connections: */
     connect(m_pCheckBoxEnable3DAcceleration, &QCheckBox::stateChanged,
             this, &UIDisplayScreenFeaturesEditor::sig3DAccelerationFeatureStatusChange);
+    connect(m_pCheckBoxComputeGpu, &QCheckBox::stateChanged,
+            this, &UIDisplayScreenFeaturesEditor::sigComputeGpuStatusChange);
 
     /* Apply language settings: */
     sltRetranslateUI();

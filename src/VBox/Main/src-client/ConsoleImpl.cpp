@@ -7628,6 +7628,8 @@ HRESULT Console::i_saveState(Reason_T aReason, const ComPtr<IProgress> &aProgres
 
         Bstr bstrStateKeyId;
         Bstr bstrStateKeyStore;
+        /* What the VM reports while saving, e.g. a device saying why it cannot save its state. */
+        Utf8Str strVMError;
 #ifdef VBOX_WITH_FULL_VM_ENCRYPTION
         if (SUCCEEDED(hrc))
         {
@@ -7661,6 +7663,11 @@ HRESULT Console::i_saveState(Reason_T aReason, const ComPtr<IProgress> &aProgres
                 {
                     alock.release();
 
+                    int const vrcAtError = ptrVM.vtable()->pfnVMR3AtErrorRegister(ptrVM.rawUVM(),
+                                                                                  Console::i_genericVMSetErrorCallback,
+                                                                                  &strVMError);
+                    AssertRC(vrcAtError);
+
                     vrc = ptrVM.vtable()->pfnVMR3Save(ptrVM.rawUVM(),
                                                       NULL /*pszFilename*/,
                                                       pStreamOps,
@@ -7669,6 +7676,10 @@ HRESULT Console::i_saveState(Reason_T aReason, const ComPtr<IProgress> &aProgres
                                                       Console::i_stateProgressCallback,
                                                       static_cast<IProgress *>(aProgress),
                                                       &aLeftPaused);
+
+                    if (RT_SUCCESS(vrcAtError))
+                        ptrVM.vtable()->pfnVMR3AtErrorDeregister(ptrVM.rawUVM(), Console::i_genericVMSetErrorCallback,
+                                                                 &strVMError);
 
                     alock.acquire();
                 }
@@ -7715,8 +7726,12 @@ HRESULT Console::i_saveState(Reason_T aReason, const ComPtr<IProgress> &aProgres
                     ptrVM.vtable()->pfnVMR3Resume(ptrVM.rawUVM(), VMRESUMEREASON_STATE_RESTORED);
                     alock.acquire();
                 }
-                hrc = setErrorBoth(E_FAIL, vrc, tr("Failed to save the machine state to '%s' (%Rrc)"),
-                                   aStateFilePath.c_str(), vrc);
+                if (strVMError.isNotEmpty())
+                    hrc = setErrorBoth(E_FAIL, vrc, tr("Failed to save the machine state to '%s': %s"),
+                                       aStateFilePath.c_str(), strVMError.c_str());
+                else
+                    hrc = setErrorBoth(E_FAIL, vrc, tr("Failed to save the machine state to '%s' (%Rrc)"),
+                                       aStateFilePath.c_str(), vrc);
             }
         }
     }

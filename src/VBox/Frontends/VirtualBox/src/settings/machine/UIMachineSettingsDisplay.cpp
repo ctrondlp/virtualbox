@@ -36,6 +36,7 @@
 #include "UIErrorString.h"
 #include "UIExtraDataManager.h"
 #include "UIGlobalSession.h"
+#include "UIGpuMemoryLimitEditor.h"
 #include "UIGraphicsControllerEditor.h"
 #include "UIGuestOSType.h"
 #include "UIHostVisibleSizeEditor.h"
@@ -67,6 +68,7 @@ struct UIDataSettingsMachineDisplay
     UIDataSettingsMachineDisplay()
         : m_iCurrentVRAM(0)
         , m_iCurrentHostVisibleSize(1024)
+        , m_iGpuMemoryLimit(0)
         , m_cGuestScreenCount(0)
         , m_graphicsControllerType(KGraphicsControllerType_Null)
 #ifdef VBOX_WITH_3D_ACCELERATION
@@ -97,6 +99,7 @@ struct UIDataSettingsMachineDisplay
         return true
                && (m_iCurrentVRAM == other.m_iCurrentVRAM)
                && (m_iCurrentHostVisibleSize == other.m_iCurrentHostVisibleSize)
+               && (m_iGpuMemoryLimit == other.m_iGpuMemoryLimit)
                && (m_cGuestScreenCount == other.m_cGuestScreenCount)
                && (m_scaleFactors == other.m_scaleFactors)
                && (m_graphicsControllerType == other.m_graphicsControllerType)
@@ -132,6 +135,8 @@ struct UIDataSettingsMachineDisplay
     int                      m_iCurrentVRAM;
     /** Holds the virtio-gpu host visible memory window size (MB). */
     int                      m_iCurrentHostVisibleSize;
+    /** Holds the limit for the host GPU memory of the guest (MB), 0 for none. */
+    int                      m_iGpuMemoryLimit;
     /** Holds the guest screen count. */
     int                      m_cGuestScreenCount;
     /** Holds the guest screen scale-factor. */
@@ -195,6 +200,7 @@ UIMachineSettingsDisplay::UIMachineSettingsDisplay()
     , m_pTabScreen(0)
     , m_pEditorVideoMemorySize(0)
     , m_pEditorHostVisibleSize(0)
+    , m_pEditorGpuMemoryLimit(0)
     , m_pEditorMonitorCount(0)
     , m_pEditorScaleFactor(0)
     , m_pEditorGraphicsController(0)
@@ -278,6 +284,7 @@ void UIMachineSettingsDisplay::loadToCacheFrom(QVariant &data)
         /* Gather old 'Screen' data: */
         oldDisplayData.m_iCurrentVRAM = comGraphics.GetVRAMSize();
         oldDisplayData.m_iCurrentHostVisibleSize = comGraphics.GetHostVisibleSize();
+        oldDisplayData.m_iGpuMemoryLimit = comGraphics.GetGpuMemoryLimit();
         oldDisplayData.m_cGuestScreenCount = comGraphics.GetMonitorCount();
         oldDisplayData.m_scaleFactors = gEDataManager->scaleFactors(m_machine.GetId());
         oldDisplayData.m_graphicsControllerType = comGraphics.GetGraphicsControllerType();
@@ -376,6 +383,8 @@ void UIMachineSettingsDisplay::getFromCache()
         m_pEditorGraphicsController->setValue(oldDisplayData.m_graphicsControllerType);
     if (m_pEditorHostVisibleSize)
         m_pEditorHostVisibleSize->setValue(oldDisplayData.m_iCurrentHostVisibleSize);
+    if (m_pEditorGpuMemoryLimit)
+        m_pEditorGpuMemoryLimit->setValue(oldDisplayData.m_iGpuMemoryLimit);
 #ifdef VBOX_WITH_3D_ACCELERATION
     if (m_pEditorDisplayScreenFeatures)
     {
@@ -388,6 +397,7 @@ void UIMachineSettingsDisplay::getFromCache()
     sltHandleGraphicsControllerComboChange();
 #ifdef VBOX_WITH_3D_ACCELERATION
     sltHandle3DAccelerationFeatureStateChange();
+    sltHandleComputeGpuStatusChange();
 #endif
     // Should be the last one for this tab, since it depends on some of others:
     if (m_pEditorVideoMemorySize)
@@ -452,6 +462,8 @@ void UIMachineSettingsDisplay::putToCache()
         newDisplayData.m_iCurrentVRAM = m_pEditorVideoMemorySize->value();
     if (m_pEditorHostVisibleSize)
         newDisplayData.m_iCurrentHostVisibleSize = m_pEditorHostVisibleSize->value();
+    if (m_pEditorGpuMemoryLimit)
+        newDisplayData.m_iGpuMemoryLimit = m_pEditorGpuMemoryLimit->value();
     if (m_pEditorMonitorCount)
         newDisplayData.m_cGuestScreenCount = m_pEditorMonitorCount->value();
     if (m_pEditorScaleFactor)
@@ -681,6 +693,7 @@ void UIMachineSettingsDisplay::polishPage()
     /* Polish 'Screen' availability: */
     m_pEditorVideoMemorySize->setEnabled(isMachineOffline());
     m_pEditorHostVisibleSize->setEnabled(isMachineOffline());
+    m_pEditorGpuMemoryLimit->setEnabled(isMachineOffline());
     m_pEditorMonitorCount->setEnabled(isMachineOffline());
     m_pEditorScaleFactor->setEnabled(isMachineInValidMode());
     m_pEditorGraphicsController->setEnabled(isMachineOffline());
@@ -720,9 +733,8 @@ void UIMachineSettingsDisplay::sltHandleGraphicsControllerComboChange()
     /* Update Video RAM requirements: */
     m_pEditorVideoMemorySize->setGraphicsControllerType(m_pEditorGraphicsController->value());
 
-    /* The host visible memory window only exists for the virtio-gpu graphics controller: */
-    m_pEditorHostVisibleSize->setVisible(m_pEditorGraphicsController->value() == KGraphicsControllerType_VirtioGpu);
-    updateMinimumLayoutHint();
+    /* The host visible memory window and the GPU memory limit only exist with a virtio-gpu: */
+    updateVirtioGpuEditorsVisibility();
 
     /* Revalidate: */
     revalidate();
@@ -737,7 +749,28 @@ void UIMachineSettingsDisplay::sltHandle3DAccelerationFeatureStateChange()
     /* Revalidate: */
     revalidate();
 }
+
+void UIMachineSettingsDisplay::sltHandleComputeGpuStatusChange()
+{
+    /* The compute-only GPU is a virtio-gpu too: */
+    updateVirtioGpuEditorsVisibility();
+
+    /* Revalidate: */
+    revalidate();
+}
 #endif /* VBOX_WITH_3D_ACCELERATION */
+
+void UIMachineSettingsDisplay::updateVirtioGpuEditorsVisibility()
+{
+    bool fVirtioGpu = m_pEditorGraphicsController->value() == KGraphicsControllerType_VirtioGpu;
+#ifdef VBOX_WITH_3D_ACCELERATION
+    if (!fVirtioGpu && m_pEditorDisplayScreenFeatures)
+        fVirtioGpu = m_pEditorDisplayScreenFeatures->isComputeGpu();
+#endif
+    m_pEditorHostVisibleSize->setVisible(fVirtioGpu);
+    m_pEditorGpuMemoryLimit->setVisible(fVirtioGpu);
+    updateMinimumLayoutHint();
+}
 
 void UIMachineSettingsDisplay::prepare()
 {
@@ -804,6 +837,14 @@ void UIMachineSettingsDisplay::prepareTabScreen()
             {
                 m_pTabScreen->addEditor(m_pEditorHostVisibleSize);
                 pLayoutScreen->addWidget(m_pEditorHostVisibleSize);
+            }
+
+            /* Prepare GPU memory limit editor: */
+            m_pEditorGpuMemoryLimit = new UIGpuMemoryLimitEditor(m_pTabScreen);
+            if (m_pEditorGpuMemoryLimit)
+            {
+                m_pTabScreen->addEditor(m_pEditorGpuMemoryLimit);
+                pLayoutScreen->addWidget(m_pEditorGpuMemoryLimit);
             }
 
             /* Prepare monitor count editor: */
@@ -926,6 +967,8 @@ void UIMachineSettingsDisplay::prepareConnections()
 #ifdef VBOX_WITH_3D_ACCELERATION
     connect(m_pEditorDisplayScreenFeatures, &UIDisplayScreenFeaturesEditor::sig3DAccelerationFeatureStatusChange,
             this, &UIMachineSettingsDisplay::sltHandle3DAccelerationFeatureStateChange);
+    connect(m_pEditorDisplayScreenFeatures, &UIDisplayScreenFeaturesEditor::sigComputeGpuStatusChange,
+            this, &UIMachineSettingsDisplay::sltHandleComputeGpuStatusChange);
 #endif
 
     /* Configure 'Remote Display' connections: */
@@ -1039,6 +1082,14 @@ bool UIMachineSettingsDisplay::saveScreenData()
                 && newDisplayData.m_iCurrentHostVisibleSize != oldDisplayData.m_iCurrentHostVisibleSize)
             {
                 comGraphics.SetHostVisibleSize(newDisplayData.m_iCurrentHostVisibleSize);
+                fSuccess = comGraphics.isOk();
+            }
+            /* Save the limit for the host GPU memory of the guest: */
+            if (   fSuccess
+                && isMachineOffline()
+                && newDisplayData.m_iGpuMemoryLimit != oldDisplayData.m_iGpuMemoryLimit)
+            {
+                comGraphics.SetGpuMemoryLimit(newDisplayData.m_iGpuMemoryLimit);
                 fSuccess = comGraphics.isOk();
             }
             /* Save guest screen count: */
@@ -1348,6 +1399,8 @@ void UIMachineSettingsDisplay::updateMinimumLayoutHint()
         iMinimumLayoutHint = qMax(iMinimumLayoutHint, m_pEditorVideoMemorySize->minimumLabelHorizontalHint());
     if (m_pEditorHostVisibleSize && !m_pEditorHostVisibleSize->isHidden())
         iMinimumLayoutHint = qMax(iMinimumLayoutHint, m_pEditorHostVisibleSize->minimumLabelHorizontalHint());
+    if (m_pEditorGpuMemoryLimit && !m_pEditorGpuMemoryLimit->isHidden())
+        iMinimumLayoutHint = qMax(iMinimumLayoutHint, m_pEditorGpuMemoryLimit->minimumLabelHorizontalHint());
     if (m_pEditorMonitorCount && !m_pEditorMonitorCount->isHidden())
         iMinimumLayoutHint = qMax(iMinimumLayoutHint, m_pEditorMonitorCount->minimumLabelHorizontalHint());
     if (m_pEditorScaleFactor && !m_pEditorScaleFactor->isHidden())
@@ -1362,6 +1415,8 @@ void UIMachineSettingsDisplay::updateMinimumLayoutHint()
         m_pEditorVideoMemorySize->setMinimumLayoutIndent(iMinimumLayoutHint);
     if (m_pEditorHostVisibleSize)
         m_pEditorHostVisibleSize->setMinimumLayoutIndent(iMinimumLayoutHint);
+    if (m_pEditorGpuMemoryLimit)
+        m_pEditorGpuMemoryLimit->setMinimumLayoutIndent(iMinimumLayoutHint);
     if (m_pEditorMonitorCount)
         m_pEditorMonitorCount->setMinimumLayoutIndent(iMinimumLayoutHint);
     if (m_pEditorScaleFactor)

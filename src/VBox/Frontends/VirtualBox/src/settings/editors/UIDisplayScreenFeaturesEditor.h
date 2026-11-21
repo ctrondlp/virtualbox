@@ -48,6 +48,8 @@ signals:
 
     /** Notifies listeners about 'enable 3D acceleration' feature status changed. */
     void sig3DAccelerationFeatureStatusChange();
+    /** Notifies listeners about the 'compute-only GPU' check-box having changed. */
+    void sigComputeGpuStatusChange();
 
 public:
 
