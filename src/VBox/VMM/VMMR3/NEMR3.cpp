@@ -101,6 +101,7 @@ VMMR3_INT_DECL(int) NEMR3InitConfig(PVM pVM)
                                   "|HyperVApic"
                                   "|AllowX2Apic"
                                   "|InjectIntViaHv"
+                                  "|MmioFastPath"
 #elif defined(RT_OS_DARWIN)
                                   "|VmxPleGap"
                                   "|VmxPleWindow"

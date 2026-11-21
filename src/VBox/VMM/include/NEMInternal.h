@@ -273,6 +273,8 @@ typedef struct NEM
     bool                        fDoIa32SpecCtrl : 1;
     /** WHvX64LocalApicEmulationModeXApic is used. */
     bool                        fLocalApicEmulation : 1;
+    /** Do plain MOV accesses to device memory without IEM (/NEM/MmioFastPath). */
+    bool                        fMmioFastPath : 1;
     /** Flag whether XSAVE/XRSTOR are supported. */
     bool                        fXsaveSupported: 1;
     /** Flag whether the compacting form of XSAVE is used. */
@@ -641,6 +643,8 @@ typedef struct NEMCPU
     STAMCOUNTER                 StatExitApicEoi;
     STAMCOUNTER                 StatApicMmioDirect;
     STAMCOUNTER                 StatApicMmioToIem;
+    STAMCOUNTER                 StatMmioMovDirect;
+    STAMCOUNTER                 StatMmioMovToIem;
     STAMCOUNTER                 StatExitApicSipiInitTrap;
     STAMCOUNTER                 StatExitCanceled;
 # endif

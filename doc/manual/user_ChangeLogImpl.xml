@@ -167,6 +167,13 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VMM: Plain guest reads and writes of device memory (MMIO) are
+          handled without the instruction emulator on Windows hosts using
+          Hyper-V as the virtualization engine, which makes them faster
+          (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>VMM: Guests that use the xAPIC run faster on virtual machines
           with several virtual CPUs on Windows hosts using Hyper-V as the
           virtualization engine, as accesses to the APIC registers from
