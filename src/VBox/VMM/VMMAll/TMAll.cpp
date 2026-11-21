@@ -487,22 +487,25 @@ DECLINLINE(bool) tmTimerTryWithLink(PTMTIMERQUEUECC pQueueCC, PTMTIMERQUEUE pQue
  * the Hyper-V synthetic timers) would then fire late.  So wake the timer EMT up,
  * or poke it out of the guest, and it works the time out again.
  *
- * A poke costs the timer EMT an exit, so only do it when the new timer is due
- * clearly before the deadline the timer EMT worked out (u64TimerEmtDeadline);
- * timers armed close to it, like guests re-arming short sleeps on every vCPU,
- * are run in time anyway.
+ * A poke costs the timer EMT an exit, so this is only done for timers created
+ * with TMTIMER_FLAGS_POKE_TIMER_EMT (poking for the APIC timers of a Linux guest,
+ * which re-arms short sleeps on every vCPU, cost it up to half its IPI rate
+ * without making its timers more punctual), and only when the new timer is due
+ * clearly before the deadline the timer EMT worked out (u64TimerEmtDeadline).
  *
  * @param   pVM             The cross context VM structure.
  * @param   pQueue          The queue whose head changed.
+ * @param   pTimer          The new head.
  * @param   u64Expire       The expiration time of the new head (queue clock).
  *
  * @remarks Ring-3 only; the other contexts leave it to the scheduling as before.
  */
-DECL_FORCE_INLINE(void) tmTimerQueueNotifyNewHead(PVMCC pVM, PTMTIMERQUEUE pQueue, uint64_t u64Expire)
+DECL_FORCE_INLINE(void) tmTimerQueueNotifyNewHead(PVMCC pVM, PTMTIMERQUEUE pQueue, PTMTIMER pTimer, uint64_t u64Expire)
 {
 #ifdef IN_RING3
     VMCPUID const idTimerCpu = pVM->tm.s.idTimerCpu;
-    if (   idTimerCpu < pVM->cCpus
+    if (   (pTimer->fFlags & TMTIMER_FLAGS_POKE_TIMER_EMT)
+        && idTimerCpu < pVM->cCpus
         && VMMGetCpuId(pVM) != idTimerCpu
         && u64Expire < UINT64_MAX / 2)
     {
@@ -518,7 +521,7 @@ DECL_FORCE_INLINE(void) tmTimerQueueNotifyNewHead(PVMCC pVM, PTMTIMERQUEUE pQueu
             VMR3NotifyCpuFFU(pVM->apCpusR3[idTimerCpu]->pUVCpu, VMNOTIFYFF_FLAGS_DONE_REM | VMNOTIFYFF_FLAGS_POKE);
     }
 #else
-    RT_NOREF(pVM, pQueue, u64Expire);
+    RT_NOREF(pVM, pQueue, pTimer, u64Expire);
 #endif
 }
 
@@ -560,7 +563,7 @@ DECL_FORCE_INLINE(void) tmTimerQueueLinkActive(PVMCC pVM, PTMTIMERQUEUECC pQueue
                     tmTimerQueueSetHead(pQueueCC, pQueue, pTimer);
                     ASMAtomicWriteU64(&pQueue->u64Expire, u64Expire);
                     DBGFTRACE_U64_TAG2(pVM, u64Expire, "tmTimerQueueLinkActive head", pTimer->szName);
-                    tmTimerQueueNotifyNewHead(pVM, pQueue, u64Expire);
+                    tmTimerQueueNotifyNewHead(pVM, pQueue, pTimer, u64Expire);
                 }
                 tmTimerSetPrev(pQueueCC, pCur, pTimer);
                 return;
@@ -579,7 +582,7 @@ DECL_FORCE_INLINE(void) tmTimerQueueLinkActive(PVMCC pVM, PTMTIMERQUEUECC pQueue
         tmTimerQueueSetHead(pQueueCC, pQueue, pTimer);
         ASMAtomicWriteU64(&pQueue->u64Expire, u64Expire);
         DBGFTRACE_U64_TAG2(pVM, u64Expire, "tmTimerQueueLinkActive empty", pTimer->szName);
-        tmTimerQueueNotifyNewHead(pVM, pQueue, u64Expire);
+        tmTimerQueueNotifyNewHead(pVM, pQueue, pTimer, u64Expire);
     }
 }
 
