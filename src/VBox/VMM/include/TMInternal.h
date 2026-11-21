@@ -472,6 +472,10 @@ typedef struct TM
     uint64_t                    offTSCPause;
     /** The TSC value when the last TSC was paused. */
     uint64_t                    u64LastPausedTSC;
+    /** When the timer EMT is going to run the timers next (TMCLOCK_VIRTUAL), as it
+     * worked out the last time it polled.  Another thread arming a timer well
+     * before this pokes the timer EMT (tmTimerQueueNotifyNewHead). */
+    uint64_t volatile           u64TimerEmtDeadline;
     /** CPU TSCs ticking indicator (one for each VCPU). */
     uint32_t volatile           cTSCsTicking;
 
