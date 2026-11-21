@@ -114,9 +114,16 @@ off-screen Vulkan, VMSVGA for the desktop.
 * 3D is off by default because it loads the renderer library into the VM process. If the library is missing, the device
   stays 2D and says why in the release log.
 * **Halt poll hint:** a new device helper (`PDMDevHlpVMHaltPollHint`) lets a device tell the VM that work it started will
-  finish soon; the halt code then polls short sleeps instead of blocking (see Results).
+  finish soon; the halt code then polls short sleeps instead of blocking (see Results). It is in both halt methods: the
+  one the development build uses without the kernel driver (measured above) and the one official builds use with it (not
+  measured yet). `/PROF/CPU*/VM/Halt/PollHinted` in the VM statistics counts the halts it turned into polling, about 29 per
+  generated token in the 3B test. `/VMM/HaltPollHintMax` sets how short a sleep has to be (default 1 ms); on hosts with
+  fewer than two CPUs per virtual CPU hints are ignored.
 * **Saved state:** the 2D state (resources with their guest memory, the scanout, the queues) is saved. The Vulkan state lives
-  in the host graphics driver and cannot be saved, so saving is refused, with the reason, while a guest program uses it.
+  in the host graphics driver and cannot be saved, so saving is refused while a guest program uses it, and VBoxManage and
+  the GUI say why ("virtio-gpu cannot save the VM state while the guest uses the host GPU (1 contexts, 4 buffers): close
+  the programs that use Vulkan in the guest first"). Before, a device refusing to save only gave "Failed to save machine
+  state" without a reason; that fix in Main applies to every device.
 
 ## Bugs found while building it
 

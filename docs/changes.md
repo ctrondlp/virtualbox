@@ -56,7 +56,7 @@ in this fork.
 
 | Branch | What it does | Status |
 |---|---|---|
-| `virtio-gpu-device` | A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page) | local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html)) |
+| `virtio-gpu-device` | A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support; a compute-only second GPU next to VMSVGA, a limit for the host GPU memory a guest can take, saved states while no Vulkan program runs, and a halt poll hint that makes LLM token generation 60-80% faster (see the virtio-gpu page) | local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html)) |
 | `vmsvga-dx11-gpu-select` | Devices/Graphics/VMSVGA: Create the DX11 device on the high performance GPU, selectable with VMSVGA3dAdapter | Planned for upstream |
 | `devvga-wide-scanline` | DevVGA: Check all pages of a scanline for changes in wide display modes | Planned for upstream |
 

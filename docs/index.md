@@ -58,12 +58,19 @@ A new graphics controller, **VirtioGpu**, with a 2D display and, when you tick *
 graphics card for Linux guests (through Mesa's Venus driver). The [virtio-gpu page](virtio-gpu.html) has the design, the
 results and the limits. The ones that matter most:
 
-| Measured on an RTX 5070 host, 4 virtual CPUs in the guest | Guest CPU | Host GPU through virtio-gpu |
-|---|---|---|
-| Qwen2.5 3B, prompt processing | 97 tokens/s | about **4,200–7,100** tokens/s (40–70× faster) |
-| Qwen2.5 3B, generation | 23.5 tokens/s | **67–81** tokens/s (about 3× faster) |
-| Qwen2.5 7B, prompt / generation | not measured | **3,696 / 60** tokens/s |
-| Loading a 2 GB model | | **7 seconds** (it was 2 minutes 47 seconds before a cache-mapping fix) |
+| Measured on an RTX 5070 host, 4 virtual CPUs in the guest | Guest CPU | Host GPU through virtio-gpu | Share of running it on the host |
+|---|---|---|---|
+| Qwen2.5 3B, prompt processing | 97 tokens/s | **6,683** tokens/s (about 70× faster) | 65 % |
+| Qwen2.5 3B, generation | 23.5 tokens/s | **105** tokens/s (about 4.5× faster) | 44 % |
+| Qwen2.5 7B, prompt / generation | not measured | **3,808 / 71** tokens/s | 86 % / 57 % |
+| Qwen2.5 14B (8.4 GiB), prompt / generation | not measured | **1,797 / 46** tokens/s | 99 % / 71 % |
+| Loading a 2 GB model | | **7 seconds** (it was 2 minutes 47 seconds before a cache-mapping fix) | |
+
+Generation got 60–80 % faster with a *halt poll hint*: after each Vulkan command the device tells the VM that the guest
+will wait for the GPU shortly, so a halted virtual CPU polls through the guest's short sleeps instead of being woken late
+by the host timer. Any VM can get the Vulkan GPU as a second, compute-only device next to VMSVGA
+(`VBoxManage modifyvm --compute-gpu on`), the host GPU memory a guest can take can be limited (`--gpu-memory-limit`), and
+the VM state can be saved while no Vulkan program runs in the guest.
 
 For ordinary desktop graphics VMSVGA is still better, and the page says so with numbers.
 

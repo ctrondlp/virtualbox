@@ -36,7 +36,7 @@ Correctness fixes|virtio-core-restore-queue-select|Planned for upstream
 Storage and boot|bios-nvme-boot|Planned for upstream ([storage page](storage.html#1-booting-from-nvme-with-the-bios-firmware))
 Storage and boot|nvme-windows-no-cmb|Planned for upstream ([storage page](storage.html#4-windows-guests-on-an-nvme-controller))
 Networking|nat-throughput|local: it changes the bundled libslirp, so it would go to libslirp first ([speed page](speed.html#7-nat-faster-uploads-from-the-guest))||Guest to host TCP over NAT is faster: libslirp writes the data of a burst of guest packets to the host connection in one call instead of one call per packet (on by default, DeferHostWrites=0 turns it off)
-Graphics|virtio-gpu-device|local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html))|fa9e0292a23|A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support (see the virtio-gpu page)
+Graphics|virtio-gpu-device|local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html))|fa9e0292a23|A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support; a compute-only second GPU next to VMSVGA, a limit for the host GPU memory a guest can take, saved states while no Vulkan program runs, and a halt poll hint that makes LLM token generation 60-80% faster (see the virtio-gpu page)
 Graphics|vmsvga-dx11-gpu-select|Planned for upstream
 Graphics|devvga-wide-scanline|Planned for upstream
 Guest CPU model|cpum-isa-exts|Planned for upstream
