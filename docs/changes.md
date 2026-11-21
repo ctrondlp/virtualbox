@@ -26,6 +26,9 @@ in this fork.
 | `em-apic-mmio-fastpath` | VMM/NEM/win: Do simple xAPIC page accesses without IEM and the page manager | Planned for upstream |
 | `nem-win-skip-pending-event` | VMM/NEM/win: Read the pending ExtInt event register only with the Hyper-V APIC | Planned for upstream ([speed page](speed.html#10-device-register-accesses-mmio-cost-half-as-much)) |
 | `nem-win-mmio-fastpath` | VMM/NEM/win: Do plain MOV accesses to device memory without IEM | local for now: a small gain (about 6 %) for a lot of decoding code, may be offered later ([speed page](speed.html#10-device-register-accesses-mmio-cost-half-as-much)) |
+| `pdm-critsect-r3-spin` | VMM/PDM: Spin as long in ring-3 critical sections as in ring-0 | Planned for upstream ([speed page](speed.html#11-disk-and-device-io-with-several-virtual-cpus-no-more-lock-convoy)) |
+| `tm-poke-timer-emt` | VMM/TM: Tell the timer EMT when another thread arms an earlier timer | Planned for upstream, together with the synthetic timers ([speed page](speed.html#12-windows-guests-hyper-v-synthetic-timers-on-multi-cpu-vms)) |
+| `gim-hv-stimer-smp` | VMM/GIM/HyperV: Synthetic timers for SMP VMs, saved state and fixes | Planned for upstream, after asking the author of the original synthetic timer work ([speed page](speed.html#12-windows-guests-hyper-v-synthetic-timers-on-multi-cpu-vms)) |
 | `iprt-win-ecoqos-optout` | IPRT/win: Opt VM processes out of power throttling (EcoQoS) | Planned for upstream |
 | `iprt-win-highres-waits` | IPRT/win: High resolution timed waits for semaphores in VM processes | local: the gain was measured only without the kernel driver, so there is no case for official builds ([why](speed.html#6-high-resolution-waits)) |
 

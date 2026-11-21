@@ -211,13 +211,63 @@ Windows 10 on trunk with the first change: thread ping-pong, barrier crossings a
 (timers 5.3–5.9k → 6.06k per second). The Linux CPU checks pass unchanged.
 
 *Open:* on the integration branch, but not on trunk, Windows 10's timer test (0.5 ms periodic timers on 8 threads) gets
-fewer wakeups with these changes: 6.7k → 5.3–5.5k per second, because Windows' 2048 Hz RTC clock interrupt fires less
-often (about 2030 → 1720–1810 per second). Thread ping-pong and barrier crossings do not change, Windows boots and shuts
-down normally, and Linux timers do not change. It comes from an interaction with another change on the integration branch
-(not halt polling: the gap stays with polling off) and is being looked at. The time is lost while the first virtual CPU
-sleeps between RTC ticks: letting it spin through the 488 µs period instead brings back the full tick rate (2,013–2,026
-per second) but costs about 2.5 host cores, so that is not the fix, and a better estimate of how much the sleeps
-overshoot did not change it either.
+fewer wakeups with these changes when Windows uses the RTC as its clock: 6.7k → 5.3–5.5k per second, because the 2048 Hz
+RTC interrupt fires less often (about 2030 → 1720–1810 per second). Thread ping-pong and barrier crossings do not change.
+The time is lost while the first virtual CPU sleeps between RTC ticks (spinning through the 488 µs period instead brings
+the full tick rate back, but costs about 2.5 host cores, and a better estimate of how much the sleeps overshoot did not
+help). With the Hyper-V synthetic timers of item 12, Windows no longer uses the RTC at all and its timers are better than
+ever, so that is the way around it.
+
+## 11. Disk and device I/O with several virtual CPUs: no more lock convoy
+
+*Branch:* `pdm-critsect-r3-spin`
+
+Random reads from a virtio-scsi disk got *slower* with more virtual CPUs: at a queue depth of 32, 31–33k I/O operations per
+second with 2 CPUs, but 19k with 4 and 17k with 8. Sampling the threads of the VM process showed why: the virtual CPUs, the
+four request queue workers of the disk controller and the asynchronous I/O thread were all waiting for the same lock, the
+page manager's (PGM) lock. The workers take it for every read of guest memory (each virtio descriptor separately), the
+virtual CPUs for every device register access. A thread that finds a VirtualBox critical section busy spun only 20
+times before going to sleep, so with many short holds every hand-over cost a thread wake-up and the threads formed a convoy.
+Spinning 256 times, the same as VirtualBox already does in ring-0, removes it:
+
+| Linux guest, random 4 KiB reads from a virtio-scsi disk | Before | After |
+|---|---|---|
+| Queue depth 32, 4 CPUs (2 runs) | 18.8k, 19.7k per second | **99.4k, 96.8k** (5×) |
+| Queue depth 32, 8 CPUs | 16.5k, 16.8k | **85.2k, 89.0k** (5×) |
+| Queue depth 8, 4 and 8 CPUs | 36–40k | 43–45k |
+| Queue depth 1 | 7.3–7.8k | 7.2–8.0k (not changed) |
+| Linux timers, 8 CPUs (50 µs sleeps on every CPU) | 60–62k per second, **80–83 µs late** | **110–114k, 20–23 µs late** |
+
+Linux with 4 CPUs (timers, ping-pong), device register exits and Windows 10 (ping-pong, barrier, timers) are unchanged; the
+CPU checks pass. Spinning 1024 times was no better than 256. Other devices that use guest memory from their own threads
+(NVMe, AHCI, network cards) take the same lock and probably gain too, but were not measured.
+
+## 12. Windows guests: Hyper-V synthetic timers on multi-CPU VMs
+
+*Branches:* `gim-hv-stimer-smp` and `tm-poke-timer-emt`
+
+Without the Hyper-V synthetic timers Windows uses the RTC as its clock: about 33,000 port I/O exits per second on the first
+virtual CPU in a timer heavy test. VirtualBox had the synthetic timers compiled out, because their messages could only be
+delivered on single CPU VMs: all timer callbacks run on one virtual CPU, while a timer's message page and configuration
+belong to the CPU that owns the timer. Now an expiry on another CPU is handed to the owning CPU (as KVM does it), which
+delivers the message there. Also new: the timers are saved with the VM state (older saved states load as before), a reset
+stops them, and a handful of smaller fixes. A second change lets these timers wake or poke the CPU that runs the timers
+when another CPU re-arms one, otherwise it would only notice at its next exit (without it the timers ran 5.8 ms late).
+That poke is only for timers that ask for it; poking for every timer cost Linux guests up to half their IPI rate.
+
+It is off by default: `VBoxManage setextradata <vm> VBoxInternal/GIM/HyperV/SyntheticTimers 1` turns it on for a Windows VM.
+
+| Windows 10, 8 CPUs (2 runs each) | RTC clock (before) | Synthetic timers |
+|---|---|---|
+| Timer test, wakeups per second | 5.9k, 5.7k | **8.2k, 8.1k** |
+| Timer test, how late | 845, 895 µs | **474, 491 µs** |
+| Host CPU while the guest is idle | 0.29, 0.25 cores | **0.21, 0.12 cores** |
+| Port I/O exits per second, first CPU | 33,549, 32,668 | **4, 7** |
+| Thread ping-pong, barrier crossings | 137–138k, 14.4–14.8k | 134–141k, 13.5–14.7k (unchanged) |
+
+Checked with the timers on: save and restore after logon and while the benchmark runs, a reset during boot, a saved
+state of the previous build (it keeps its RTC clock), and 1 and 2 virtual CPUs; all ran their benchmark and shut down
+normally. Not tested: Windows 11, the build with the kernel driver, and a debug build.
 
 ## Measured guidance (no code change)
 
@@ -246,6 +296,12 @@ Listed because "measured, no gain" is a result too.
   and timer lateness 63 against 22 µs (two runs each). The Hyper-V APIC offers no x2APIC, and it bypasses halt polling and
   the paravirtual EOI. So finishing it is not worth it.
 * **Re-probing hot exits.** Merged, then reverted: no benefit.
+* **Exit-free doorbells for virtio devices.** Hyper-V can signal an event for a guest write to a doorbell address instead of
+  stopping the virtual CPU. Measured first: a virtio-scsi read costs about 1.6 device register exits, about 9 µs of virtual
+  CPU time, against 126 µs per read at a queue depth of 1, so at most about 7 %; at higher depths the limit was the lock
+  convoy of item 11, and after that fix the disk's request workers mostly wait for work. Not worth the size and the
+  security exposure of the change for now. (NVMe would also need the shadow doorbell buffer first, as a doorbell write
+  carries the new queue position, which the event loses.)
 * **Moving VMSVGA's command buffer copy off the virtual CPU.** Measured first, so not done: in glmark2's terrain test a
   command buffer submit took about 20 µs, of which the device's own work was 1.5 µs; the rest is the four port exits
   (index and data register, twice) that the guest driver uses for each submit, at about 4.75 µs each.

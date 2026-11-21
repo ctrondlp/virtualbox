@@ -49,6 +49,8 @@ cost of interrupts and halts. The details, the caveats and the things that did *
 | xAPIC accesses without the PGM lock | macOS Tahoe, 8 CPUs, xAPIC | login screen **never in 190 s → 60–70 s**, lock contentions **42M → 0.15M** |
 | The same | Linux, 8 CPUs, xAPIC | ping-pong **3–5k → 84–140k per second** (noisy baseline), TLB-shootdown storm +15% |
 | Don't read an unused Hyper-V register on every register fetch; plain MMIO `mov` without the emulator | any | a device register access (MMIO exit) **10.4 → 5.6 µs**; the first part alone on trunk 15 → 10.7 µs |
+| No lock convoy: spin as long in ring-3 critical sections as in ring-0 | Linux, virtio-scsi disk | random reads at queue depth 32 **19k → 97k per second (5×)** with 4 CPUs; 8-CPU timers **80 → 21 µs late** |
+| Hyper-V synthetic timers on multi-CPU VMs (opt-in) | Windows 10 | timers **5.8k → 8.1k per second**, **870 → 480 µs late**, idle host CPU **0.27 → 0.17 cores** |
 
 A real check: the long-running Fedora 45 VM (15 virtual CPUs) felt "so much faster" in daily use after these changes.
 That is anecdotal, the numbers above are the measured part.
