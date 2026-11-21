@@ -5234,8 +5234,9 @@ typedef struct PDMDEVHLPR3
      * host does within about a millisecond (a GPU command, say): blocking an
      * EMT costs a timer wake-up that is late by a few hundred microseconds on
      * some hosts, which then adds up.  Polling costs host CPU, so the hint runs
-     * out by itself and is never needed for correctness.  It is ignored when
-     * halt polling is disabled.
+     * out by itself and is never needed for correctness.  It is ignored on
+     * hosts with fewer than two CPUs per virtual CPU and when halt polling is
+     * disabled (halt method 1).
      *
      * @param   pDevIns         The device instance.
      * @param   cNsValid        How long from now the hint holds, in nanoseconds.
