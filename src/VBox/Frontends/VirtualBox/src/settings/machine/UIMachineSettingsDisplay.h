@@ -47,6 +47,7 @@ class UIMonitorCountEditor;
 class UIRecordingSettingsEditor;
 class UIScaleFactorEditor;
 class UIHostVisibleSizeEditor;
+class UIGpuMemoryLimitEditor;
 class UIVideoMemoryEditor;
 class UIVRDESettingsEditor;
 struct UIDataSettingsMachineDisplay;
@@ -115,6 +116,8 @@ private slots:
 #ifdef VBOX_WITH_3D_ACCELERATION
     /** Handles 3D Acceleration feature state change. */
     void sltHandle3DAccelerationFeatureStateChange();
+    /** Handles compute-only GPU check-box change. */
+    void sltHandleComputeGpuStatusChange();
 #endif
     /** Handles translation event. */
     virtual void sltRetranslateUI() RT_OVERRIDE RT_FINAL;
@@ -154,6 +157,9 @@ private:
 
     /** Updates minimum layout hint. */
     void updateMinimumLayoutHint();
+    /** Shows the virtio-gpu editors (host visible size, GPU memory limit) when a virtio-gpu is used:
+      * the VirtioGpu graphics controller or the compute-only GPU next to another controller. */
+    void updateVirtioGpuEditorsVisibility();
 
     /** Holds the guest OS type. */
     QString                  m_strGuestOSTypeId;
@@ -178,6 +184,8 @@ private:
         UIVideoMemoryEditor           *m_pEditorVideoMemorySize;
         /** Holds the host visible memory size editor instance. */
         UIHostVisibleSizeEditor       *m_pEditorHostVisibleSize;
+        /** Holds the GPU memory limit editor instance. */
+        UIGpuMemoryLimitEditor        *m_pEditorGpuMemoryLimit;
         /** Holds the monitor count spinbox instance. */
         UIMonitorCountEditor          *m_pEditorMonitorCount;
         /** Holds the scale factor editor instance. */
