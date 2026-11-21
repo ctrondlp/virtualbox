@@ -42,6 +42,7 @@
 #include <VBox/vmm/pdmdev.h> /* (for TMTIMER_GET_CRITSECT implementation) */
 #include "TMInternal.h"
 #include <VBox/vmm/vmcc.h>
+#include <VBox/vmm/vmm.h>
 
 #include <VBox/param.h>
 #include <VBox/err.h>
@@ -473,6 +474,33 @@ DECLINLINE(bool) tmTimerTryWithLink(PTMTIMERQUEUECC pQueueCC, PTMTIMERQUEUE pQue
 
 
 /**
+ * Tells the timer EMT that a timer queue got an earlier head.
+ *
+ * The timer EMT works out when it has to run the timers next before it blocks
+ * or runs guest code, so a timer that another thread arms ahead of that is only
+ * noticed at the timer EMT's next wake-up or exit, which can be milliseconds
+ * later.  Per-vCPU timers that the other vCPUs keep re-arming (the APIC timers,
+ * the Hyper-V synthetic timers) would then fire late.  So wake the timer EMT up,
+ * or poke it out of the guest, and it works the time out again.
+ *
+ * @param   pVM             The cross context VM structure.
+ *
+ * @remarks Ring-3 only; the other contexts leave it to the scheduling as before.
+ */
+DECL_FORCE_INLINE(void) tmTimerQueueNotifyNewHead(PVMCC pVM)
+{
+#ifdef IN_RING3
+    VMCPUID const idTimerCpu = pVM->tm.s.idTimerCpu;
+    if (   idTimerCpu < pVM->cCpus
+        && VMMGetCpuId(pVM) != idTimerCpu)
+        VMR3NotifyCpuFFU(pVM->apCpusR3[idTimerCpu]->pUVCpu, VMNOTIFYFF_FLAGS_DONE_REM | VMNOTIFYFF_FLAGS_POKE);
+#else
+    RT_NOREF(pVM);
+#endif
+}
+
+
+/**
  * Links a timer into the active list of a timer queue.
  *
  * @param   pVM             The cross context VM structure.
@@ -509,6 +537,7 @@ DECL_FORCE_INLINE(void) tmTimerQueueLinkActive(PVMCC pVM, PTMTIMERQUEUECC pQueue
                     tmTimerQueueSetHead(pQueueCC, pQueue, pTimer);
                     ASMAtomicWriteU64(&pQueue->u64Expire, u64Expire);
                     DBGFTRACE_U64_TAG2(pVM, u64Expire, "tmTimerQueueLinkActive head", pTimer->szName);
+                    tmTimerQueueNotifyNewHead(pVM);
                 }
                 tmTimerSetPrev(pQueueCC, pCur, pTimer);
                 return;
@@ -527,6 +556,7 @@ DECL_FORCE_INLINE(void) tmTimerQueueLinkActive(PVMCC pVM, PTMTIMERQUEUECC pQueue
         tmTimerQueueSetHead(pQueueCC, pQueue, pTimer);
         ASMAtomicWriteU64(&pQueue->u64Expire, u64Expire);
         DBGFTRACE_U64_TAG2(pVM, u64Expire, "tmTimerQueueLinkActive empty", pTimer->szName);
+        tmTimerQueueNotifyNewHead(pVM);
     }
 }
 
