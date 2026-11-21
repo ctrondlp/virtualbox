@@ -214,7 +214,10 @@ Windows 10 on trunk with the first change: thread ping-pong, barrier crossings a
 fewer wakeups with these changes: 6.7k → 5.3–5.5k per second, because Windows' 2048 Hz RTC clock interrupt fires less
 often (about 2030 → 1720–1810 per second). Thread ping-pong and barrier crossings do not change, Windows boots and shuts
 down normally, and Linux timers do not change. It comes from an interaction with another change on the integration branch
-(not halt polling: the gap stays with polling off) and is being looked at.
+(not halt polling: the gap stays with polling off) and is being looked at. The time is lost while the first virtual CPU
+sleeps between RTC ticks: letting it spin through the 488 µs period instead brings back the full tick rate (2,013–2,026
+per second) but costs about 2.5 host cores, so that is not the fix, and a better estimate of how much the sleeps
+overshoot did not change it either.
 
 ## Measured guidance (no code change)
 
