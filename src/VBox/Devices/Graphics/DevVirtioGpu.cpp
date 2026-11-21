@@ -627,6 +627,9 @@ typedef struct VIRTIOGPUR3
     /** How long a Venus submit hints that the guest will wait for the host GPU,
      * in nanoseconds, 0 for no hint (set at construction, read only afterwards). */
     uint64_t                cNsHaltPollHint;
+    /** The limit for the host GPU memory the guest can allocate in force, 0 if
+     * none (set at construction, read only afterwards). */
+    uint64_t                cbMaxHostMemory;
     /** @} */
 
     /** @name Venus: owned by the control worker, see the NOTES.
@@ -3549,7 +3552,8 @@ static DECLCALLBACK(int) vgpuR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uin
     AssertRCReturn(rc, rc);
     if (uMarker != VIRTIOGPU_SAVED_STATE_MARKER)
         return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, RT_SRC_POS,
-                                        N_("virtio-gpu: Expected marker %#RX32, found %#RX32"), VIRTIOGPU_SAVED_STATE_MARKER, uMarker);
+                                        N_("virtio-gpu: Expected marker %#RX32, found %#RX32"),
+                                        VIRTIOGPU_SAVED_STATE_MARKER, uMarker);
 
     uint32_t cResources = 0;
     rc = pHlp->pfnSSMGetU32(pSSM, &cResources);
@@ -3578,7 +3582,8 @@ static DECLCALLBACK(int) vgpuR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uin
             || cEntries > VIRTIOGPU_MAX_BACKING_ENTRIES
             || cEntries > VIRTIOGPU_MAX_TOTAL_BACKING_ENTRIES - pThisCC->cTotalBackingEntries)
             return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
-                                            N_("virtio-gpu: Invalid resource %RU32 (%RU32x%RU32, format %RU32, %RU32 entries) in the saved state"),
+                                            N_("virtio-gpu: Invalid resource %RU32 (%RU32x%RU32, format %RU32, "
+                                               "%RU32 entries) in the saved state"),
                                             idResource, cx, cy, uFormat, cEntries);
         if (!cEntries)
             continue;
@@ -3598,7 +3603,8 @@ static DECLCALLBACK(int) vgpuR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uin
                 RTMemFree(paEntries);
                 return RT_FAILURE(rc) ? rc
                      : pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
-                                                N_("virtio-gpu: Invalid backing entry %RU32 of resource %RU32 in the saved state"),
+                                                N_("virtio-gpu: Invalid backing entry %RU32 of resource %RU32 "
+                                                   "in the saved state"),
                                                 i, idResource);
             }
             cbBacking += paEntries[i].cb;
@@ -3664,7 +3670,8 @@ static DECLCALLBACK(int) vgpuR3LoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
         Transfer.r.cy       = pRes->cy;
         uint32_t const uResp = vgpuR3CmdTransferToHost2d(pDevIns, pThis, pThisCC, &Transfer);
         if (uResp != VIRTIOGPU_RESP_OK_NODATA)
-            LogRel(("%s: Refilling resource %RU32 after loading the saved state failed (%#RX32), it stays black until the guest updates it\n",
+            LogRel(("%s: Refilling resource %RU32 after loading the saved state failed (%#RX32), "
+                    "it stays black until the guest updates it\n",
                     pThis->szInstance, pRes->idResource, uResp));
     }
     vgpuR3DirtyAll(pThisCC);
@@ -3732,6 +3739,14 @@ static DECLCALLBACK(void) vgpuR3Info(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, con
         pHlp->pfnPrintf(pHlp, "Host visible window: BAR%u, %#RX64 bytes, %RU32 blob(s) mapped using %#RX64 bytes%s\n",
                         VIRTIOGPU_HOST_VISIBLE_BAR, pThis->cbHostVisible, pThisCC->cMappedBlobs, pThisCC->cbMapped,
                         pThisCC->fWindowLeaked ? ", some mappings leaked" : "");
+        uint64_t const cbHostMemoryUsed = vgpuR3RendererGetMemoryUsed(pThisCC->pRenderer);
+        if (cbHostMemoryUsed == UINT64_MAX)
+            pHlp->pfnPrintf(pHlp, "Host GPU memory allocated by the guest: unknown (the renderer library cannot tell)\n");
+        else if (pThisCC->cbMaxHostMemory)
+            pHlp->pfnPrintf(pHlp, "Host GPU memory allocated by the guest: %RU64 MB of %RU64 MB allowed\n",
+                            cbHostMemoryUsed / _1M, pThisCC->cbMaxHostMemory / _1M);
+        else
+            pHlp->pfnPrintf(pHlp, "Host GPU memory allocated by the guest: %RU64 MB, no limit\n", cbHostMemoryUsed / _1M);
         for (uint32_t i = 0; i < VIRTIOGPU_MAX_CONTEXTS; i++)
             if (pThisCC->paContexts[i].idCtx)
                 pHlp->pfnPrintf(pHlp, "  context %RU32: '%s', context_init %#RX32\n", pThisCC->paContexts[i].idCtx,
@@ -4147,7 +4162,10 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
                 {
                     int rcLimit = vgpuR3RendererSetMemoryLimit(pThisCC->pRenderer, cbMaxHostMemory);
                     if (RT_SUCCESS(rcLimit))
+                    {
+                        pThisCC->cbMaxHostMemory = cbMaxHostMemory;
                         LogRel(("%s: Guest GPU memory limited to %RU64 MB\n", pThis->szInstance, cbMaxHostMemory / _1M));
+                    }
                     else
                         LogRel(("%s: \"MaxHostMemory\" is set but renderer '%s' cannot limit memory (%Rrc), no limit\n",
                                 pThis->szInstance, szPath, rcLimit));

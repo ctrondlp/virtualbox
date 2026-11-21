@@ -927,13 +927,13 @@ DECLHIDDEN(int) vgpuR3RendererSetMemoryLimit(PVGPURENDERER pRenderer, uint64_t c
 /**
  * Gets the host memory the Venus contexts have allocated that counts against the limit.
  *
- * @returns Bytes, 0 if the library cannot tell.
+ * @returns Bytes, UINT64_MAX if the library cannot tell.
  * @param   pRenderer   The renderer instance.
  */
 DECLHIDDEN(uint64_t) vgpuR3RendererGetMemoryUsed(PVGPURENDERER pRenderer)
 {
-    AssertPtrReturn(pRenderer, 0);
-    return pRenderer->Fns.pfnGetVkMemoryUsed ? pRenderer->Fns.pfnGetVkMemoryUsed() : 0;
+    AssertPtrReturn(pRenderer, UINT64_MAX);
+    return pRenderer->Fns.pfnGetVkMemoryUsed ? pRenderer->Fns.pfnGetVkMemoryUsed() : UINT64_MAX;
 }
 
 
