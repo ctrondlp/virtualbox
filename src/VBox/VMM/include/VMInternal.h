@@ -288,6 +288,16 @@ typedef struct VMINTUSERPERVM
     VMHALTMETHOD                    enmHaltMethod;
     /** The index into g_aHaltMethods of the current halt method. */
     uint32_t volatile               iHaltMethod;
+    /** Halt poll hint: how far away the next timer of a halting EMT may be for
+     * it to poll (spin) until that timer while a device hint is active, in
+     * nanoseconds, 0 to ignore hints.  Used by halt methods 1 and global 1, set
+     * once at construction.  See VMR3HaltPollHint. */
+    uint32_t                        cNsHaltPollHintMaxCfg;
+    /** Alignment padding. */
+    uint32_t                        u32HaltPadding;
+    /** Halt poll hint: when the last device hint runs out (RTTimeNanoTS time),
+     * 0 if none.  See VMR3HaltPollHint. */
+    uint64_t volatile               nsHaltPollHintUntil;
     /** @} */
 
     /** @todo Do NOT add new members here or reuse the current, we need to store the config for
@@ -350,6 +360,7 @@ typedef struct VMINTUSERPERVM
 # ifdef VBOX_WITH_STATISTICS
 AssertCompileMemberAlignment(VMINTUSERPERVM, StatReqAllocNew, 8);
 # endif
+AssertCompileMemberAlignment(VMINTUSERPERVM, nsHaltPollHintUntil, 8);
 
 /** Pointer to the VM internal data kept in the UVM. */
 typedef VMINTUSERPERVM *PVMINTUSERPERVM;
@@ -477,6 +488,9 @@ typedef struct VMINTUSERPERVMCPU
     STAMCOUNTER                     StatHaltPollHits;
     /** Halt polls that timed out (the EMT blocked afterwards). */
     STAMCOUNTER                     StatHaltPollMisses;
+    /** Halts a device hint (VMR3HaltPollHint) made poll until the next timer
+     * instead of blocking. */
+    STAMCOUNTER                     StatHaltPollHinted;
     /** @} */
 } VMINTUSERPERVMCPU;
 AssertCompileMemberAlignment(VMINTUSERPERVMCPU, u64HaltsStartTS, 8);

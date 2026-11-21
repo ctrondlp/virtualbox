@@ -834,6 +834,8 @@ static int vmR3InitRing3(PVM pVM, PUVM pUVM)
         AssertRC(rc);
         rc = STAMR3RegisterF(pVM, &pUVM->aCpus[idCpu].vm.s.StatHaltPollMisses,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES,  "Halt polls that timed out.",         "/PROF/CPU%d/VM/Halt/PollMisses", idCpu);
         AssertRC(rc);
+        rc = STAMR3RegisterF(pVM, &pUVM->aCpus[idCpu].vm.s.StatHaltPollHinted,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES,  "Halts a device hint made poll until the next timer.", "/PROF/CPU%d/VM/Halt/PollHinted", idCpu);
+        AssertRC(rc);
     }
 
     STAM_REG(pVM, &pUVM->vm.s.StatReqAllocNew,   STAMTYPE_COUNTER,     "/VM/Req/AllocNew",       STAMUNIT_OCCURENCES,        "Number of VMR3ReqAlloc returning a new packet.");

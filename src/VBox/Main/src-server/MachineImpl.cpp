@@ -13128,6 +13128,9 @@ void SessionMachine::i_saveStateHandler(SaveStateTask &task)
         }
         else
         {
+            // Keep the session's error info (why the VM could not save) for the progress object below.
+            ErrorInfoKeeper eik;
+
             // On failure, set the state to the state we had at the beginning.
             i_setMachineState(task.m_machineStateBackup);
             i_updateMachineStateOnClient();

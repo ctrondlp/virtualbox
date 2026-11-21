@@ -48,6 +48,8 @@ signals:
 
     /** Notifies listeners about 'enable 3D acceleration' feature status changed. */
     void sig3DAccelerationFeatureStatusChange();
+    /** Notifies listeners about the 'compute-only GPU' check-box having changed. */
+    void sigComputeGpuStatusChange();
 
 public:
 
@@ -60,6 +62,13 @@ public:
     void setVirtioGpuMode(bool fOn);
     /** Returns 'enable 3D acceleration' feature value. */
     bool isEnabled3DAcceleration() const;
+
+    /** Defines whether the VM gets the compute-only GPU in @a fOn. */
+    void setComputeGpu(bool fOn);
+    /** Returns whether the VM gets the compute-only GPU. */
+    bool isComputeGpu() const;
+    /** Defines whether the check-box for the compute-only GPU is shown: it is not for the virtio-gpu controller. */
+    void setComputeGpuVisible(bool fOn);
 
     /** Returns minimum layout hint. */
     int minimumLabelHorizontalHint() const;
@@ -82,6 +91,8 @@ private:
         bool  m_fEnable3DAcceleration;
         /** Holds whether the graphics controller is the virtio-gpu. */
         bool  m_fVirtioGpuMode;
+        /** Holds the 'compute-only GPU' value. */
+        bool  m_fComputeGpu;
     /** @} */
 
     /** @name Widgets
@@ -92,6 +103,8 @@ private:
         QLabel      *m_pLabel;
         /** Holds the 'enable 3D acceleration' check-box instance. */
         QCheckBox   *m_pCheckBoxEnable3DAcceleration;
+        /** Holds the 'compute-only GPU' check-box instance. */
+        QCheckBox   *m_pCheckBoxComputeGpu;
     /** @} */
 };
 

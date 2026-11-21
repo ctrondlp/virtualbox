@@ -2412,7 +2412,7 @@ typedef const PDMRTCHLP *PCPDMRTCHLP;
 /** @} */
 
 /** Current PDMDEVHLPR3 version number. */
-#define PDM_DEVHLPR3_VERSION                PDM_VERSION_MAKE_PP(0xffe7, 71, 1)
+#define PDM_DEVHLPR3_VERSION                PDM_VERSION_MAKE_PP(0xffe7, 72, 1)
 
 /**
  * PDM Device API.
@@ -5224,6 +5224,26 @@ typedef struct PDMDEVHLPR3
      * @param   enmPatch        An individual ID identifying the patching.
      */
     DECLR3CALLBACKMEMBER(void, pfnGCMTriggerPatch,(PPDMDEVINS pDevIns, GCMGSTPATCHID enmPatch));
+
+    /**
+     * Tells the VM that the device expects the work it was just given to complete
+     * soon, so a halted virtual CPU should poll for the completion for longer
+     * than it normally would before it blocks.
+     *
+     * This is for devices whose guest waits in short sleeps for something the
+     * host does within about a millisecond (a GPU command, say): blocking an
+     * EMT costs a timer wake-up that is late by a few hundred microseconds on
+     * some hosts, which then adds up.  Polling costs host CPU, so the hint runs
+     * out by itself and is never needed for correctness.  It is ignored on
+     * hosts with fewer than two CPUs per virtual CPU and when halt polling is
+     * disabled (halt method 1).
+     *
+     * @param   pDevIns         The device instance.
+     * @param   cNsValid        How long from now the hint holds, in nanoseconds.
+     *                          Each call replaces the previous one.  Zero ends it.
+     * @thread  Any thread.
+     */
+    DECLR3CALLBACKMEMBER(void, pfnVMHaltPollHint,(PPDMDEVINS pDevIns, uint64_t cNsValid));
 
     /** @} */
 
@@ -10116,6 +10136,14 @@ DECLINLINE(PGIMMMIO2REGION) PDMDevHlpGIMGetMmio2Regions(PPDMDEVINS pDevIns, uint
 DECLINLINE(void) PDMDevHlpGCMTriggerPatch(PPDMDEVINS pDevIns, GCMGSTPATCHID enmPatch)
 {
     pDevIns->CTX_SUFF(pHlp)->pfnGCMTriggerPatch(pDevIns, enmPatch);
+}
+
+/**
+ * @copydoc PDMDEVHLPR3::pfnVMHaltPollHint
+ */
+DECLINLINE(void) PDMDevHlpVMHaltPollHint(PPDMDEVINS pDevIns, uint64_t cNsValid)
+{
+    pDevIns->CTX_SUFF(pHlp)->pfnVMHaltPollHint(pDevIns, cNsValid);
 }
 
 #endif

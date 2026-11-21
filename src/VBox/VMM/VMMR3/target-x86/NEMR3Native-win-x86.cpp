@@ -4720,9 +4720,11 @@ nemR3WinHandleExitMemory(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT cons
     uint64_t const uApicBaseMsr = PDMApicGetBaseMsrNoCheck(pVCpu);
     bool const     fApicPage    = (uApicBaseMsr & (MSR_IA32_APICBASE_EN | MSR_IA32_APICBASE_EXTD)) == MSR_IA32_APICBASE_EN
                                && (pExit->MemoryAccess.Gpa & X86_PAGE_4K_BASE_MASK) == MSR_IA32_APICBASE_GET_ADDR(uApicBaseMsr);
+    bool fHdrCopied = false; /* The header copy asserts that the state is still external, so do it only once. */
     if (fApicPage && !pVM->nem.s.fLocalApicEmulation)
     {
         nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
+        fHdrCopied = true;
         int rcImport = nemHCWinCopyStateFromHyperV(pVM, pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM | CPUMCTX_EXTRN_DS | CPUMCTX_EXTRN_ES);
         AssertRCReturn(rcImport, rcImport);
         VBOXSTRICTRC rcStrictApic;
@@ -4786,7 +4788,8 @@ nemR3WinHandleExitMemory(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT cons
                                             : EMEXIT_MAKE_FT(EMEXIT_F_KIND_EM, EMEXITTYPE_MMIO_READ),
                                             pExit->VpContext.Rip + pExit->VpContext.Cs.Base, uHostTsc)
                          : NULL;
-    nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
+    if (!fHdrCopied)
+        nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
     rc = nemHCWinCopyStateFromHyperV(pVM, pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM | CPUMCTX_EXTRN_DS | CPUMCTX_EXTRN_ES);
     AssertRCReturn(rc, rc);
     if (pExit->VpContext.ExecutionState.Reserved0 || pExit->VpContext.ExecutionState.Reserved1)

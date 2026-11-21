@@ -253,6 +253,13 @@ typedef struct VGPUVIRGLFNS
     DECLCALLBACKMEMBER(int,  pfnResourceUnmap,(uint32_t idResource));
     /** virgl_renderer_resource_get_map_info (:433) */
     DECLCALLBACKMEMBER(int,  pfnResourceGetMapInfo,(uint32_t idResource, uint32_t *pfMapInfo));
+    /** @name Optional, NULL in a library without them (see g_aVirglOptionalSymbols).
+     * @{ */
+    /** virgl_renderer_set_vk_memory_limit: limit for the memory all contexts can allocate on the host. */
+    DECLCALLBACKMEMBER(void,     pfnSetVkMemoryLimit,(uint64_t cbLimit));
+    /** virgl_renderer_get_vk_memory_used: what counts against that limit. */
+    DECLCALLBACKMEMBER(uint64_t, pfnGetVkMemoryUsed,(void));
+    /** @} */
 } VGPUVIRGLFNS;
 
 /** Symbol name to VGPUVIRGLFNS member mapping. */
@@ -277,6 +284,17 @@ static const struct
     { "virgl_renderer_resource_map",                RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceMap) },
     { "virgl_renderer_resource_unmap",              RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceUnmap) },
     { "virgl_renderer_resource_get_map_info",       RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceGetMapInfo) },
+};
+
+/** Symbols a library may lack (an older build of it); the members stay NULL then. */
+static const struct
+{
+    const char *pszName;
+    uint32_t    offMember;
+} g_aVirglOptionalSymbols[] =
+{
+    { "virgl_renderer_set_vk_memory_limit",         RT_UOFFSETOF(VGPUVIRGLFNS, pfnSetVkMemoryLimit) },
+    { "virgl_renderer_get_vk_memory_used",          RT_UOFFSETOF(VGPUVIRGLFNS, pfnGetVkMemoryUsed) },
 };
 
 
@@ -700,11 +718,36 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
 
     /* The thread works on a heap copy, so that a call stuck in the library can be
        abandoned without the thread writing to our stack when it returns (or never).
-       The pointers inside (command stream, name) still refer to the caller's
-       memory; a stuck library is leaked and never used again. */
+       The data the request points to (command stream, name) is copied as well, as
+       the caller frees or reuses its own copy once we give up on the call.  After a
+       timeout both copies are leaked, as the library may still be reading them. */
     PVGPURENDERREQ pReqHeap = (PVGPURENDERREQ)RTMemDup(pReq, sizeof(*pReq));
     if (!pReqHeap)
     {
+        RTCritSectLeave(&pThis->CritSectCall);
+        return VERR_NO_MEMORY;
+    }
+    void *pvPayload = NULL;
+    if (pReq->enmType == kVGpuRenderReq_Submit && pReq->u.Submit.cDWords)
+    {
+        pvPayload = RTMemDup(pReq->u.Submit.pvCmds, (size_t)pReq->u.Submit.cDWords * 4); /* 8 byte aligned, the library wants 4. */
+        pReqHeap->u.Submit.pvCmds = pvPayload;
+    }
+    else if (pReq->enmType == kVGpuRenderReq_ContextCreate)
+    {
+        pvPayload = RTMemAlloc((size_t)pReq->u.ContextCreate.cchName + 1);
+        if (pvPayload)
+        {
+            memcpy(pvPayload, pReq->u.ContextCreate.pachName, pReq->u.ContextCreate.cchName);
+            ((char *)pvPayload)[pReq->u.ContextCreate.cchName] = '\0';
+        }
+        pReqHeap->u.ContextCreate.pachName = (const char *)pvPayload;
+    }
+    if (   !pvPayload
+        && (   (pReq->enmType == kVGpuRenderReq_Submit && pReq->u.Submit.cDWords)
+            || pReq->enmType == kVGpuRenderReq_ContextCreate))
+    {
+        RTMemFree(pReqHeap);
         RTCritSectLeave(&pThis->CritSectCall);
         return VERR_NO_MEMORY;
     }
@@ -714,6 +757,7 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
     {
         /* The thread never saw the request. */
         AssertLogRelMsgFailed(("%Rrc\n", rc));
+        RTMemFree(pvPayload);
         RTMemFree(pReqHeap);
         RTCritSectLeave(&pThis->CritSectCall);
         return rc;
@@ -725,7 +769,7 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
         uint64_t const msNow = RTTimeMilliTS();
         if (msNow >= msDoneDeadline)
         {
-            /* Leak the request: the thread may still use it. */
+            /* Leak the request and its data: the thread may still use them. */
             ASMAtomicWriteBool(&pThis->fDead, true);
             LogRel(("VirtioGpu: A call into the renderer library (request %d) did not finish in %RU32 ms, giving up on it\n",
                     (int)pReqHeap->enmType, (uint32_t)VGPURENDERER_CALL_TIMEOUT_MS));
@@ -741,7 +785,15 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
             RTThreadSleep(10);
         }
     }
+    /* Hand the results back, but keep the caller's own pointers. */
+    void const * const pvOrgCmds = pReq->enmType == kVGpuRenderReq_Submit ? pReq->u.Submit.pvCmds : NULL;
+    const char * const pachOrgName = pReq->enmType == kVGpuRenderReq_ContextCreate ? pReq->u.ContextCreate.pachName : NULL;
     *pReq = *pReqHeap;
+    if (pReq->enmType == kVGpuRenderReq_Submit)
+        pReq->u.Submit.pvCmds = (void *)pvOrgCmds;
+    else if (pReq->enmType == kVGpuRenderReq_ContextCreate)
+        pReq->u.ContextCreate.pachName = pachOrgName;
+    RTMemFree(pvPayload);
     RTMemFree(pReqHeap);
     RTCritSectLeave(&pThis->CritSectCall);
     return pReq->rc;
@@ -808,6 +860,10 @@ DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENC
             if (RT_FAILURE(rc))
                 RTErrInfoSetF(pErrInfo, rc, "Symbol '%s' not found in '%s'", g_aVirglSymbols[i].pszName, pszLibrary);
         }
+        for (unsigned i = 0; i < RT_ELEMENTS(g_aVirglOptionalSymbols) && RT_SUCCESS(rc); i++)
+            if (RT_FAILURE(RTLdrGetSymbol(pThis->hLdrMod, g_aVirglOptionalSymbols[i].pszName,
+                                          (void **)((uint8_t *)&pThis->Fns + g_aVirglOptionalSymbols[i].offMember))))
+                *(void **)((uint8_t *)&pThis->Fns + g_aVirglOptionalSymbols[i].offMember) = NULL;
     }
     else
         RTErrInfoAddF(pErrInfo, rc, " (loading '%s')", pszLibrary);
@@ -842,6 +898,42 @@ DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENC
     }
     vgpuR3RendererDestroy(pThis, true /*fCleanup*/);
     return rc;
+}
+
+
+/**
+ * Limits the host memory all Venus contexts together can allocate.
+ *
+ * An allocation that would go over the limit fails in the guest with
+ * VK_ERROR_OUT_OF_DEVICE_MEMORY, as it does when the card is full, instead of
+ * the guest taking the memory the host's own programs need.
+ *
+ * @returns VINF_SUCCESS, VERR_NOT_SUPPORTED if the library has no such limit.
+ * @param   pRenderer   The renderer instance.
+ * @param   cbLimit     The limit in bytes, 0 for none.
+ * @note    The library only reads and writes atomic counters for this, so it
+ *          needs no call through the renderer thread.
+ */
+DECLHIDDEN(int) vgpuR3RendererSetMemoryLimit(PVGPURENDERER pRenderer, uint64_t cbLimit)
+{
+    AssertPtrReturn(pRenderer, VERR_INVALID_POINTER);
+    if (!pRenderer->Fns.pfnSetVkMemoryLimit)
+        return VERR_NOT_SUPPORTED;
+    pRenderer->Fns.pfnSetVkMemoryLimit(cbLimit);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Gets the host memory the Venus contexts have allocated that counts against the limit.
+ *
+ * @returns Bytes, UINT64_MAX if the library cannot tell.
+ * @param   pRenderer   The renderer instance.
+ */
+DECLHIDDEN(uint64_t) vgpuR3RendererGetMemoryUsed(PVGPURENDERER pRenderer)
+{
+    AssertPtrReturn(pRenderer, UINT64_MAX);
+    return pRenderer->Fns.pfnGetVkMemoryUsed ? pRenderer->Fns.pfnGetVkMemoryUsed() : UINT64_MAX;
 }
 
 
