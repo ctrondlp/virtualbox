@@ -58,8 +58,15 @@
 /*********************************************************************************************************************************
 *   Defined Constants And Macros                                                                                                 *
 *********************************************************************************************************************************/
-/** The number loops to spin for in ring-3. */
-#define PDMCRITSECT_SPIN_COUNT_R3       20
+/** The number loops to spin for in ring-3.
+ * The same as in ring-0: with only a handful of spins, a thread that finds the
+ * section busy nearly always goes to sleep, and with short critical sections
+ * that several threads take all the time (the PGM lock taken by device I/O
+ * threads for guest memory accesses and by the EMTs for MMIO exits) every
+ * hand-over then costs a thread wake-up and the threads form a convoy.  With
+ * virtio-scsi and 4 or more vCPUs that cost 80 % of the I/O rate at a queue
+ * depth of 32. */
+#define PDMCRITSECT_SPIN_COUNT_R3       256
 /** The number loops to spin for in ring-0. */
 #define PDMCRITSECT_SPIN_COUNT_R0       256
 /** The number loops to spin for in the raw-mode context. */
