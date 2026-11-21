@@ -553,11 +553,17 @@ VMMR3_INT_DECL(int) gimR3HvInit(PVM pVM, PCFGMNODE pGimCfg)
             Assert(pHvStimer->idCpu     == pVCpu->idCpu);
             Assert(pHvStimer->idxStimer == idxStimer);
 
-            /* Create the timer and associate the context pointers. */
+            /* Create the timer and associate the context pointers.  The vCPU owning the timer
+               re-arms it while the timer EMT may be running guest code; with Windows using the
+               timer as its clock it must not wait for the timer EMT's next exit. */
             char szName[32];
             RTStrPrintf(szName, sizeof(szName), "Hyper-V[%u] Timer%u", pVCpu->idCpu, idxStimer);
+            uint32_t fTimerFlags = TMTIMER_FLAGS_RING0;
+#ifdef TMTIMER_FLAGS_POKE_TIMER_EMT
+            fTimerFlags |= TMTIMER_FLAGS_POKE_TIMER_EMT;
+#endif
             rc = TMR3TimerCreate(pVM, TMCLOCK_VIRTUAL_SYNC, gimR3HvTimerCallback, pHvStimer /* pvUser */,
-                                 TMTIMER_FLAGS_RING0, szName, &pHvStimer->hTimer);
+                                 fTimerFlags, szName, &pHvStimer->hTimer);
             AssertLogRelRCReturn(rc, rc);
         }
     }
