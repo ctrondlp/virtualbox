@@ -94,6 +94,12 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Disk and other device I/O is much faster with several virtual
+          CPUs, as threads waiting briefly for a busy internal lock no longer go
+          to sleep right away (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
