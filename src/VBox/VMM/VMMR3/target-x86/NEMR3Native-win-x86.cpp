@@ -2240,6 +2240,17 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                     rc = DBGFR3InfoRegisterInternalEx(pVM, "nem", "Dumps NEM info.", nemR3WinInfo, DBGFINFO_FLAGS_ALL_EMTS);
                     AssertRCReturn(rc, rc);
 
+                    /** @cfgm{/NEM/MmioFastPath, bool, true}
+                     * Whether to do plain MOV accesses to device memory without IEM,
+                     * importing only the general registers the instruction uses (see
+                     * nemR3WinTryMmioMov). */
+                    bool fMmioFastPath = true;
+                    int const rcCfgMmio = CFGMR3QueryBoolDef(CFGMR3GetChild(CFGMR3GetRoot(pVM), "NEM"), "MmioFastPath",
+                                                             &fMmioFastPath, true);
+                    pVM->nem.s.fMmioFastPath = RT_SUCCESS(rcCfgMmio) && fMmioFastPath;
+                    LogRel(("NEM: Plain MOV accesses to device memory without IEM: %RTbool (/NEM/MmioFastPath)\n",
+                            pVM->nem.s.fMmioFastPath));
+
                     /*
                      * Register release statistics
                      */
@@ -2289,6 +2300,8 @@ DECLHIDDEN(int) nemR3NativeInit(PVM pVM, bool fFallback, bool fForced)
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitApicEoi,         STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of APIC EOI exits",               "/NEM/CPU%u/ExitApicEoi", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatApicMmioDirect,      STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of xAPIC page accesses done without IEM", "/NEM/CPU%u/ApicMmioDirect", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatApicMmioToIem,       STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of xAPIC page accesses left to IEM",     "/NEM/CPU%u/ApicMmioToIem", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatMmioMovDirect,       STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of plain MOV device memory accesses done without IEM", "/NEM/CPU%u/MmioMovDirect", idCpu);
+                        STAMR3RegisterF(pVM, &pNemCpu->StatMmioMovToIem,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of device memory accesses the MOV fast path left to IEM", "/NEM/CPU%u/MmioMovToIem", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitApicSipiInitTrap,STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of APIC SIPI/INIT trap exits",    "/NEM/CPU%u/ExitApicSipiInit", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatExitCanceled,        STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of canceled exits (host interrupt?)", "/NEM/CPU%u/ExitCanceled", idCpu);
                         STAMR3RegisterF(pVM, &pNemCpu->StatGetMsgTimeout,       STAMTYPE_COUNTER, STAMVISIBILITY_ALWAYS, STAMUNIT_OCCURENCES, "Number of get message timeouts/alerts",  "/NEM/CPU%u/GetMsgTimeout", idCpu);
@@ -3616,9 +3629,12 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
         aenmNames[iReg++] = WHvX64RegisterRip;
     }
 
-    /* event injection */
+    /* Event injection.  The pending (ExtInt) event is only used with the Hyper-V
+       APIC (see nemHCWinCopyStateToHyperV), and reading it is expensive: it takes
+       longer than all the other registers of a full import together. */
     aenmNames[iReg++] = WHvRegisterPendingInterruption;
-    aenmNames[iReg++] = WHvRegisterPendingEvent;
+    if (pVM->nem.s.fLocalApicEmulation)
+        aenmNames[iReg++] = WHvRegisterPendingEvent;
 
     size_t const cRegs = iReg;
     Assert(cRegs < RT_ELEMENTS(aenmNames));
@@ -4067,20 +4083,22 @@ static int nemHCWinCopyStateFromHyperV(PVMCC pVM, PVMCPUCC pVCpu, uint64_t fWhat
                                       && aValues[iReg].PendingInterruption.InterruptionVector == pVCpu->nem.s.uIntInjectVector;
     iReg++;
 
-    Assert(aenmNames[iReg] == WHvRegisterPendingEvent);
-    WHV_X64_PENDING_EXT_INT_EVENT const *pEventPending = &aValues[iReg].ExtIntEvent;
-    if (pEventPending->EventPending)
+    if (pVM->nem.s.fLocalApicEmulation)
     {
-        /* Currently this should only happen when injecting PIC interrupts using the Hyper-V APIC. */
-        Assert(pVM->nem.s.fLocalApicEmulation);
-        Assert(aValues[iReg - 1].PendingInterruption.InterruptionPending == 0); /* PendingInterruption shouldn't also be set. */
-        AssertLogRelMsgReturn(pEventPending->EventType == WHvX64PendingEventExtInt,
-                              ("%u: Unexpected pending event type %#x\n", pEventPending->EventType),
-                              VERR_NEM_IPE_8);
-        int rc = TRPMAssertTrap(pVCpu, pEventPending->Vector, TRPM_HARDWARE_INT);
-        AssertMsgReturn(rc == VINF_SUCCESS, ("rc=%Rrc\n", rc), RT_FAILURE_NP(rc) ? rc : VERR_NEM_IPE_3);
+        Assert(aenmNames[iReg] == WHvRegisterPendingEvent);
+        WHV_X64_PENDING_EXT_INT_EVENT const *pEventPending = &aValues[iReg].ExtIntEvent;
+        if (pEventPending->EventPending)
+        {
+            /* Currently this should only happen when injecting PIC interrupts using the Hyper-V APIC. */
+            Assert(aValues[iReg - 1].PendingInterruption.InterruptionPending == 0); /* PendingInterruption shouldn't also be set. */
+            AssertLogRelMsgReturn(pEventPending->EventType == WHvX64PendingEventExtInt,
+                                  ("%u: Unexpected pending event type %#x\n", pEventPending->EventType),
+                                  VERR_NEM_IPE_8);
+            int rc = TRPMAssertTrap(pVCpu, pEventPending->Vector, TRPM_HARDWARE_INT);
+            AssertMsgReturn(rc == VINF_SUCCESS, ("rc=%Rrc\n", rc), RT_FAILURE_NP(rc) ? rc : VERR_NEM_IPE_3);
+        }
+        iReg++;
     }
-    iReg++;
 
     /* Almost done, just update extrn flags and maybe change PGM mode. */
     pVCpu->cpum.GstCtx.fExtrn &= ~fWhat;
@@ -4691,6 +4709,233 @@ static bool nemR3WinTryXApicPageAccess(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXI
 
 
 /**
+ * Gets the CPUMCTX_EXTRN_XXX flag of a general register.
+ *
+ * @returns The flag.
+ * @param   idxGReg     The register index (DISGREG_RAX thru DISGREG_R15).
+ */
+DECLINLINE(uint64_t) nemR3WinGRegExtrnFlag(uint8_t idxGReg)
+{
+    AssertCompile(CPUMCTX_EXTRN_RDI == CPUMCTX_EXTRN_RAX << DISGREG_RDI);
+    return idxGReg < DISGREG_R8 ? CPUMCTX_EXTRN_RAX << idxGReg : CPUMCTX_EXTRN_R8_R15;
+}
+
+
+/**
+ * Tries to do a plain MOV access to device memory without IEM.
+ *
+ * Going through IEM costs importing most of the guest state from Hyper-V, a
+ * flush of the IEM TLB, a walk of the guest page tables and mapping and
+ * committing the access through PGM.  A MOV between a general register (or an
+ * immediate) and device memory needs none of that: Hyper-V gives us the guest
+ * physical and linear addresses and the instruction bytes, so only the general
+ * registers the instruction uses have to be imported.  Device drivers access
+ * their registers this way (readl/writel and friends), so this is what every
+ * MMIO register access costs.
+ *
+ * This handles only what is certain: a MOV of 1, 2, 4 or 8 bytes in 64-bit
+ * code, without LOCK, REP, address size or FS/GS prefixes, whose memory operand
+ * is [base + index * scale + displacement] or [rip + displacement] and gives
+ * the linear address Hyper-V reports (so the access does not start on another
+ * page), not crossing a page, while no event is being delivered and nothing
+ * would raise a #DB or DBGF event on finishing the instruction.  The access is
+ * done with PGMPhysRead / PGMPhysWrite, which is what IEM ends up doing for
+ * device memory too.  Anything else is left to IEM.
+ *
+ * @returns true if the instruction was done (or failed like it would in IEM),
+ *          @a *prcStrict is the status.
+ *          false if IEM has to do it.  Nothing was changed except importing
+ *          some registers from Hyper-V.
+ * @param   pVM         The cross context VM structure.
+ * @param   pVCpu       The cross context per CPU structure.
+ * @param   pExit       The VM exit information.  The state from the exit
+ *                      header (RIP, RFLAGS, CS, interrupt shadow) has been
+ *                      copied.
+ * @param   prcStrict   Where to return the strict status code when done.
+ */
+static bool nemR3WinTryMmioMov(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT const *pExit, VBOXSTRICTRC *prcStrict)
+{
+    PCPUMCTX const pCtx = &pVCpu->cpum.GstCtx;
+    Assert(!(pCtx->fExtrn & (CPUMCTX_EXTRN_RIP | CPUMCTX_EXTRN_RFLAGS | CPUMCTX_EXTRN_CS)));
+
+    /*
+     * 64-bit code, an instruction and linear address from Hyper-V, no event
+     * being delivered (the access would not be the instruction's), and no
+     * single stepping or breakpoints (checked again for DR7 below).
+     */
+    uint8_t const cbInstrBytes = pExit->MemoryAccess.InstructionByteCount;
+    if (   cbInstrBytes == 0
+        || cbInstrBytes > sizeof(pExit->MemoryAccess.InstructionBytes)
+        || !pExit->MemoryAccess.AccessInfo.GvaValid
+        || pExit->VpContext.ExecutionState.InterruptionPending
+        || !pExit->VpContext.ExecutionState.EferLma
+        || !pCtx->cs.Attr.n.u1Long
+        || pExit->VpContext.ExecutionState.DebugActive
+        || (pCtx->eflags.uBoth & (X86_EFL_TF | CPUMCTX_DBG_HIT_DRX_MASK | CPUMCTX_DBG_DBGF_MASK))
+        || (DBGFBpGetDR7(pVM) & X86_DR7_ENABLED_MASK)
+        || pVCpu->nem.s.fGuestDebug
+        || pVCpu->nem.s.fSingleInstruction
+        || DBGFIsStepping(pVCpu))
+        return false;
+
+    bool const fWrite = pExit->MemoryAccess.AccessInfo.AccessType == WHvMemoryAccessWrite;
+    if (!fWrite && pExit->MemoryAccess.AccessInfo.AccessType != WHvMemoryAccessRead)
+        return false;
+
+    /*
+     * Decode the instruction.
+     */
+    DISSTATE Dis;
+    uint32_t cbInstr = 0;
+    int rc = DISInstrWithPrefetchedBytes(pCtx->rip, DISCPUMODE_64BIT, DISOPTYPE_ALL,
+                                         pExit->MemoryAccess.InstructionBytes, cbInstrBytes,
+                                         nemR3WinApicMmioDisReadBytes, NULL /*pvUser*/, &Dis, &cbInstr);
+    if (   RT_FAILURE(rc)
+        || cbInstr == 0
+        || cbInstr > cbInstrBytes
+        || Dis.pCurInstr->uOpcode != OP_MOV
+        || (Dis.x86.fPrefix & (DISPREFIX_LOCK | DISPREFIX_ADDRSIZE | DISPREFIX_REP | DISPREFIX_REPNE | DISPREFIX_VEX))
+        || (   (Dis.x86.fPrefix & DISPREFIX_SEG)
+            && (Dis.x86.idxSegPrefix == DISSELREG_FS || Dis.x86.idxSegPrefix == DISSELREG_GS)))
+        return false;
+
+    PCDISOPPARAM const pParamMem   = fWrite ? &Dis.aParams[0] : &Dis.aParams[1];
+    PCDISOPPARAM const pParamOther = fWrite ? &Dis.aParams[1] : &Dis.aParams[0];
+
+    /* The memory operand: [base + index * scale + displacement] or [rip + displacement] with 64-bit registers. */
+    uint64_t const fMemUse = pParamMem->fUse;
+    if (   !DISUSE_IS_EFFECTIVE_ADDR(fMemUse)
+        || (fMemUse & ~(  DISUSE_BASE | DISUSE_INDEX | DISUSE_SCALE | DISUSE_REG_GEN64 | DISUSE_DISPLACEMENT8
+                        | DISUSE_DISPLACEMENT32 | DISUSE_DISPLACEMENT64 | DISUSE_RIPDISPLACEMENT32))
+        || ((fMemUse & DISUSE_RIPDISPLACEMENT32) && (fMemUse & (DISUSE_BASE | DISUSE_INDEX)))
+        || ((fMemUse & DISUSE_BASE)  && pParamMem->x86.Base.idxGenReg  > DISGREG_R15)
+        || ((fMemUse & DISUSE_INDEX) && pParamMem->x86.Index.idxGenReg > DISGREG_R15))
+        return false;
+    uint8_t const cbAccess = DISGetParamSize(&Dis, pParamMem);
+    if (cbAccess != 1 && cbAccess != 2 && cbAccess != 4 && cbAccess != 8)
+        return false;
+
+    /* The other operand: a general register of the same size, or for writes an immediate (MOV m,imm). */
+    uint8_t        idxValReg = UINT8_MAX;   /* UINT8_MAX for an immediate. */
+    bool           fHighByte = false;       /* AH, CH, DH or BH. */
+    uint64_t const fOtherUse = pParamOther->fUse;
+    if (fOtherUse & (DISUSE_REG_GEN8 | DISUSE_REG_GEN16 | DISUSE_REG_GEN32 | DISUSE_REG_GEN64))
+    {
+        if (DISGetParamSize(&Dis, pParamOther) != cbAccess)
+            return false;
+        uint8_t const idxReg = pParamOther->x86.Base.idxGenReg;
+        if (!(fOtherUse & DISUSE_REG_GEN8) || idxReg < DISGREG_AH || (idxReg >= DISGREG_R8B && idxReg <= DISGREG_R15B))
+            idxValReg = idxReg;
+        else if (idxReg <= DISGREG_BH)
+        {
+            idxValReg = idxReg - DISGREG_AH;
+            fHighByte = true;
+        }
+        else if (idxReg >= DISGREG_SPL && idxReg <= DISGREG_DIL)
+            idxValReg = idxReg - DISGREG_SPL + DISGREG_RSP;
+        if (idxValReg > DISGREG_R15)
+            return false;
+    }
+    else if (   !fWrite
+             || (fOtherUse & DISUSE_IMMEDIATE) != (  cbAccess == 1 ? DISUSE_IMMEDIATE8
+                                                   : cbAccess == 2 ? DISUSE_IMMEDIATE16
+                                                   : cbAccess == 4 ? DISUSE_IMMEDIATE32 : DISUSE_IMMEDIATE64))
+        return false; /* Only MOV m,imm has an immediate (sign extended for 64-bit), and that is never a read. */
+
+    uint64_t const uNewRip = pCtx->rip + cbInstr;
+    RTGCPHYS const GCPhys  = pExit->MemoryAccess.Gpa;
+    if (   !X86_IS_CANONICAL(uNewRip)
+        || (GCPhys & X86_PAGE_OFFSET_MASK) + cbAccess > X86_PAGE_SIZE
+        || (GCPhys & X86_PAGE_OFFSET_MASK) != (pExit->MemoryAccess.Gva & X86_PAGE_OFFSET_MASK))
+        return false;
+
+    /*
+     * Import the registers the instruction uses, and DR7.
+     */
+    uint64_t fImport = CPUMCTX_EXTRN_DR7;
+    if (fMemUse & DISUSE_BASE)
+        fImport |= nemR3WinGRegExtrnFlag(pParamMem->x86.Base.idxGenReg);
+    if (fMemUse & DISUSE_INDEX)
+        fImport |= nemR3WinGRegExtrnFlag(pParamMem->x86.Index.idxGenReg);
+    if (idxValReg != UINT8_MAX)
+        fImport |= nemR3WinGRegExtrnFlag(idxValReg);
+    rc = nemHCWinCopyStateFromHyperV(pVM, pVCpu, fImport);
+    if (RT_FAILURE(rc))
+        return false;
+    if (pCtx->dr[7] & X86_DR7_ENABLED_MASK)
+        return false;
+
+    /*
+     * The effective address must be the linear address of the access (64-bit
+     * code: no segment base without an FS or GS prefix), otherwise it began on
+     * the page before.
+     */
+    uint64_t uEffAddr;
+    if (fMemUse & DISUSE_RIPDISPLACEMENT32)
+        uEffAddr = uNewRip + (int64_t)pParamMem->x86.uDisp.i32;
+    else
+    {
+        uEffAddr = 0;
+        if (fMemUse & DISUSE_BASE)
+            uEffAddr = pCtx->aGRegs[pParamMem->x86.Base.idxGenReg].u64;
+        if (fMemUse & DISUSE_INDEX)
+            uEffAddr += pCtx->aGRegs[pParamMem->x86.Index.idxGenReg].u64
+                      * (fMemUse & DISUSE_SCALE ? pParamMem->x86.uScale : 1);
+        if (fMemUse & DISUSE_DISPLACEMENT8)
+            uEffAddr += (int64_t)pParamMem->x86.uDisp.i8;
+        else if (fMemUse & DISUSE_DISPLACEMENT32)
+            uEffAddr += (int64_t)pParamMem->x86.uDisp.i32;
+        else if (fMemUse & DISUSE_DISPLACEMENT64)
+            uEffAddr += pParamMem->x86.uDisp.u64;
+    }
+    if (uEffAddr != pExit->MemoryAccess.Gva)
+        return false;
+
+    /*
+     * Do the access and finish the instruction like IEM would (a failed access
+     * leaves the instruction unfinished, informational statuses are passed up).
+     */
+    uint64_t     uValue = 0;
+    VBOXSTRICTRC rcStrict;
+    if (fWrite)
+    {
+        if (idxValReg == UINT8_MAX)
+            uValue = pParamOther->uValue;
+        else
+            uValue = fHighByte ? pCtx->aGRegs[idxValReg].bHi : pCtx->aGRegs[idxValReg].u64;
+        rcStrict = PGMPhysWrite(pVM, GCPhys, &uValue, cbAccess, PGMACCESSORIGIN_IEM);
+    }
+    else
+        rcStrict = PGMPhysRead(pVM, GCPhys, &uValue, cbAccess, PGMACCESSORIGIN_IEM);
+    if (!PGM_PHYS_RW_IS_SUCCESS(rcStrict))
+    {
+        *prcStrict = rcStrict;
+        return true;
+    }
+    if (!fWrite)
+    {
+        CPUMCTXGREG * const pReg = &pCtx->aGRegs[idxValReg];
+        switch (cbAccess)
+        {
+            case 1:
+                if (fHighByte)
+                    pReg->bHi = (uint8_t)uValue;
+                else
+                    pReg->u8  = (uint8_t)uValue;
+                break;
+            case 2: pReg->u16 = (uint16_t)uValue; break;
+            case 4: pReg->u64 = (uint32_t)uValue; break; /* 32-bit writes clear the upper half. */
+            default: pReg->u64 = uValue; break;
+        }
+    }
+    pCtx->rip = uNewRip;
+    pCtx->eflags.uBoth &= ~(X86_EFL_RF | CPUMCTX_INHIBIT_SHADOW); /* Like IEM does when finishing an instruction. */
+    *prcStrict = rcStrict;
+    return true;
+}
+
+
+/**
  * Deals with memory access exits (WHvRunVpExitReasonMemoryAccess).
  *
  * @returns Strict VBox status code.
@@ -4790,6 +5035,22 @@ nemR3WinHandleExitMemory(PVMCC pVM, PVMCPUCC pVCpu, WHV_RUN_VP_EXIT_CONTEXT cons
                          : NULL;
     if (!fHdrCopied)
         nemR3WinCopyStateFromX64Header(pVCpu, &pExit->VpContext);
+
+    /*
+     * A plain MOV to or from device memory is done without IEM, unless the
+     * exit history wants to execute more (see nemR3WinTryMmioMov).
+     */
+    if (!pExitRec && !fApicPage && pVM->nem.s.fMmioFastPath)
+    {
+        VBOXSTRICTRC rcStrictMmio;
+        if (nemR3WinTryMmioMov(pVM, pVCpu, pExit, &rcStrictMmio))
+        {
+            STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatMmioMovDirect);
+            return rcStrictMmio;
+        }
+        STAM_REL_COUNTER_INC(&pVCpu->nem.s.StatMmioMovToIem);
+    }
+
     rc = nemHCWinCopyStateFromHyperV(pVM, pVCpu, NEM_WIN_CPUMCTX_EXTRN_MASK_FOR_IEM | CPUMCTX_EXTRN_DS | CPUMCTX_EXTRN_ES);
     AssertRCReturn(rc, rc);
     if (pExit->VpContext.ExecutionState.Reserved0 || pExit->VpContext.ExecutionState.Reserved1)
