@@ -17,12 +17,13 @@ virtual CPUs. Models are Qwen2.5 in 4-bit form, run with `llama-bench`.
 | | Guest CPU | Host GPU through virtio-gpu |
 |---|---|---|
 | 0.5B, prompt / generation (tokens per second) | 483 / 108 | 5,218 / 74 |
-| 3B, prompt / generation | 97 / 23.5 | **4,200–7,100 / 67–81** |
-| 7B, prompt / generation | not measured | **3,696 / 60** |
+| 3B, prompt / generation | 97 / 23.5 | **6,683 / 105** |
+| 7B, prompt / generation | not measured | **3,808 / 71** |
+| 14B, prompt / generation | not measured | **1,797 / 46** |
 | Loading a 2 GB model | | **7 s** |
 
-* The 3B result is the range of three runs; the GPU was shared with the desktop. Prompt processing is roughly 40–70 times
-  faster than the guest CPU and generation about 3 times.
+* Prompt processing is roughly 70 times faster than the guest CPU and generation about 4.5 times (3B). The 0.5B row was
+  measured before the halt poll hint (below).
 * The smallest model generates *slower* on the GPU than on the CPU, because each generated token costs a fixed round trip
   between guest and host.
 * A 4.4 GiB model (7B) fits and runs; the guest sees the card's 11.7 GiB of device memory.
@@ -30,27 +31,32 @@ virtual CPUs. Models are Qwen2.5 in 4-bit form, run with `llama-bench`.
 
 ### Compared with running the model on the host
 
-The same llama.cpp build (b12001) and the same models, run natively on the host card (Vulkan) and in the guest (5 runs each,
-Fedora 44 live guest, 4 virtual CPUs, development build without the kernel driver):
+The same llama.cpp build (b12001) and the same models, run natively on the host card (Vulkan) and in the guest (Fedora 44
+live guest, 4 virtual CPUs, development build without the kernel driver). "Before" is without the halt poll hint described
+below, "now" with it (5 or 10 runs each):
 
-| Model | | Host, native | Guest through virtio-gpu | Guest as a share of host |
-|---|---|---|---|---|
-| 3B | prompt (pp512) | 10,346 | 5,710 | 55 % |
-| 3B | long prompt (pp4096) | 9,446 | 4,442 | 47 % |
-| 3B | generation (tg128) | 241.7 | 52–79 | 21–33 % |
-| 7B | prompt (pp512) | 4,410 | 3,108 | 70 % |
-| 7B | long prompt (pp4096) | 4,217 | 2,994 | 71 % |
-| 7B | generation (tg128) | 123.8 | 56.8 | 46 % |
+| Model | | Host, native | Guest before | Guest now | Now as a share of host |
+|---|---|---|---|---|---|
+| 3B | prompt (pp512) | 10,346 | 5,710 | 6,683 | 65 % |
+| 3B | generation (tg128) | 241.7 | 52–79 | 105 | 44 % |
+| 7B | prompt (pp512) | 4,410 | 3,108 | 3,808 | 86 % |
+| 7B | generation (tg128) | 123.8 | 56.8 | 70.6 | 57 % |
+| 14B | prompt (pp512) | 1,813 | | 1,797 | 99 % |
+| 14B | generation (tg128) | 64.4 | | 45.6 | 71 % |
 
-* Prompt processing keeps most of the host's speed, more so for the larger model. The generation speed of the same guest
-  varied between 52 and 79 tokens per second from one boot to the next; within one boot it was steady (about 5 %).
-* Generation is limited by a fixed cost of about 10–15 ms per generated token, whatever the model size, so small models lose
-  most. The device is not the cause: the renderer thread wakes about 10 µs (95 µs at worst) after the guest notifies it.
-  The time goes to the guest sleeping in short steps while it waits for the GPU. A short sleep in a guest takes about
-  0.5 ms (a 10 µs sleep measured 0.5 ms), on this build and also on the installed 7.2.20 with its kernel driver, so
-  official builds should behave the same. This was not measured with virtio-gpu on an official build.
-* Keeping the guest's virtual CPUs from halting (busy loops) raised generation by only about 13 %. Mesa's own
-  `VN_PERF` switches made it slower (31 against 55 tokens per second), so the defaults are the fast setting.
+* The larger the model, the closer the guest gets to the host: the 14B model (8.4 GiB) processes prompts as fast as the host
+  and generates at 71 %. Host VRAM peaked at 9.6 GB.
+* Generation used to be limited by a fixed cost of about 10–15 ms per generated token. The device was not the cause (the
+  renderer thread wakes about 10 µs after the guest notifies it): the guest waits for the GPU in short sleeps, and a short
+  sleep in a VM took about 0.5 ms (a 10 µs sleep measured 0.5 ms, on this build and on the installed 7.2.20 with its kernel
+  driver). While waiting, all four virtual CPUs were halted about 100 % of the time, 84 times per token.
+* **The fix, the halt poll hint:** after each Vulkan command the device tells the VM, for 10 ms, that the guest will wait for
+  the GPU shortly. A halted virtual CPU whose next timer is less than 1 ms away then polls until that timer instead of
+  sleeping in the host, so it wakes on time. Generation went from 50–60 to 92–105 tokens per second (3B) and prompt
+  processing did not get slower. It costs about half a host CPU core while the guest generates and nothing while it is
+  idle; a sleep longer than 1 ms is left alone.
+* The generation speed of the same guest still varies from one boot to the next (about ±15 %); within one boot it is
+  steady. Mesa's own `VN_PERF` switches make it slower, so the defaults are the fast setting.
 
 ### Other guest distributions
 
@@ -86,6 +92,15 @@ Windowed vkmark scored 213–277 through virtio-gpu and 933 on the CPU renderer,
 to the guest compositor. Off-screen Vulkan is fast (vkcube about 800 frames per second). So: virtio-gpu for compute and
 off-screen Vulkan, VMSVGA for the desktop.
 
+## Settings
+
+* **VirtioGpu as the display:** `VBoxManage modifyvm <vm> --graphicscontroller virtiogpu --accelerate-3d on`.
+* **Compute GPU next to VMSVGA:** `VBoxManage modifyvm <vm> --compute-gpu on` (or *Compute GPU* in Settings → Display)
+  adds a second, headless virtio-gpu for Vulkan, while VMSVGA keeps the desktop fast.
+* **Host GPU memory limit:** `VBoxManage modifyvm <vm> --gpu-memory-limit <MB>` (or *GPU Memory Limit* in the Display
+  settings), 0 for none. An allocation over the limit fails in the guest as it does when the card is full.
+* `VBoxManage debugvm <vm> info virtiogpu` shows how much host GPU memory the guest holds against the limit.
+
 ## How it works
 
 * A virtio-gpu PCI device (virtio 1.0, modern only) with a control queue, a cursor queue and a 64-bit memory window.
@@ -98,6 +113,10 @@ off-screen Vulkan, VMSVGA for the desktop.
   driver).
 * 3D is off by default because it loads the renderer library into the VM process. If the library is missing, the device
   stays 2D and says why in the release log.
+* **Halt poll hint:** a new device helper (`PDMDevHlpVMHaltPollHint`) lets a device tell the VM that work it started will
+  finish soon; the halt code then polls short sleeps instead of blocking (see Results).
+* **Saved state:** the 2D state (resources with their guest memory, the scanout, the queues) is saved. The Vulkan state lives
+  in the host graphics driver and cannot be saved, so saving is refused, with the reason, while a guest program uses it.
 
 ## Bugs found while building it
 
@@ -127,17 +146,27 @@ device was empty again and the VM was still running; on a fresh guest the guest 
   held no contexts or memory afterwards.
 * **Host memory:** a guest that allocated and filled device memory in a loop took 11.5 GB of the host's 12 GB. Its process
   then aborted; the host, the VM and a host benchmark running at the same time were unaffected (238.8 against 241.7 tokens
-  per second), and the memory came back when the process exited. There is **no per-VM cap**, so a guest can hold most of the
-  card's memory while it runs. Allocations are not backed until used: four 4 GB allocations (more than the card) succeeded.
+  per second), and the memory came back when the process exited. Allocations are not backed until used: four 4 GB
+  allocations (more than the card) succeeded.
+* **Memory limit:** with a 4 GB and a 6 GB limit the host's VRAM use rose by 3.9 and about 6 GB. llama.cpp with the 14B
+  model under the 6 GB limit printed `ErrorOutOfDeviceMemory` and "failed to load model" when the guest set
+  `VN_PERF=no_async_mem_alloc`; without it, Mesa allocates asynchronously and the program stops instead. A renderer library
+  without the limit still works; the device logs that it cannot enforce it.
+* **Saving the VM state:** save and restore on a VirtioGpu VM with and without 3D, and on a VMSVGA VM with the compute GPU:
+  a guest process kept running across the restore, the display redrew and took keyboard input, and Vulkan and llama.cpp
+  worked afterwards. With a Vulkan program running the save was refused and the VM kept running; after the program exited
+  the save worked.
+* **Regression after these changes:** all fuzz suites again (two seeds) plus 120,000 more malformed command streams: no
+  failures; the VMM and device code also build on Linux.
 
 ## Limits
 
 * Linux guests with Mesa's Venus driver only (tested with Fedora 44, Arch, Ubuntu 26.10 and Pop!_OS 24.04; no Windows or macOS
   guest support).
-* Generation speed is about a quarter to a half of running the model on the host (see above), because of the guest's slow
-  short sleeps. Prompt processing is 55–70 %.
+* Generation speed is 44–71 % of running the model on the host (see above), more for larger models. Prompt processing is
+  65–99 %.
 * The results were measured on a Windows host with an NVIDIA card and a development build without the kernel driver.
-* The saved state of a VM that uses it cannot be saved yet, and there is one monitor.
+* The VM state cannot be saved while a guest program uses Vulkan on the host card, and there is one monitor.
 * Zink (OpenGL over Vulkan) needs a recent guest Mesa. Fedora 44's 26.0.3 fails with "failed to choose pdev" (the Venus device
   does not tell it which display node it belongs to); after upgrading to Mesa 26.2.6 it picks the NVIDIA device and
   `glxinfo` reports the RTX 5070. Windowed OpenGL also needs `MESA_VK_WSI_DEBUG=sw` (below). Nothing in VirtualBox had to change.
