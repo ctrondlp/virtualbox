@@ -147,6 +147,14 @@ device was empty again and the VM was still running; on a fresh guest the guest 
 * **Malformed commands:** 320,000 command streams with valid-looking headers and boundary-value arguments, sent straight to
   the renderer: no failures, no VM crash, no assertion. Most streams are rejected at the first command, so this covers the
   decoder's entry checks, not a valid ring.
+* **Shared-memory rings:** the transport the guest's Vulkan driver uses, attacked from a guest program: ring layouts with
+  boundary values (with a check that nothing outside the ring's control words is ever written), live rings fed malformed
+  commands and impossible positions, bytes flipped by a second thread while the host reads them, the shared memory pulled
+  away under a running ring, reply streams at the edge of the shared memory, and long valid traffic that wraps small
+  rings many times. About 6,000 rounds and 3,000 rings: about 800 rings were stopped by malformed input as they should
+  be, every valid wrapping run was processed completely, and there was no failure, no assertion and no VM crash. One
+  finding, not a bug: as upstream does, a reply can run past its declared stream up to the end of the guest's own shared
+  memory, never beyond it.
 * **Two guests at once:** two VMs running llama.cpp together shared the card (166 and 148 requests per second against 122
   for one alone); powering one off abruptly did not disturb the other.
 * **Long run:** 42 minutes of back-to-back generation (1,500 runs): no errors, steady speed (about 5 % spread), and the device

@@ -179,6 +179,43 @@ with 1 and 2 virtual CPUs boots and shuts down cleanly (one run each; 1 CPU: pin
 wakeups per second against 105 on trunk). The real-mode and 32-bit APIC test of the
 Validation Kit (`bs3-apic-1`, two million accesses, all through the emulator) gives the same output line by line as trunk.
 
+## 10. Device register accesses (MMIO) cost half as much
+
+*Branches:* `nem-win-skip-pending-event` and `nem-win-mmio-fastpath`
+
+Guest drivers reach the registers of their devices through memory (MMIO): disk and network controllers, virtio devices,
+the xAPIC. Each such access exits into VirtualBox. On this host one cost about 10.4 µs against 4.7 µs for a port I/O exit,
+although Hyper-V's own round trip is the same 4 µs for both; the rest was VirtualBox's handling. Most of it was one
+register: every time VirtualBox fetched guest registers from Hyper-V it also read the pending event register, which only
+Hyper-V's own APIC emulation uses, and that is off. Reading it took 2.5 µs on its own, every other register 0.06–0.13 µs.
+
+* The first change reads that register only when Hyper-V emulates the APIC. Every register fetch gets cheaper: each MMIO
+  exit the instruction emulator handles, each halt, and the xAPIC accesses of item 9.
+* The second handles plain `mov` reads and writes of device memory in 64-bit code without the instruction emulator: it
+  decodes the instruction from the bytes Hyper-V reports, fetches only the registers the instruction uses, checks that
+  the address matches, and does the access the way the emulator would. Everything else still goes through the emulator,
+  and `VBoxInternal/NEM/MmioFastPath` = 0 turns it off.
+
+Measured with a Linux guest that times single reads and writes of the AHCI controller's registers and writes to port
+0x80, each followed by a few hundred instructions without an exit (development build without the kernel driver):
+
+| | Before | First change | Both changes |
+|---|---|---|---|
+| MMIO exit, integration branch, 2 CPUs (3 boots each) | 9.8–10.5 µs | 5.5–6.0 µs | **5.4–5.8 µs** |
+| MMIO exit, trunk, 4 CPUs (3 boots each) | 14.2–15.9 µs | **10.2–11.8 µs** | |
+| Port I/O exit (not changed) | 4.3–4.7 µs | 4.3–4.7 µs | 4.4–4.7 µs |
+| Linux ping-pong, 4 CPUs, round trips per second | 181–238k (median 219k, 7 runs) | 219–254k (median 230k; one run 105k) | 224k, 264k |
+
+The second change on its own is small once the first is in (about 0.4 µs, 6 %), so it stays in this fork for now.
+Windows 10 on trunk with the first change: thread ping-pong, barrier crossings and timers the same or slightly better
+(timers 5.3–5.9k → 6.06k per second). The Linux CPU checks pass unchanged.
+
+*Open:* on the integration branch, but not on trunk, Windows 10's timer test (0.5 ms periodic timers on 8 threads) gets
+fewer wakeups with these changes: 6.7k → 5.3–5.5k per second, because Windows' 2048 Hz RTC clock interrupt fires less
+often (about 2030 → 1720–1810 per second). Thread ping-pong and barrier crossings do not change, Windows boots and shuts
+down normally, and Linux timers do not change. It comes from an interaction with another change on the integration branch
+(not halt polling: the gap stays with polling off) and is being looked at.
+
 ## Measured guidance (no code change)
 
 For guests on this host, from a Debian 13 guest with 8 virtual CPUs:
@@ -206,6 +243,9 @@ Listed because "measured, no gain" is a result too.
   and timer lateness 63 against 22 µs (two runs each). The Hyper-V APIC offers no x2APIC, and it bypasses halt polling and
   the paravirtual EOI. So finishing it is not worth it.
 * **Re-probing hot exits.** Merged, then reverted: no benefit.
+* **Moving VMSVGA's command buffer copy off the virtual CPU.** Measured first, so not done: in glmark2's terrain test a
+  command buffer submit took about 20 µs, of which the device's own work was 1.5 µs; the rest is the four port exits
+  (index and data register, twice) that the guest driver uses for each submit, at about 4.75 µs each.
 * **A lock-free RAM range lookup in PGM.** The lockless lookup (`pgmPhysGetPageAndRangeExSlowLockless`) has a mistyped
   comparison, so it always falls back to taking the PGM lock. Fixing it took the fallbacks from 33 to 0, but the macOS login
   time (80 s) and the lock contentions (4.0M against 3.8M) did not change, so it was dropped. It could still be reported as a plain bug.

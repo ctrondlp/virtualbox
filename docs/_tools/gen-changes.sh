@@ -24,6 +24,8 @@ Speed on Hyper-V (NEM) hosts|nem-win-gim-xcpt-narrowing|Planned for upstream|nem
 Speed on Hyper-V (NEM) hosts|726-nem-timer-kick|Planned for upstream (targets issue [#726](https://github.com/VirtualBox/virtualbox/issues/726))
 Speed on Hyper-V (NEM) hosts|em-apic-mmio-history|Planned for upstream
 Speed on Hyper-V (NEM) hosts|em-apic-mmio-fastpath|Planned for upstream|em-apic-mmio-history
+Speed on Hyper-V (NEM) hosts|nem-win-skip-pending-event|Planned for upstream ([speed page](speed.html#10-device-register-accesses-mmio-cost-half-as-much))
+Speed on Hyper-V (NEM) hosts|nem-win-mmio-fastpath|local for now: a small gain (about 6 %) for a lot of decoding code, may be offered later ([speed page](speed.html#10-device-register-accesses-mmio-cost-half-as-much))|em-apic-mmio-fastpath
 Speed on Hyper-V (NEM) hosts|iprt-win-ecoqos-optout|Planned for upstream
 Speed on Hyper-V (NEM) hosts|iprt-win-highres-waits|local: the gain was measured only without the kernel driver, so there is no case for official builds ([why](speed.html#6-high-resolution-waits))|iprt-win-ecoqos-optout
 Correctness fixes|861-x2apic-off-keeps-apic|Planned for upstream (targets issue [#861](https://github.com/VirtualBox/virtualbox/issues/861))
