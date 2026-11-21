@@ -473,6 +473,10 @@ DECLINLINE(bool) tmTimerTryWithLink(PTMTIMERQUEUECC pQueueCC, PTMTIMERQUEUE pQue
 }
 
 
+/** How much earlier than the timer EMT's deadline a newly armed timer must be
+ * before we poke the timer EMT, in nanoseconds (see tmTimerQueueNotifyNewHead). */
+#define TM_NOTIFY_NEW_HEAD_MARGIN_NS    UINT64_C(50000)
+
 /**
  * Tells the timer EMT that a timer queue got an earlier head.
  *
@@ -483,19 +487,38 @@ DECLINLINE(bool) tmTimerTryWithLink(PTMTIMERQUEUECC pQueueCC, PTMTIMERQUEUE pQue
  * the Hyper-V synthetic timers) would then fire late.  So wake the timer EMT up,
  * or poke it out of the guest, and it works the time out again.
  *
+ * A poke costs the timer EMT an exit, so only do it when the new timer is due
+ * clearly before the deadline the timer EMT worked out (u64TimerEmtDeadline);
+ * timers armed close to it, like guests re-arming short sleeps on every vCPU,
+ * are run in time anyway.
+ *
  * @param   pVM             The cross context VM structure.
+ * @param   pQueue          The queue whose head changed.
+ * @param   u64Expire       The expiration time of the new head (queue clock).
  *
  * @remarks Ring-3 only; the other contexts leave it to the scheduling as before.
  */
-DECL_FORCE_INLINE(void) tmTimerQueueNotifyNewHead(PVMCC pVM)
+DECL_FORCE_INLINE(void) tmTimerQueueNotifyNewHead(PVMCC pVM, PTMTIMERQUEUE pQueue, uint64_t u64Expire)
 {
 #ifdef IN_RING3
     VMCPUID const idTimerCpu = pVM->tm.s.idTimerCpu;
     if (   idTimerCpu < pVM->cCpus
-        && VMMGetCpuId(pVM) != idTimerCpu)
-        VMR3NotifyCpuFFU(pVM->apCpusR3[idTimerCpu]->pUVCpu, VMNOTIFYFF_FLAGS_DONE_REM | VMNOTIFYFF_FLAGS_POKE);
+        && VMMGetCpuId(pVM) != idTimerCpu
+        && u64Expire < UINT64_MAX / 2)
+    {
+        /* Convert to TMCLOCK_VIRTUAL like the deadline (approximately during a catch-up). */
+        uint64_t u64ExpireVirtual;
+        if (pQueue->enmClock == TMCLOCK_VIRTUAL)
+            u64ExpireVirtual = u64Expire;
+        else if (pQueue->enmClock == TMCLOCK_VIRTUAL_SYNC)
+            u64ExpireVirtual = u64Expire + ASMAtomicReadU64(&pVM->tm.s.offVirtualSync);
+        else
+            return; /* The real time and TSC clocks keep the old behaviour. */
+        if (u64ExpireVirtual + TM_NOTIFY_NEW_HEAD_MARGIN_NS < ASMAtomicReadU64(&pVM->tm.s.u64TimerEmtDeadline))
+            VMR3NotifyCpuFFU(pVM->apCpusR3[idTimerCpu]->pUVCpu, VMNOTIFYFF_FLAGS_DONE_REM | VMNOTIFYFF_FLAGS_POKE);
+    }
 #else
-    RT_NOREF(pVM);
+    RT_NOREF(pVM, pQueue, u64Expire);
 #endif
 }
 
@@ -537,7 +560,7 @@ DECL_FORCE_INLINE(void) tmTimerQueueLinkActive(PVMCC pVM, PTMTIMERQUEUECC pQueue
                     tmTimerQueueSetHead(pQueueCC, pQueue, pTimer);
                     ASMAtomicWriteU64(&pQueue->u64Expire, u64Expire);
                     DBGFTRACE_U64_TAG2(pVM, u64Expire, "tmTimerQueueLinkActive head", pTimer->szName);
-                    tmTimerQueueNotifyNewHead(pVM);
+                    tmTimerQueueNotifyNewHead(pVM, pQueue, u64Expire);
                 }
                 tmTimerSetPrev(pQueueCC, pCur, pTimer);
                 return;
@@ -556,7 +579,7 @@ DECL_FORCE_INLINE(void) tmTimerQueueLinkActive(PVMCC pVM, PTMTIMERQUEUECC pQueue
         tmTimerQueueSetHead(pQueueCC, pQueue, pTimer);
         ASMAtomicWriteU64(&pQueue->u64Expire, u64Expire);
         DBGFTRACE_U64_TAG2(pVM, u64Expire, "tmTimerQueueLinkActive empty", pTimer->szName);
-        tmTimerQueueNotifyNewHead(pVM);
+        tmTimerQueueNotifyNewHead(pVM, pQueue, u64Expire);
     }
 }
 
@@ -850,6 +873,9 @@ DECLINLINE(uint64_t) tmTimerPollReturnMiss(PVM pVM, uint64_t u64Now, uint64_t u6
 {
     Assert(!(u64Delta & RT_BIT_64(63)));
 
+    /* The timer EMT runs the timers next at this time (see tmTimerQueueNotifyNewHead). */
+    ASMAtomicWriteU64(&pVM->tm.s.u64TimerEmtDeadline, u64Now + u64Delta);
+
     if (!pVM->tm.s.fVirtualWarpDrive)
     {
         *pu64Delta = u64Delta;
@@ -916,6 +942,7 @@ DECL_FORCE_INLINE(uint64_t) tmTimerPollReturnHit(PVM pVM, PVMCPU pVCpu, PVMCPU p
     STAM_COUNTER_INC(pCounter); NOREF(pCounter);
     if (pVCpuDst != pVCpu)
         return tmTimerPollReturnOtherCpu(pVM, u64Now, pu64Delta);
+    ASMAtomicWriteU64(&pVM->tm.s.u64TimerEmtDeadline, u64Now); /* Runs the timers right away. */
     *pu64Delta = 0;
     return 0;
 }
