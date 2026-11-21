@@ -94,6 +94,13 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Guest accesses to device memory (MMIO) and halts are faster
+          on Windows hosts using Hyper-V as the virtualization engine, as a
+          Hyper-V register that only the Hyper-V APIC needs is no longer read
+          on every state import (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
