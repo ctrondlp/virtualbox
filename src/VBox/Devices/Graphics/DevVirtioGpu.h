@@ -242,6 +242,28 @@ typedef struct VIRTIOGPUSETSCANOUT
 AssertCompileSize(VIRTIOGPUSETSCANOUT, 48);
 typedef const VIRTIOGPUSETSCANOUT *PCVIRTIOGPUSETSCANOUT;
 
+/** VIRTIOGPU_CMD_SET_SCANOUT_BLOB (struct virtio_gpu_set_scanout_blob). */
+typedef struct VIRTIOGPUSETSCANOUTBLOB
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** The part of the buffer shown. */
+    VIRTIOGPURECT       r;
+    uint32_t            idScanout;
+    uint32_t            idResource;
+    /** Size of the whole buffer in pixels. */
+    uint32_t            cx;
+    uint32_t            cy;
+    /** VIRTIOGPU_FORMAT_XXX. */
+    uint32_t            uFormat;
+    uint32_t            uPadding;
+    /** Bytes per row of each plane (only plane 0 is used, the others must be 0). */
+    uint32_t            acbStride[4];
+    /** Byte offset of each plane in the blob (only plane 0 is used, the others must be 0). */
+    uint32_t            aoffPlane[4];
+} VIRTIOGPUSETSCANOUTBLOB;
+AssertCompileSize(VIRTIOGPUSETSCANOUTBLOB, 96);
+typedef const VIRTIOGPUSETSCANOUTBLOB *PCVIRTIOGPUSETSCANOUTBLOB;
+
 /** VIRTIOGPU_CMD_RESOURCE_FLUSH (struct virtio_gpu_resource_flush). */
 typedef struct VIRTIOGPURESOURCEFLUSH
 {
