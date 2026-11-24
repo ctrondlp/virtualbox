@@ -513,6 +513,67 @@ typedef struct VIRTIOGPURESOURCEUNMAPBLOB
 AssertCompileSize(VIRTIOGPURESOURCEUNMAPBLOB, 32);
 typedef const VIRTIOGPURESOURCEUNMAPBLOB *PCVIRTIOGPURESOURCEUNMAPBLOB;
 
+/**
+ * VIRTIOGPU_CMD_RESOURCE_CREATE_3D request (struct virtio_gpu_resource_create_3d).
+ */
+typedef struct VIRTIOGPURESOURCECREATE3D
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** The resource id. */
+    uint32_t            idResource;
+    /** The gallium texture target. */
+    uint32_t            uTarget;
+    /** The format (the same numbers as VIRTIOGPU_FORMAT_XXX, and many more). */
+    uint32_t            uFormat;
+    /** The bind flags. */
+    uint32_t            fBind;
+    /** The size. */
+    uint32_t            cx;
+    uint32_t            cy;
+    uint32_t            cDepth;
+    /** The number of array layers. */
+    uint32_t            cArraySize;
+    /** The last mipmap level. */
+    uint32_t            uLastLevel;
+    /** The number of samples. */
+    uint32_t            cSamples;
+    /** The flags. */
+    uint32_t            fFlags;
+    uint32_t            uPadding;
+} VIRTIOGPURESOURCECREATE3D;
+AssertCompileSize(VIRTIOGPURESOURCECREATE3D, sizeof(VIRTIOGPUCTRLHDR) + 48);
+/** Pointer to a const VIRTIOGPU_CMD_RESOURCE_CREATE_3D request. */
+typedef const VIRTIOGPURESOURCECREATE3D *PCVIRTIOGPURESOURCECREATE3D;
+
+/**
+ * VIRTIOGPU_CMD_TRANSFER_TO_HOST_3D and VIRTIOGPU_CMD_TRANSFER_FROM_HOST_3D
+ * request (struct virtio_gpu_transfer_host_3d).
+ */
+typedef struct VIRTIOGPUTRANSFERHOST3D
+{
+    VIRTIOGPUCTRLHDR    Hdr;
+    /** The part of the resource (struct virtio_gpu_box). */
+    uint32_t            x;
+    uint32_t            y;
+    uint32_t            z;
+    uint32_t            cx;
+    uint32_t            cy;
+    uint32_t            cDepth;
+    /** Where the data is in the guest backing. */
+    uint64_t            offBacking;
+    /** The resource id. */
+    uint32_t            idResource;
+    /** The mipmap level. */
+    uint32_t            uLevel;
+    /** The row stride in the backing, 0 for the default. */
+    uint32_t            cbStride;
+    /** The layer stride in the backing, 0 for the default. */
+    uint32_t            cbLayerStride;
+} VIRTIOGPUTRANSFERHOST3D;
+AssertCompileSize(VIRTIOGPUTRANSFERHOST3D, sizeof(VIRTIOGPUCTRLHDR) + 48);
+/** Pointer to a const 3D transfer request. */
+typedef const VIRTIOGPUTRANSFERHOST3D *PCVIRTIOGPUTRANSFERHOST3D;
+
 /** VIRTIOGPU_CMD_UPDATE_CURSOR / VIRTIOGPU_CMD_MOVE_CURSOR (struct virtio_gpu_update_cursor). */
 typedef struct VIRTIOGPUUPDATECURSOR
 {
