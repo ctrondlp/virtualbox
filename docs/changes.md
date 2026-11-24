@@ -43,6 +43,7 @@ in this fork.
 | `nem-lazy-db-exits` | VMM/NEM/win: Only intercept #DB while debugging (WIP, xcpt-2 TF stepping hangs) | Planned for upstream |
 | `nem-win-restore-drx-after-debugging` | VMM/NEM/win: Reload the guest's debug registers after debugging | Planned for upstream |
 | `virtio-core-restore-queue-select` | VirtIO: Don't refuse to restore a queue select the guest may validly have written | Planned for upstream |
+| `hda-dpbase-upper-half` | Linux guests on the HD Audio controller were silent when their DMA position buffer was above 4 GB of guest memory: writing the lower address register dropped the upper half | Planned for upstream ([details](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop)) |
 
 ## Storage and boot
 

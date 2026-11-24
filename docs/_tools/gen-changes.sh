@@ -38,6 +38,7 @@ Correctness fixes|iem-vcvt-256-source-reg|Planned for upstream
 Correctness fixes|nem-lazy-db-exits|Planned for upstream
 Correctness fixes|nem-win-restore-drx-after-debugging|Planned for upstream
 Correctness fixes|virtio-core-restore-queue-select|Planned for upstream
+Correctness fixes|hda-dpbase-upper-half|Planned for upstream ([details](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop))||Linux guests on the HD Audio controller were silent when their DMA position buffer was above 4 GB of guest memory: writing the lower address register dropped the upper half
 Storage and boot|bios-nvme-boot|Planned for upstream ([storage page](storage.html#1-booting-from-nvme-with-the-bios-firmware))
 Storage and boot|nvme-windows-no-cmb|Planned for upstream ([storage page](storage.html#4-windows-guests-on-an-nvme-controller))
 Networking|nat-throughput|local: it changes the bundled libslirp, so it would go to libslirp first ([speed page](speed.html#7-nat-faster-uploads-from-the-guest))||Guest to host TCP over NAT is faster: libslirp writes the data of a burst of guest packets to the host connection in one call instead of one call per packet (on by default, DeferHostWrites=0 turns it off)

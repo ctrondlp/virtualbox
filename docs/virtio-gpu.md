@@ -136,8 +136,22 @@ How it works:
   before every command, as QEMU does; the device did not. With the call, 30 boots in a row had no refused command and no
   driver crash.
 * **Renderer errors reach the VM log.** The renderer's in-process Vulkan server replaced the process-wide logger with one
-  that discarded everything, which is why the cause above stayed invisible. That is fixed in the renderer, and its warnings
-  and errors now appear in the release log as `VirtioGpu: renderer ...` lines.
+  that discarded everything, which is why the cause above stayed invisible. That is fixed in the renderer. Its warnings and
+  errors, and its information messages (the Vulkan side says at that level why it gives up on a guest program), appear in
+  the release log as `VirtioGpu: renderer ...` lines, each kind of message at most four times, so that routine ones (a line
+  for every program that closes its context) cannot crowd out the one that explains a failure.
+* **Games under gamescope, fixed.** Team Fortress 2 restarted Game mode as soon as it showed its first frames. Gamescope
+  imports the game's swapchain images, and an import of memory that another guest program allocated must use the memory
+  type it was allocated with. The guest picked another type, the NVIDIA driver failed the third import, and the guest's
+  next command named memory that did not exist, so the renderer ended gamescope's context and gamescope aborted. The
+  renderer now records the type and size of shared memory and imports it with them. Team Fortress 2 (Vulkan) then shows
+  its main menu; its intro movie stays black (Escape skips it).
+* **Sound.** SteamOS on the HD Audio controller was silent with 8 GB of RAM. When the guest turned on its DMA position
+  buffer, the HD Audio device dropped the upper half of the buffer's address, so with the buffer above 4 GB Linux saw its
+  playback position stuck at 0 and PipeWire never played anything. This affects any Linux guest on HD Audio whose buffer
+  happens to be above 4 GB, not just SteamOS, and is fixed in the HD Audio device (`hda-dpbase-upper-half` on the
+  [list of changes](changes.html), planned for upstream). Sound is turned on with
+  `VBoxManage modifyvm <vm> --audio-enabled on --audio-controller hda --audio-out on`.
 
 Checks on what a guest can make the host do:
 
@@ -149,8 +163,9 @@ Checks on what a guest can make the host do:
 * The device and renderer changes went through independent code reviews; the defects those found are fixed, a few
   minor notes (speed, clean-up at exit) are not.
 
-Signing in to Steam and downloading a game work. Not tested yet: running a game, host graphics cards other than NVIDIA,
-and Linux hosts (the device logs that OpenGL is not implemented there and stays with Vulkan).
+Signing in to Steam, downloading a game and starting Team Fortress 2 with Vulkan work. Not tested yet: a full game
+session, host graphics cards other than NVIDIA, and Linux hosts (the device logs that OpenGL is not implemented there and
+stays with Vulkan).
 
 ## A simulated Wi-Fi adapter
 
@@ -171,6 +186,9 @@ the device is there and gets a Wi-Fi interface that never finds a network. Frame
 ## Settings
 
 * **VirtioGpu as the display:** `VBoxManage modifyvm <vm> --graphicscontroller virtiogpu --accelerate-3d on`.
+  Pressing OK in the VM's settings keeps it. Before, with 3D Acceleration on, the dialog replaced any graphics controller
+  other than the one recommended for the guest type by the recommended one, without asking, so a Linux VM on VirtioGpu
+  came back on VMSVGA after an unrelated change such as the CPU count.
 * **Compute GPU next to VMSVGA:** `VBoxManage modifyvm <vm> --compute-gpu on` (or *Compute GPU* in Settings → Display)
   adds a second, headless virtio-gpu for Vulkan, while VMSVGA keeps the desktop fast.
 * **Host GPU memory limit:** `VBoxManage modifyvm <vm> --gpu-memory-limit <MB>` (or *GPU Memory Limit* in the Display
