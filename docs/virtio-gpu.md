@@ -101,7 +101,7 @@ device can now offer OpenGL (virgl) next to Vulkan, and the renderer lets the Vu
 
 | Stock SteamOS guest, nothing changed inside it | Vulkan only | With OpenGL |
 |---|---|---|
-| Game mode (gamescope and the Steam interface) | black screen | first-time setup and the Steam sign-in screen, about 45 seconds after power-on |
+| Game mode (gamescope and the Steam interface) | black screen | the Steam interface (first-time setup, sign-in or the library), 40 to 70 seconds after power-on |
 | Plasma desktop | works | works, drawn with host OpenGL |
 | Keyboard and mouse in Game mode | | work |
 
@@ -129,6 +129,15 @@ How it works:
   log) when a buffer imported this way was handed to a compute-only queue marked as coming from a "foreign" owner, which is
   how gamescope hands buffers over. Marking it as "external" instead avoids the fault. Reproduced with a stand-alone host
   program before it was worked around in the renderer.
+* **An intermittent black screen, fixed.** About half of the boots stayed black, and the NVIDIA OpenGL driver crashed now
+  and then. The renderer remembers which of its OpenGL contexts is current, but creating a context leaves the new one
+  current without updating that, so the next commands of the Steam interface ran in the wrong context, failed, and the
+  renderer refused everything Steam sent from then on. Embedders are expected to call `virgl_renderer_force_ctx_0()`
+  before every command, as QEMU does; the device did not. With the call, 30 boots in a row had no refused command and no
+  driver crash.
+* **Renderer errors reach the VM log.** The renderer's in-process Vulkan server replaced the process-wide logger with one
+  that discarded everything, which is why the cause above stayed invisible. That is fixed in the renderer, and its warnings
+  and errors now appear in the release log as `VirtioGpu: renderer ...` lines.
 
 Checks on what a guest can make the host do:
 
@@ -140,8 +149,8 @@ Checks on what a guest can make the host do:
 * The device and renderer changes went through independent code reviews; the defects those found are fixed, a few
   minor notes (speed, clean-up at exit) are not.
 
-Not tested yet: signing in to Steam and running a game, host graphics cards other than NVIDIA, and Linux hosts (the device
-logs that OpenGL is not implemented there and stays with Vulkan).
+Signing in to Steam and downloading a game work. Not tested yet: running a game, host graphics cards other than NVIDIA,
+and Linux hosts (the device logs that OpenGL is not implemented there and stays with Vulkan).
 
 ## A simulated Wi-Fi adapter
 
