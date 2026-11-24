@@ -122,8 +122,9 @@ typedef struct VWIFISIMCC
     VIRTIOCORECC            Virtio;
     /** The device instance. */
     PPDMDEVINS              pDevIns;
-    /** Serializes taking buffers from the transmit queue (any EMT) with a
-     * device reset by the driver. */
+    /** Keeps a device reset by the driver out of the transmit queue while
+     * frames are taken from it.  The device critical section PDM holds around
+     * the callbacks already does that; this states the requirement locally. */
     RTCRITSECT              CritSectTx;
 } VWIFISIMCC;
 /** Pointer to the ring-3 device state. */
@@ -140,6 +141,11 @@ typedef VWIFISIMCC *PVWIFISIMCC;
  */
 static void vwifiSimR3TxDrain(PPDMDEVINS pDevIns, PVWIFISIM pThis, PVWIFISIMCC pThisCC)
 {
+    /* One buffer object serves all the frames: fetching a frame sets it up afresh. */
+    PVIRTQBUF pVirtqBuf = virtioCoreR3VirtqBufAlloc();
+    if (!pVirtqBuf)
+        return;
+
     RTCritSectEnter(&pThisCC->CritSectTx);
     /* The queue size bounds the work one notification can cause. */
     bool fPut = false;
@@ -148,31 +154,24 @@ static void vwifiSimR3TxDrain(PPDMDEVINS pDevIns, PVWIFISIM pThis, PVWIFISIMCC p
         if (   !ASMAtomicReadBool(&pThis->fVirtioReady)
             || !virtioCoreIsVirtqEnabled(&pThis->Virtio, VWIFISIM_VIRTQ_TX))
             break;
-        PVIRTQBUF pVirtqBuf = virtioCoreR3VirtqBufAlloc();
-        if (!pVirtqBuf)
-            break;
         int rc = virtioCoreR3VirtqAvailBufGet(pDevIns, &pThis->Virtio, VWIFISIM_VIRTQ_TX, pVirtqBuf, true /*fRemove*/);
         if (RT_SUCCESS(rc))
-        {
             rc = virtioCoreR3VirtqUsedBufPut(pDevIns, &pThis->Virtio, VWIFISIM_VIRTQ_TX, (PRTSGBUF)NULL, pVirtqBuf,
                                              true /*fFence*/);
-            if (RT_SUCCESS(rc))
-            {
-                fPut = true;
-                STAM_REL_COUNTER_INC(&pThis->StatTxDropped);
-            }
-        }
-        virtioCoreR3VirtqBufRelease(&pThis->Virtio, pVirtqBuf);
         if (RT_FAILURE(rc)) /* VERR_NOT_AVAILABLE: the queue is empty. */
         {
             if (rc != VERR_NOT_AVAILABLE)
                 LogRelMax(16, ("%s: Taking a frame from the transmit queue failed: %Rrc\n", pThis->szInstance, rc));
             break;
         }
+        fPut = true;
+        STAM_REL_COUNTER_INC(&pThis->StatTxDropped);
     }
     if (fPut)
         virtioCoreVirtqUsedRingSync(pDevIns, &pThis->Virtio, VWIFISIM_VIRTQ_TX);
     RTCritSectLeave(&pThisCC->CritSectTx);
+
+    virtioCoreR3VirtqBufRelease(&pThis->Virtio, pVirtqBuf);
 }
 
 
