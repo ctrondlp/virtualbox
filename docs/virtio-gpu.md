@@ -7,7 +7,8 @@ title: virtio-gpu
 
 A new graphics controller, **VirtioGpu**. As a 2D display it replaces the VGA-style device. With **3D Acceleration** ticked
 (Settings → Display, or `VBoxManage modifyvm <vm> --accelerate-3d on`), a Linux guest with the Mesa Venus driver sees the
-host's graphics card as a Vulkan device, so it can run Vulkan programs and GPU compute such as llama.cpp.
+host's graphics card as a Vulkan device, so it can run Vulkan programs and GPU compute such as llama.cpp. It can also offer
+OpenGL, which is what makes [stock SteamOS](#opengl-for-steamos-game-mode-and-desktop) work in Game mode.
 
 ## Results
 
@@ -92,6 +93,69 @@ Windowed vkmark scored 213–277 through virtio-gpu and 933 on the CPU renderer,
 to the guest compositor. Off-screen Vulkan is fast (vkcube about 800 frames per second). So: virtio-gpu for compute and
 off-screen Vulkan, VMSVGA for the desktop.
 
+## OpenGL for SteamOS (Game mode and desktop)
+
+Stock SteamOS showed a black screen in Game mode on the Vulkan-only device. Its compositor (gamescope) uses Vulkan, but
+everything it shows (Xwayland, the Steam client, the overlay) draws with OpenGL, and the two could not exchange buffers. The
+device can now offer OpenGL (virgl) next to Vulkan, and the renderer lets the Vulkan side use what the OpenGL side draws.
+
+| Stock SteamOS guest, nothing changed inside it | Vulkan only | With OpenGL |
+|---|---|---|
+| Game mode (gamescope and the Steam interface) | black screen | first-time setup and the Steam sign-in screen, about 45 seconds after power-on |
+| Plasma desktop | works | works, drawn with host OpenGL |
+| Keyboard and mouse in Game mode | | work |
+
+* Tested with SteamOS 3.8.14 and 3.9.5 on a Windows 11 host with an RTX 5070. The guest updated itself from 3.8 to 3.9
+  through the first-time setup.
+* **Turn it on** per VM: `VBoxManage setextradata <vm> VBoxInternal/Devices/virtio-gpu/0/Config/Virgl 1`. It is off by
+  default, needs 3D Acceleration, and works on Windows hosts only so far.
+* It needs the renderer library built from the branch
+  [`vbox-venus-virgl`](https://github.com/ctrondlp/winq-emu-virglrenderer/tree/vbox-venus-virgl) of the renderer fork.
+
+How it works:
+
+* The device offers the two OpenGL capability sets and the commands that go with them: OpenGL resources, transfers between
+  a resource and guest memory, and OpenGL contexts. The renderer library runs them on OpenGL contexts of the host driver.
+* **Shared buffers without copies.** A texture the guest marks as shared or as a screen buffer gets its storage from Vulkan
+  memory. When the guest's Vulkan compositor imports that buffer, the renderer gives it the same memory, with an image laid
+  out the way the OpenGL driver stores it. The guest believes the buffer is a plain row-by-row image; the host replaces
+  that image when it is bound.
+* **A desktop drawn with OpenGL** (Plasma) is read back from the host card into the display's shadow buffer whenever the
+  guest flushes a part of the screen.
+* **A graphics driver fault found on the way.** The NVIDIA driver lost the Vulkan device (event 13 in the Windows system
+  log) when a buffer imported this way was handed to a compute-only queue marked as coming from a "foreign" owner, which is
+  how gamescope hands buffers over. Marking it as "external" instead avoids the fault. Reproduced with a stand-alone host
+  program before it was worked around in the renderer.
+
+Checks on what a guest can make the host do:
+
+* The guest's image must fit the texture's memory (size, offset, format and use), or the bind fails. Sharing is refused when
+  the guest's Vulkan device is on another graphics card than the one OpenGL renders with.
+* At most 65,536 OpenGL resources, one million guest pages kept mapped as their backing, and 4,096 shared textures at a
+  time. The GPU memory limit (below) also covers the estimated size of the OpenGL resources: with a 64 MB limit the guest's
+  further allocations were refused and the VM kept running.
+* The device and renderer changes went through independent code reviews; the defects those found are fixed, a few
+  minor notes (speed, clean-up at exit) are not.
+
+Not tested yet: signing in to Steam and running a game, host graphics cards other than NVIDIA, and Linux hosts (the device
+logs that OpenGL is not implemented there and stays with Vulkan).
+
+## A simulated Wi-Fi adapter
+
+SteamOS 3.8 has a bug on machines without a Wi-Fi adapter: when Steam starts in Game mode, a system helper stops the
+network service, fails to create a Wi-Fi interface and exits before starting the service again. The first-time setup then
+says "No networks found" although the wired connection works, and cannot continue. SteamOS 3.9.5 no longer does this.
+
+A small new device, `virtio-wifi-sim`, gives Linux guests a Wi-Fi adapter without emulating radio hardware. It is the
+virtio transport of the simulated radio driver Linux already ships (`mac80211_hwsim`): the guest loads the driver because
+the device is there and gets a Wi-Fi interface that never finds a network. Frames the guest transmits are dropped unread.
+
+* With it, the first-time setup of stock SteamOS 3.8.14 lists "Wired connection 1" and continues.
+* It is added per VM with extra data (there is no setting in the GUI yet):
+  `VBoxManage setextradata <vm> VBoxInternal/Devices/virtio-wifi-sim/0/Trusted 1`, and the same with `PCIBusNo 0`,
+  `PCIDeviceNo 28` and `PCIFunctionNo 0`.
+* Not tested: saving the VM state with it, and guests other than SteamOS.
+
 ## Settings
 
 * **VirtioGpu as the display:** `VBoxManage modifyvm <vm> --graphicscontroller virtiogpu --accelerate-3d on`.
@@ -100,6 +164,8 @@ off-screen Vulkan, VMSVGA for the desktop.
 * **Host GPU memory limit:** `VBoxManage modifyvm <vm> --gpu-memory-limit <MB>` (or *GPU Memory Limit* in the Display
   settings), 0 for none. An allocation over the limit fails in the guest as it does when the card is full.
 * `VBoxManage debugvm <vm> info virtiogpu` shows how much host GPU memory the guest holds against the limit.
+* **OpenGL next to Vulkan:** `VBoxManage setextradata <vm> VBoxInternal/Devices/virtio-gpu/0/Config/Virgl 1`
+  ([above](#opengl-for-steamos-game-mode-and-desktop)).
 
 ## How it works
 
@@ -181,7 +247,8 @@ device was empty again and the VM was still running; on a fresh guest the guest 
 * Generation speed is 44–71 % of running the model on the host (see above), more for larger models. Prompt processing is
   65–99 %.
 * The results were measured on a Windows host with an NVIDIA card and a development build without the kernel driver.
-* The VM state cannot be saved while a guest program uses Vulkan on the host card, and there is one monitor.
+* The VM state cannot be saved while a guest program uses Vulkan or OpenGL on the host card, and there is one monitor.
+* OpenGL (virgl) works on Windows hosts only and was tested with an NVIDIA card and SteamOS guests only.
 * Zink (OpenGL over Vulkan) needs a recent guest Mesa. Fedora 44's 26.0.3 fails with "failed to choose pdev" (the Venus device
   does not tell it which display node it belongs to); after upgrading to Mesa 26.2.6 it picks the NVIDIA device and
   `glxinfo` reports the RTX 5070. Windowed OpenGL also needs `MESA_VK_WSI_DEBUG=sw` (below). Nothing in VirtualBox had to change.

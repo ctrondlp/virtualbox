@@ -56,12 +56,14 @@ in this fork.
 | Branch | What it does | Status |
 |---|---|---|
 | `nat-throughput` | Guest to host TCP over NAT is faster: libslirp writes the data of a burst of guest packets to the host connection in one call instead of one call per packet (on by default, DeferHostWrites=0 turns it off) | local: it changes the bundled libslirp, so it would go to libslirp first ([speed page](speed.html#7-nat-faster-uploads-from-the-guest)) |
+| `virtio-hwsim-wifi` | A simulated Wi-Fi adapter for Linux guests (the virtio transport of mac80211_hwsim) that never finds a network, for guests that misbehave without a Wi-Fi adapter such as the first-time setup of SteamOS 3.8 | local: experimental, may be offered later ([details](virtio-gpu.html#a-simulated-wi-fi-adapter)) |
 
 ## Graphics
 
 | Branch | What it does | Status |
 |---|---|---|
 | `virtio-gpu-device` | A virtio-gpu graphics device: 2D display and Vulkan 3D (Venus) for Linux guests, with the EFI driver, API, GUI and VBoxManage support; a compute-only second GPU next to VMSVGA, a limit for the host GPU memory a guest can take, saved states while no Vulkan program runs, and a halt poll hint that makes LLM token generation 60-80% faster (see the virtio-gpu page) | local: large and experimental, may be offered later ([virtio-gpu page](virtio-gpu.html)) |
+| `virtio-gpu-virgl` | OpenGL (virgl) next to Vulkan on the virtio-gpu device, so guests that draw with OpenGL and composite with Vulkan work: stock SteamOS runs Game mode and the Plasma desktop (off by default, turned on with extra data) | local: experimental, Windows hosts only so far ([virtio-gpu page](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop)) |
 | `vmsvga-dx11-gpu-select` | Devices/Graphics/VMSVGA: Create the DX11 device on the high performance GPU, selectable with VMSVGA3dAdapter | Planned for upstream |
 | `devvga-wide-scanline` | DevVGA: Check all pages of a scanline for changes in wide display modes | Planned for upstream |
 

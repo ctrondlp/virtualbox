@@ -75,6 +75,11 @@ by the host timer. Any VM can get the Vulkan GPU as a second, compute-only devic
 (`VBoxManage modifyvm --compute-gpu on`), the host GPU memory a guest can take can be limited (`--gpu-memory-limit`), and
 the VM state can be saved while no Vulkan program runs in the guest.
 
+**Stock SteamOS runs in Game mode.** The device can also offer OpenGL next to Vulkan (off by default, Windows hosts). SteamOS
+draws with OpenGL and composites with Vulkan, so with Vulkan alone its Game mode stayed black; now gamescope and the Steam
+interface come up on an unmodified guest, and so does the Plasma desktop
+([details](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop)). Running a game has not been tested yet.
+
 For ordinary desktop graphics VMSVGA is still better, and the page says so with numbers.
 
 ## macOS guests
@@ -108,6 +113,9 @@ recognised. See the [CPU page](cpu.html).
 * **Saved states.** A running virtio-SCSI VM could be saved but not restored; that works now.
 * **NAT.** Guest to host uploads over NAT went from 1.67 to 2.09 Gbit/s on one connection and from about 1 to 4.5 Gbit/s on
   eight parallel ones. Downloads are limited by the guest and did not change.
+* **A simulated Wi-Fi adapter.** Some Linux guests misbehave without a Wi-Fi adapter: the first-time setup of SteamOS 3.8
+  finds no network at all. A small new device gives the guest a Wi-Fi interface that never finds a network, and the setup
+  then continues over the wired connection ([details](virtio-gpu.html#a-simulated-wi-fi-adapter)).
 
 The [storage page](storage.html) and the [speed page](speed.html#7-nat-faster-uploads-from-the-guest) have the details and
 the measurements.
