@@ -39,6 +39,7 @@
           <li>
             <p><b outputclass="bold">VirtioGpu:</b> Use this graphics controller to emulate a 2D virtio-gpu display device, for guests that have a virtio-gpu driver, such as recent Linux guests. It has no VGA compatibility: guests that boot with the 64-bit EFI firmware get a display from the firmware's virtio-gpu driver, but with the BIOS the VM shows nothing until the guest OS loads its virtio-gpu driver.</p>
             <p>3D acceleration is experimental for this graphics controller. With it, Linux guests with the Mesa Venus driver can use the Vulkan capabilities of the host graphics card. The state of a VM that uses this controller can be saved, but not while a program in the guest uses Vulkan on the host graphics card: close such programs first.</p>
+            <p>On Windows hosts the controller can also offer OpenGL (virgl) to the guest next to Vulkan, for guests whose desktop needs OpenGL, such as SteamOS. This is experimental and off by default. To turn it on for a VM, run <userinput>VBoxManage setextradata <varname>VM</varname> VBoxInternal/Devices/virtio-gpu/0/Config/Virgl 1</userinput>. The state of the VM cannot be saved while the guest uses OpenGL on the host graphics card.</p>
           </li>
           <li>
             <p><b outputclass="bold">None:</b> Does not emulate a graphics adapter type.</p>
