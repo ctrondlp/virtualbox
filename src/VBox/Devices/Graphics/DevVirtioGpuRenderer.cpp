@@ -299,9 +299,16 @@ typedef struct VGPUVIRGLFNS
     DECLCALLBACKMEMBER(void,     pfnSetVkMemoryLimit,(uint64_t cbLimit));
     /** virgl_renderer_get_vk_memory_used: what counts against that limit. */
     DECLCALLBACKMEMBER(uint64_t, pfnGetVkMemoryUsed,(void));
+    /** virgl_set_log_callback: where the library sends its messages (it writes to stderr otherwise).
+     * The first callback argument is enum virgl_log_level_flags. */
+    DECLCALLBACKMEMBER(void,     pfnSetLogCallback,(void (*pfnLog)(int iLevel, const char *pszMsg, void *pvUser), void *pvUser,
+                                                    void (*pfnFreeUser)(void *pvUser)));
     /** @} */
     /** @name OpenGL (virgl), all of them are needed for it (see g_aVirglGlSymbols).
      * @{ */
+    /** virgl_renderer_force_ctx_0: forget which OpenGL context is current and make the library's own
+     * (context 0) current, see vgpuR3RendererExec. */
+    DECLCALLBACKMEMBER(void, pfnForceCtx0,(void));
     /** virgl_renderer_resource_create (:278), without a backing. */
     DECLCALLBACKMEMBER(int,  pfnResourceCreate,(const VGPURENDERERCREATE3D *pArgs, VGPURENDERERIOV *paIov, uint32_t cIov));
     /** virgl_renderer_resource_attach_iov (:331): the library keeps the pointer to the array. */
@@ -355,6 +362,7 @@ static const struct
 {
     { "virgl_renderer_set_vk_memory_limit",         RT_UOFFSETOF(VGPUVIRGLFNS, pfnSetVkMemoryLimit) },
     { "virgl_renderer_get_vk_memory_used",          RT_UOFFSETOF(VGPUVIRGLFNS, pfnGetVkMemoryUsed) },
+    { "virgl_set_log_callback",                     RT_UOFFSETOF(VGPUVIRGLFNS, pfnSetLogCallback) },
 };
 
 /** Symbols needed for OpenGL (virgl); without them only Venus is offered. */
@@ -370,6 +378,7 @@ static const struct
     { "virgl_renderer_transfer_read_iov",           RT_UOFFSETOF(VGPUVIRGLFNS, pfnTransferReadIov) },
     { "virgl_renderer_transfer_write_iov",          RT_UOFFSETOF(VGPUVIRGLFNS, pfnTransferWriteIov) },
     { "virgl_renderer_poll",                        RT_UOFFSETOF(VGPUVIRGLFNS, pfnPoll) },
+    { "virgl_renderer_force_ctx_0",                 RT_UOFFSETOF(VGPUVIRGLFNS, pfnForceCtx0) },
 };
 
 
@@ -891,6 +900,32 @@ static int vgpuR3RendererFetchCapset(PVGPURENDERER pThis, unsigned iSlot, uint32
 }
 
 
+/** VIRGL_LOG_LEVEL_WARNING of enum virgl_log_level_flags; errors are one above. */
+#define VGPU_VIRGL_LOG_LEVEL_WARNING    2
+
+/**
+ * Log callback of the renderer library (virgl_log_callback_type), called on
+ * any of its threads.
+ *
+ * @param   iLevel      enum virgl_log_level_flags.
+ * @param   pszMsg      The message; what it says about guest objects comes from
+ *                      the guest.
+ * @param   pvUser      Unused.
+ */
+static void vgpuR3RendererLibLog(int iLevel, const char *pszMsg, void *pvUser)
+{
+    RT_NOREF(pvUser);
+    if (iLevel < VGPU_VIRGL_LOG_LEVEL_WARNING || !pszMsg)
+        return;
+    /* A guest can make the library complain as often as it likes. */
+    size_t cch = strlen(pszMsg);
+    while (cch > 0 && (pszMsg[cch - 1] == '\n' || pszMsg[cch - 1] == '\r'))
+        cch--;
+    LogRelMax(256, ("VirtioGpu: renderer %s: %.*s\n", iLevel == VGPU_VIRGL_LOG_LEVEL_WARNING ? "warning" : "error",
+                    (int)RT_MIN(cch, 400), pszMsg));
+}
+
+
 /**
  * Initializes the library and fetches the capsets.  Renderer thread.
  *
@@ -930,6 +965,11 @@ static int vgpuR3RendererExecInit(PVGPURENDERER pThis)
 #endif
     if (!fVirgl)
         fFlags |= VGPU_VIRGL_RENDERER_NO_VIRGL;
+
+    /* The library's warnings and errors go to the release log: they say why it rejects a command
+       stream or gives up on a context, which otherwise only shows as a failed submit or a black guest. */
+    if (pThis->Fns.pfnSetLogCallback)
+        pThis->Fns.pfnSetLogCallback(vgpuR3RendererLibLog, NULL /*pvUser*/, NULL /*pfnFreeUser*/);
 
     int iRc = pThis->Fns.pfnInit(pThis, (int)fFlags, &pThis->Callbacks);
     if (iRc != 0)
@@ -1007,6 +1047,15 @@ static void vgpuR3RendererExec(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
         pReq->rc = VERR_INVALID_STATE;
         return;
     }
+
+    /* The library remembers which of its OpenGL contexts is current, but some of its calls make
+       another one current without updating that: creating a context leaves the new one current.  The
+       commands of the context it believes to be current then run in the wrong OpenGL context, where
+       its vertex arrays and framebuffers do not exist (GL_INVALID_OPERATION), and the library
+       refuses everything the guest sends for it from then on.  Embedders are expected to reset this
+       before every call, as QEMU does: then the next call for a context really makes it current. */
+    if (pThis->fVirgl)
+        pThis->Fns.pfnForceCtx0();
 
     int iRc = 0;
     switch (pReq->enmType)
