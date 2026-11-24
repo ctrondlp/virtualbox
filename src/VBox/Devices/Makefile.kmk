@@ -620,7 +620,8 @@ if !defined(VBOX_ONLY_EXTPACKS) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SU
   VBoxDD_DEFS           += VBOX_WITH_VIRTIO
   VBoxDD_SOURCES        += \
   	VirtIO/VirtioCore.cpp \
-  	Network/DevVirtioNet.cpp
+  	Network/DevVirtioNet.cpp \
+  	Network/DevVirtioWifiSim.cpp
  endif
 
  ifdef VBOX_WITH_UDPTUNNEL
