@@ -145,13 +145,15 @@ How it works:
   type it was allocated with. The guest picked another type, the NVIDIA driver failed the third import, and the guest's
   next command named memory that did not exist, so the renderer ended gamescope's context and gamescope aborted. The
   renderer now records the type and size of shared memory and imports it with them. Team Fortress 2 (Vulkan) then shows
-  its main menu; its intro movie stays black (Escape skips it).
+  its intro movie and main menu.
 * **Sound.** SteamOS on the HD Audio controller was silent with 8 GB of RAM. When the guest turned on its DMA position
   buffer, the HD Audio device dropped the upper half of the buffer's address, so with the buffer above 4 GB Linux saw its
   playback position stuck at 0 and PipeWire never played anything. This affects any Linux guest on HD Audio whose buffer
   happens to be above 4 GB, not just SteamOS, and is fixed in the HD Audio device (`hda-dpbase-upper-half` on the
   [list of changes](changes.html), planned for upstream). Sound is turned on with
-  `VBoxManage modifyvm <vm> --audio-enabled on --audio-controller hda --audio-out on`.
+  `VBoxManage modifyvm <vm> --audio-enabled on --audio-controller hda --audio-out on`. The fix also brought back the
+  intro movie of Team Fortress 2: while the playback position was stuck, the game ran its movie loop without drawing a
+  frame and the screen stayed black; with sound working, the movie plays.
 
 Checks on what a guest can make the host do:
 
