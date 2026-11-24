@@ -2351,7 +2351,10 @@ static VBOXSTRICTRC hdaRegWriteBase(PPDMDEVINS pDevIns, PHDASTATE pThis, uint32_
             pThis->u64RIRBBase |= (uint64_t)pThis->au32Regs[iRegMem] << 32;
             break;
         case HDA_REG_DPLBASE:
-            pThis->u64DPBase = pThis->au32Regs[iRegMem] & DPBASE_ADDR_MASK;
+            /* Keep the upper half: a guest enables or disables the buffer by
+               writing the lower register alone (Linux does so after setting
+               both), and the buffer can be above 4 GiB. */
+            pThis->u64DPBase = RT_MAKE_U64(pThis->au32Regs[iRegMem] & DPBASE_ADDR_MASK, RT_HI_U32(pThis->u64DPBase));
             Assert(pThis->u64DPBase % 128 == 0); /* Must be 128-byte aligned. */
 
             /* Also make sure to handle the DMA position enable bit. */

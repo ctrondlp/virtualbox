@@ -72,6 +72,7 @@
 #include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/critsect.h>
+#include <iprt/ctype.h>
 #include <iprt/env.h>
 #include <iprt/errcore.h>
 #include <iprt/ldr.h>
@@ -900,8 +901,56 @@ static int vgpuR3RendererFetchCapset(PVGPURENDERER pThis, unsigned iSlot, uint32
 }
 
 
-/** VIRGL_LOG_LEVEL_WARNING of enum virgl_log_level_flags; errors are one above. */
+/** VIRGL_LOG_LEVEL_INFO and VIRGL_LOG_LEVEL_WARNING of enum
+ * virgl_log_level_flags; debug is below, errors are above. */
+#define VGPU_VIRGL_LOG_LEVEL_INFO       1
 #define VGPU_VIRGL_LOG_LEVEL_WARNING    2
+
+/** How many kinds of renderer messages vgpuR3RendererLibLog tells apart; a kind
+ * is the level and the text of a message without its digits. */
+#define VGPU_RENDERER_LOG_KINDS         64
+/** How many messages of each kind are logged. */
+#define VGPU_RENDERER_LOG_PER_KIND      4
+
+/** The kinds of renderer messages seen (hashes, 0 for a free slot) and how many
+ * of each.  The library is loaded once per VM process and its log callback has
+ * no device instance, hence global; a race between two threads costs at most a
+ * line too many or too few. */
+static uint32_t volatile g_auVgpuRendererLogKinds[VGPU_RENDERER_LOG_KINDS];
+/** Messages seen per kind, see g_auVgpuRendererLogKinds. */
+static uint32_t volatile g_acVgpuRendererLogKinds[VGPU_RENDERER_LOG_KINDS];
+
+/**
+ * Counts a renderer message by its kind.
+ *
+ * @returns The number of messages of this kind seen so far, this one included;
+ *          1 when the table of kinds is full.
+ * @param   iLevel      enum virgl_log_level_flags.
+ * @param   pszMsg      The message.
+ * @param   cch         The length of the message.
+ */
+static uint32_t vgpuR3RendererLogCountKind(int iLevel, const char *pszMsg, size_t cch)
+{
+    /* FNV-1a over the level and the text without digits, so that messages that
+       only differ in ids and sizes are of one kind. */
+    uint32_t uHash = (UINT32_C(2166136261) ^ (uint32_t)iLevel) * UINT32_C(16777619);
+    for (size_t off = 0; off < cch; off++)
+        if (!RT_C_IS_DIGIT(pszMsg[off]))
+            uHash = (uHash ^ (uint8_t)pszMsg[off]) * UINT32_C(16777619);
+    if (!uHash)
+        uHash = 1;
+
+    for (uint32_t i = 0; i < RT_ELEMENTS(g_auVgpuRendererLogKinds); i++)
+    {
+        uint32_t const uKind = ASMAtomicReadU32(&g_auVgpuRendererLogKinds[i]);
+        if (   uKind == uHash
+            || (   !uKind
+                && (   ASMAtomicCmpXchgU32(&g_auVgpuRendererLogKinds[i], uHash, 0)
+                    || ASMAtomicReadU32(&g_auVgpuRendererLogKinds[i]) == uHash)))
+            return ASMAtomicIncU32(&g_acVgpuRendererLogKinds[i]);
+    }
+    return 1;
+}
 
 /**
  * Log callback of the renderer library (virgl_log_callback_type), called on
@@ -915,14 +964,26 @@ static int vgpuR3RendererFetchCapset(PVGPURENDERER pThis, unsigned iSlot, uint32
 static void vgpuR3RendererLibLog(int iLevel, const char *pszMsg, void *pvUser)
 {
     RT_NOREF(pvUser);
-    if (iLevel < VGPU_VIRGL_LOG_LEVEL_WARNING || !pszMsg)
+    if (iLevel < VGPU_VIRGL_LOG_LEVEL_INFO || !pszMsg)
         return;
-    /* A guest can make the library complain as often as it likes. */
     size_t cch = strlen(pszMsg);
     while (cch > 0 && (pszMsg[cch - 1] == '\n' || pszMsg[cch - 1] == '\r'))
         cch--;
-    LogRelMax(256, ("VirtioGpu: renderer %s: %.*s\n", iLevel == VGPU_VIRGL_LOG_LEVEL_WARNING ? "warning" : "error",
-                    (int)RT_MIN(cch, 400), pszMsg));
+
+    /* A guest can make the library repeat itself as often as it likes: every
+       context a program closes and every device it leaks gets a line.  So only
+       the first few messages of each kind are logged, and routine ones cannot
+       use up the budget before the one that explains a failure (the Venus part
+       says why it gives up on a guest context at the information level). */
+    uint32_t const cSeen = vgpuR3RendererLogCountKind(iLevel, pszMsg, cch);
+    if (cSeen > VGPU_RENDERER_LOG_PER_KIND)
+        return;
+    const char *pszMore = cSeen == VGPU_RENDERER_LOG_PER_KIND ? " (further messages like this are not logged)" : "";
+    if (iLevel == VGPU_VIRGL_LOG_LEVEL_INFO)
+        LogRelMax(128, ("VirtioGpu: renderer info: %.*s%s\n", (int)RT_MIN(cch, 400), pszMsg, pszMore));
+    else
+        LogRelMax(256, ("VirtioGpu: renderer %s: %.*s%s\n", iLevel == VGPU_VIRGL_LOG_LEVEL_WARNING ? "warning" : "error",
+                        (int)RT_MIN(cch, 400), pszMsg, pszMore));
 }
 
 

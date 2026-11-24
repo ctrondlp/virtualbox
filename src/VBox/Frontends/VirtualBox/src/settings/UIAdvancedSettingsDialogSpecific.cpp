@@ -458,9 +458,12 @@ void UIAdvancedSettingsDialogMachine::save()
 #endif /* VBOX_WITH_3D_ACCELERATION */
 
 #ifdef VBOX_WITH_3D_ACCELERATION
-        /* Adjust graphics controller type if necessary: */
+        /* Adjust graphics controller type if necessary.  The virtio-gpu provides
+         * 3D acceleration itself (Venus), so it is kept, as the Display page
+         * validation does: */
         if (   pDisplayPage
             && pDisplayPage->isAcceleration3DSelected()
+            && pDisplayPage->graphicsControllerTypeCurrent() != KGraphicsControllerType_VirtioGpu
             && pDisplayPage->graphicsControllerTypeCurrent() != pDisplayPage->graphicsControllerTypeRecommended())
             m_machine.GetGraphicsAdapter().SetGraphicsControllerType(pDisplayPage->graphicsControllerTypeRecommended());
 #endif /* VBOX_WITH_3D_ACCELERATION */
