@@ -78,7 +78,8 @@ the VM state can be saved while no Vulkan program runs in the guest.
 **Stock SteamOS runs in Game mode.** The device can also offer OpenGL next to Vulkan (off by default, Windows hosts). SteamOS
 draws with OpenGL and composites with Vulkan, so with Vulkan alone its Game mode stayed black; now gamescope and the Steam
 interface come up on an unmodified guest, and so does the Plasma desktop
-([details](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop)). Running a game has not been tested yet.
+([details](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop)). Running a game has not been tested yet. The renderer side is offered upstream as
+[pull request 2](https://github.com/cmspam/winq-emu-virglrenderer/pull/2) of the winq renderer.
 
 For ordinary desktop graphics VMSVGA is still better, and the page says so with numbers.
 

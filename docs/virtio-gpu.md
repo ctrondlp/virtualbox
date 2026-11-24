@@ -111,6 +111,9 @@ device can now offer OpenGL (virgl) next to Vulkan, and the renderer lets the Vu
   default, needs 3D Acceleration, and works on Windows hosts only so far.
 * It needs the renderer library built from the branch
   [`vbox-venus-virgl`](https://github.com/ctrondlp/winq-emu-virglrenderer/tree/vbox-venus-virgl) of the renderer fork.
+  The renderer changes are offered to the renderer's maintainer as
+  [pull request 2, "Share OpenGL (vrend) textures with Venus on Windows"](https://github.com/cmspam/winq-emu-virglrenderer/pull/2)
+  (open, not merged yet).
 
 How it works:
 
