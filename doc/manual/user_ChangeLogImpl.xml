@@ -119,6 +119,17 @@ Rules for adding a changelog entry to make them look more uniform:
           (github:gh-NNN)</para>
       </listitem>
 
+      <listitem>
+        <para>Network: Added a simulated Wi-Fi radio for Linux guests
+          (virtio-wifi-sim, the virtio transport of the mac80211_hwsim
+          driver). The guest gets Wi-Fi interfaces that never find a
+          network, for guests that do not work properly without a Wi-Fi
+          adapter, such as the first-time setup of SteamOS 3.8. It is
+          experimental and added per VM with VBoxManage setextradata
+          (VBoxInternal/Devices/virtio-wifi-sim/0/ with Trusted, PCIBusNo,
+          PCIDeviceNo and PCIFunctionNo) (github:gh-NNN)</para>
+      </listitem>
+
     </itemizedlist>
 
     <para>In addition, the following items were fixed or added:</para>

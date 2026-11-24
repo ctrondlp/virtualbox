@@ -125,6 +125,9 @@ extern "C" DECLEXPORT(int) VBoxDevicesRegister(PPDMDEVREGCB pCallbacks, uint32_t
     rc = pCallbacks->pfnRegister(pCallbacks, &g_DeviceVirtioNet);
     if (RT_FAILURE(rc))
         return rc;
+    rc = pCallbacks->pfnRegister(pCallbacks, &g_DeviceVirtioWifiSim);
+    if (RT_FAILURE(rc))
+        return rc;
 #endif
     rc = pCallbacks->pfnRegister(pCallbacks, &g_DeviceDP8390);
     if (RT_FAILURE(rc))

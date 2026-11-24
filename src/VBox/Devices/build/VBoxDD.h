@@ -65,6 +65,7 @@ extern const PDMDEVREG g_DeviceE1000;
 #endif
 #ifdef VBOX_WITH_VIRTIO
 extern const PDMDEVREG g_DeviceVirtioNet;
+extern const PDMDEVREG g_DeviceVirtioWifiSim;
 #endif
 extern const PDMDEVREG g_DeviceDP8390;
 extern const PDMDEVREG g_Device3C501;
