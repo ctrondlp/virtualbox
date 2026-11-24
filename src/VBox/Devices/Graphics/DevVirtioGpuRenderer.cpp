@@ -50,6 +50,16 @@
  *    briefly after virgl_renderer_cleanup().  For the same reason no log
  *    callback is installed: it would point into VBoxDD, which is unloaded
  *    when the VM is destroyed.
+ *
+ *  - OpenGL (virgl) is optional.  The library renders the guest's OpenGL
+ *    with the host's OpenGL and asks its user for the contexts.  On Windows
+ *    hosts they are WGL contexts on a hidden message-only window owned by the
+ *    renderer thread.  All of them share objects with one root context that is
+ *    never current and lives as long as the library is initialized: the
+ *    library destroys the first context it creates again, so that one cannot
+ *    be the share partner.  The library makes one of the contexts current on
+ *    its own fence thread; WGL allows that for a device context of another
+ *    thread.  There is no implementation for other hosts yet.
  */
 
 
@@ -70,6 +80,9 @@
 #include <iprt/string.h>
 #include <iprt/thread.h>
 #include <iprt/time.h>
+#ifdef RT_OS_WINDOWS
+# include <iprt/win/windows.h>
+#endif
 
 #include "DevVirtioGpu.h"
 #include "DevVirtioGpuRenderer.h"
@@ -119,6 +132,11 @@
 #define VGPU_VIRGL_CONTEXT_FLAG_CAPSET_ID_MASK  UINT32_C(0xff)
 /** VIRTGPU_DRM_CAPSET_VENUS (virtgpu_drm.h:169). */
 #define VGPU_VIRGL_CAPSET_VENUS                 4
+/** VIRTGPU_DRM_CAPSET_VIRGL and VIRTGPU_DRM_CAPSET_VIRGL2: OpenGL. */
+#define VGPU_VIRGL_CAPSET_VIRGL                 1
+#define VGPU_VIRGL_CAPSET_VIRGL2                2
+/** The number of capsets kept (virgl, virgl2, Venus). */
+#define VGPU_VIRGL_CAPSET_COUNT                 3
 
 /** @name errno values the library returns (positive or negated).
  * The values are the same in the MinGW and the Microsoft C runtimes.
@@ -128,6 +146,8 @@
 /** @} */
 
 AssertCompile(VGPU_VIRGL_CAPSET_VENUS == VIRTIOGPU_CAPSET_VENUS);
+AssertCompile(VGPU_VIRGL_CAPSET_VIRGL == VIRTIOGPU_CAPSET_VIRGL);
+AssertCompile(VGPU_VIRGL_CAPSET_VIRGL2 == VIRTIOGPU_CAPSET_VIRGL2);
 AssertCompile(VGPU_VIRGL_CONTEXT_FLAG_CAPSET_ID_MASK == VIRTIOGPU_CONTEXT_INIT_CAPSET_ID_MASK);
 AssertCompile(VGPU_VIRGL_MAP_CACHE_MASK == VIRTIOGPU_MAP_CACHE_MASK);
 /* The library takes the virtio blob memory types and flags unchanged (virglrenderer.h:399-406). */
@@ -154,6 +174,26 @@ typedef struct VGPUVENUSCAPSETHDR
 AssertCompileSize(VGPUVENUSCAPSETHDR, 20);
 
 /**
+ * struct virgl_renderer_gl_ctx_param (virglrenderer.h:43-49): what kind of
+ * OpenGL context the library wants.
+ */
+typedef struct VGPUVIRGLGLCTXPARAM
+{
+    /** version */
+    int         iVersion;
+    /** shared: share objects with the other contexts. */
+    bool        fShared;
+    /** major_ver */
+    int         iMajor;
+    /** minor_ver */
+    int         iMinor;
+    /** compat_ctx: compatibility instead of core profile. */
+    int         fCompat;
+} VGPUVIRGLGLCTXPARAM;
+AssertCompileSize(VGPUVIRGLGLCTXPARAM, 20);
+AssertCompileMemberOffset(VGPUVIRGLGLCTXPARAM, iMajor, 8);
+
+/**
  * struct virgl_renderer_callbacks (virglrenderer.h:53-107).
  *
  * The library keeps a pointer to this structure (and to the cookie) until
@@ -163,13 +203,13 @@ typedef struct VGPUVIRGLCALLBACKS
 {
     /** version */
     int         iVersion;
-    /** write_fence: context 0 (virgl) fences, unused with VIRGL_RENDERER_NO_VIRGL. */
+    /** write_fence: context 0 (virgl) fences, never created here. */
     DECLCALLBACKMEMBER(void,   pfnWriteFence,(void *pvCookie, uint32_t uFence));
-    /** create_gl_context: unused (NULL). */
-    DECLCALLBACKMEMBER(void *, pfnCreateGlContext,(void *pvCookie, int iScanout, void *pvParam));
-    /** destroy_gl_context: unused (NULL). */
+    /** create_gl_context: NULL without OpenGL. */
+    DECLCALLBACKMEMBER(void *, pfnCreateGlContext,(void *pvCookie, int iScanout, struct VGPUVIRGLGLCTXPARAM *pParam));
+    /** destroy_gl_context: NULL without OpenGL. */
     DECLCALLBACKMEMBER(void,   pfnDestroyGlContext,(void *pvCookie, void *pvGlCtx));
-    /** make_current: unused (NULL). */
+    /** make_current: NULL without OpenGL. */
     DECLCALLBACKMEMBER(int,    pfnMakeCurrent,(void *pvCookie, int iScanout, void *pvGlCtx));
     /** get_drm_fd (v2): unused (NULL). */
     DECLCALLBACKMEMBER(int,    pfnGetDrmFd,(void *pvCookie));
@@ -260,6 +300,26 @@ typedef struct VGPUVIRGLFNS
     /** virgl_renderer_get_vk_memory_used: what counts against that limit. */
     DECLCALLBACKMEMBER(uint64_t, pfnGetVkMemoryUsed,(void));
     /** @} */
+    /** @name OpenGL (virgl), all of them are needed for it (see g_aVirglGlSymbols).
+     * @{ */
+    /** virgl_renderer_resource_create (:278), without a backing. */
+    DECLCALLBACKMEMBER(int,  pfnResourceCreate,(const VGPURENDERERCREATE3D *pArgs, VGPURENDERERIOV *paIov, uint32_t cIov));
+    /** virgl_renderer_resource_attach_iov (:331): the library keeps the pointer to the array. */
+    DECLCALLBACKMEMBER(int,  pfnResourceAttachIov,(int idResource, VGPURENDERERIOV *paIov, int cIov));
+    /** virgl_renderer_resource_detach_iov (:333) */
+    DECLCALLBACKMEMBER(void, pfnResourceDetachIov,(int idResource, VGPURENDERERIOV **ppaIov, int *pcIov));
+    /** virgl_renderer_transfer_read_iov (:308): host to guest. */
+    DECLCALLBACKMEMBER(int,  pfnTransferReadIov,(uint32_t idResource, uint32_t idCtx, uint32_t uLevel, uint32_t cbStride,
+                                                 uint32_t cbLayerStride, VGPURENDERERBOX *pBox, uint64_t off,
+                                                 VGPURENDERERIOV *paIov, int cIov));
+    /** virgl_renderer_transfer_write_iov (:315): guest to host. */
+    DECLCALLBACKMEMBER(int,  pfnTransferWriteIov,(uint32_t idResource, uint32_t idCtx, int iLevel, uint32_t cbStride,
+                                                  uint32_t cbLayerStride, VGPURENDERERBOX *pBox, uint64_t off,
+                                                  VGPURENDERERIOV *paIov, unsigned cIov));
+    /** virgl_renderer_poll (:173): lets the library check its OpenGL queries, which its fence thread
+     * waits for before it retires a fence. */
+    DECLCALLBACKMEMBER(void, pfnPoll,(void));
+    /** @} */
 } VGPUVIRGLFNS;
 
 /** Symbol name to VGPUVIRGLFNS member mapping. */
@@ -297,6 +357,21 @@ static const struct
     { "virgl_renderer_get_vk_memory_used",          RT_UOFFSETOF(VGPUVIRGLFNS, pfnGetVkMemoryUsed) },
 };
 
+/** Symbols needed for OpenGL (virgl); without them only Venus is offered. */
+static const struct
+{
+    const char *pszName;
+    uint32_t    offMember;
+} g_aVirglGlSymbols[] =
+{
+    { "virgl_renderer_resource_create",             RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceCreate) },
+    { "virgl_renderer_resource_attach_iov",         RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceAttachIov) },
+    { "virgl_renderer_resource_detach_iov",         RT_UOFFSETOF(VGPUVIRGLFNS, pfnResourceDetachIov) },
+    { "virgl_renderer_transfer_read_iov",           RT_UOFFSETOF(VGPUVIRGLFNS, pfnTransferReadIov) },
+    { "virgl_renderer_transfer_write_iov",          RT_UOFFSETOF(VGPUVIRGLFNS, pfnTransferWriteIov) },
+    { "virgl_renderer_poll",                        RT_UOFFSETOF(VGPUVIRGLFNS, pfnPoll) },
+};
+
 
 /*********************************************************************************************************************************
 *   Defined Constants And Macros                                                                                                 *
@@ -316,6 +391,14 @@ static const struct
  * renderer at a time, so waiting longer than this means a call into the library
  * is stuck: the renderer is then declared dead and the library is leaked. */
 #define VGPURENDERER_CALL_LOCK_TIMEOUT_MS       RT_MS_30SEC
+/** With OpenGL: how often the renderer thread lets the library check its queries while the guest
+ * is rendering.  The library's fence thread holds a fence back until that happened when a query is
+ * pending, so this bounds how late such a fence is signalled. */
+#define VGPURENDERER_GL_POLL_BUSY_MS            1
+/** With OpenGL: the same while nothing was asked of the renderer for VGPURENDERER_GL_POLL_BUSY_WINDOW_MS. */
+#define VGPURENDERER_GL_POLL_IDLE_MS            50
+/** With OpenGL: how long after the last request the renderer counts as busy. */
+#define VGPURENDERER_GL_POLL_BUSY_WINDOW_MS     500
 /** How long a caller waits for one call into the library to finish.  A call
  * that takes longer (a hung or lost GPU) declares the renderer dead, so that
  * suspend and power off do not wait for ever. */
@@ -341,6 +424,11 @@ typedef enum VGPURENDERREQTYPE
     kVGpuRenderReq_ContextDetach,
     kVGpuRenderReq_ResourceMap,
     kVGpuRenderReq_ResourceUnmap,
+    kVGpuRenderReq_ResourceCreate3d,
+    kVGpuRenderReq_ResourceAttachIov,
+    kVGpuRenderReq_ResourceDetachIov,
+    kVGpuRenderReq_Transfer,
+    kVGpuRenderReq_ResourceRead,
     kVGpuRenderReq_End
 } VGPURENDERREQTYPE;
 
@@ -390,6 +478,33 @@ typedef struct VGPURENDERREQ
             void           *pvHost;
             uint64_t        cbHost;
         } Map;
+        VGPURENDERERCREATE3D Create3d;
+        struct
+        {
+            uint32_t        idResource;
+            uint32_t        cIov;
+            PVGPURENDERERIOV paIov;
+        } AttachIov;
+        struct
+        {
+            bool            fToHost;
+            uint32_t        idResource;
+            uint32_t        idCtx;
+            uint32_t        uLevel;
+            uint32_t        cbStride;
+            uint32_t        cbLayerStride;
+            VGPURENDERERBOX Box;
+            uint64_t        off;
+        } Transfer;
+        struct
+        {
+            uint32_t        idResource;
+            uint32_t        cbStride;
+            VGPURENDERERBOX Box;
+            /** The destination, a heap block owned by the request (see vgpuR3RendererCall). */
+            void           *pvDst;
+            size_t          cbDst;
+        } Read;
     } u;
 } VGPURENDERREQ;
 /** Pointer to a renderer thread request. */
@@ -433,12 +548,40 @@ typedef struct VGPURENDERER
     RTCRITSECT                  CritSectCall;
     /** The request for the renderer thread, NULL if none. */
     PVGPURENDERREQ volatile     pReqPending;
-    /** @name The Venus capset, fetched once at init and read only afterwards.
+    /** @name The capsets, fetched once at init and read only afterwards.
+     * Unused entries have a NULL pbCapset.
      * @{ */
-    uint32_t                    uCapsetMaxVersion;
-    uint32_t                    cbCapset;
-    uint8_t                    *pbCapset;
+    struct
+    {
+        uint32_t                idCapset;
+        uint32_t                uMaxVersion;
+        uint32_t                cbCapset;
+        uint8_t                *pbCapset;
+    } aCapsets[VGPU_VIRGL_CAPSET_COUNT];
     /** @} */
+    /** Whether the device wants OpenGL (virgl) too. */
+    bool                        fWantVirgl;
+    /** Whether the library has all the entry points OpenGL needs. */
+    bool                        fHaveGlSymbols;
+    /** Set when the library was initialized with OpenGL (written once by the
+     * renderer thread during init, read only afterwards). */
+    bool                        fVirgl;
+#ifdef RT_OS_WINDOWS
+    /** @name WGL state for OpenGL, owned by the renderer thread.
+     * @{ */
+    RTLDRMOD                    hLdrOpenGL;
+    HWND                        hwndGl;
+    HDC                         hdcGl;
+    /** The root of the share group: never current, destroyed with the window. */
+    HGLRC                       hrcRoot;
+    HGLRC                       (WINAPI *pfnWglCreateContext)(HDC);
+    BOOL                        (WINAPI *pfnWglDeleteContext)(HGLRC);
+    BOOL                        (WINAPI *pfnWglMakeCurrent)(HDC, HGLRC);
+    PROC                        (WINAPI *pfnWglGetProcAddress)(LPCSTR);
+    const unsigned char *       (WINAPI *pfnGlGetString)(unsigned);
+    HGLRC                       (WINAPI *pfnWglCreateContextAttribs)(HDC, HGLRC, const int *);
+    /** @} */
+#endif
 } VGPURENDERER;
 
 
@@ -470,6 +613,223 @@ static DECLCALLBACK(void) vgpuR3VirglWriteContextFence(void *pvCookie, uint32_t 
 }
 
 
+#ifdef RT_OS_WINDOWS
+/** @name WGL_ARB_create_context(_profile).
+ * @{ */
+# define VGPU_WGL_CONTEXT_MAJOR_VERSION_ARB             0x2091
+# define VGPU_WGL_CONTEXT_MINOR_VERSION_ARB             0x2092
+# define VGPU_WGL_CONTEXT_PROFILE_MASK_ARB              0x9126
+# define VGPU_WGL_CONTEXT_CORE_PROFILE_BIT_ARB          0x0001
+# define VGPU_WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB 0x0002
+/** @} */
+/** GL_RENDERER and GL_VERSION for glGetString. */
+# define VGPU_GL_RENDERER                               0x1F01
+# define VGPU_GL_VERSION                                0x1F02
+/** The window class of the hidden window the contexts are created on. */
+# define VGPU_WGL_WINDOW_CLASS                          L"VBoxVirtioGpuGL"
+
+/**
+ * create_gl_context callback: creates an OpenGL context of the requested
+ * version and profile, sharing objects with all the others.
+ *
+ * Called on the renderer thread, from inside a library call.
+ */
+static DECLCALLBACK(void *) vgpuR3VirglCreateGlContext(void *pvCookie, int iScanout, VGPUVIRGLGLCTXPARAM *pParam)
+{
+    PVGPURENDERER pThis = (PVGPURENDERER)pvCookie;
+    RT_NOREF(iScanout);
+    AssertReturn(RT_VALID_PTR(pThis) && pThis->u32Magic == VGPURENDERER_MAGIC && pThis->pfnWglCreateContextAttribs, NULL);
+    AssertPtrReturn(pParam, NULL);
+    int const aiAttribs[] =
+    {
+        VGPU_WGL_CONTEXT_MAJOR_VERSION_ARB, pParam->iMajor,
+        VGPU_WGL_CONTEXT_MINOR_VERSION_ARB, pParam->iMinor,
+        VGPU_WGL_CONTEXT_PROFILE_MASK_ARB,  pParam->fCompat ? VGPU_WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB
+                                                            : VGPU_WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+        0
+    };
+    HGLRC hrc = pThis->pfnWglCreateContextAttribs(pThis->hdcGl, pThis->hrcRoot, aiAttribs);
+    if (!hrc)
+        Log(("VirtioGpu: No OpenGL %d.%d %s context (%u)\n", pParam->iMajor, pParam->iMinor,
+             pParam->fCompat ? "compatibility" : "core", GetLastError()));
+    return hrc;
+}
+
+
+/**
+ * destroy_gl_context callback.
+ */
+static DECLCALLBACK(void) vgpuR3VirglDestroyGlContext(void *pvCookie, void *pvGlCtx)
+{
+    PVGPURENDERER pThis = (PVGPURENDERER)pvCookie;
+    AssertReturnVoid(RT_VALID_PTR(pThis) && pThis->u32Magic == VGPURENDERER_MAGIC && pThis->pfnWglDeleteContext);
+    if (pvGlCtx)
+        pThis->pfnWglDeleteContext((HGLRC)pvGlCtx);
+}
+
+
+/**
+ * make_current callback: called on the renderer thread and on the library's
+ * fence thread (with the context created for it).
+ *
+ * @returns 0 on success, -1 on failure.
+ */
+static DECLCALLBACK(int) vgpuR3VirglMakeCurrent(void *pvCookie, int iScanout, void *pvGlCtx)
+{
+    PVGPURENDERER pThis = (PVGPURENDERER)pvCookie;
+    RT_NOREF(iScanout);
+    AssertReturn(RT_VALID_PTR(pThis) && pThis->u32Magic == VGPURENDERER_MAGIC && pThis->pfnWglMakeCurrent, -1);
+    return pThis->pfnWglMakeCurrent(pvGlCtx ? pThis->hdcGl : NULL, (HGLRC)pvGlCtx) ? 0 : -1;
+}
+
+
+/**
+ * Releases what vgpuR3RendererWglInit set up.  Renderer thread, no context
+ * of the library may exist any more.
+ *
+ * @param   pThis       The renderer instance.
+ */
+static void vgpuR3RendererWglTerm(PVGPURENDERER pThis)
+{
+    if (pThis->pfnWglMakeCurrent)
+        pThis->pfnWglMakeCurrent(NULL, NULL);
+    if (pThis->hrcRoot)
+        pThis->pfnWglDeleteContext(pThis->hrcRoot);
+    pThis->hrcRoot = NULL;
+    if (pThis->hdcGl)
+        ReleaseDC(pThis->hwndGl, pThis->hdcGl);
+    pThis->hdcGl = NULL;
+    if (pThis->hwndGl)
+        DestroyWindow(pThis->hwndGl);
+    pThis->hwndGl = NULL;
+    pThis->pfnWglCreateContextAttribs = NULL;
+    /* opengl32.dll stays loaded (the driver does not like being unloaded). */
+}
+
+
+/**
+ * Prepares WGL: a hidden window with a pixel format and the root context.
+ * Renderer thread.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The renderer instance.
+ */
+static int vgpuR3RendererWglInit(PVGPURENDERER pThis)
+{
+    static const struct
+    {
+        const char *pszName;
+        uint32_t    offMember;
+    } s_aSymbols[] =
+    {
+        { "wglCreateContext",   RT_UOFFSETOF(VGPURENDERER, pfnWglCreateContext) },
+        { "wglDeleteContext",   RT_UOFFSETOF(VGPURENDERER, pfnWglDeleteContext) },
+        { "wglMakeCurrent",     RT_UOFFSETOF(VGPURENDERER, pfnWglMakeCurrent) },
+        { "wglGetProcAddress",  RT_UOFFSETOF(VGPURENDERER, pfnWglGetProcAddress) },
+        { "glGetString",        RT_UOFFSETOF(VGPURENDERER, pfnGlGetString) },
+    };
+    if (pThis->hLdrOpenGL == NIL_RTLDRMOD)
+    {
+        int rc = RTLdrLoadSystem("opengl32", true /*fNoUnload*/, &pThis->hLdrOpenGL);
+        if (RT_FAILURE(rc))
+        {
+            pThis->hLdrOpenGL = NIL_RTLDRMOD;
+            LogRel(("VirtioGpu: Loading opengl32.dll failed: %Rrc\n", rc));
+            return rc;
+        }
+    }
+    for (unsigned i = 0; i < RT_ELEMENTS(s_aSymbols); i++)
+    {
+        int rc = RTLdrGetSymbol(pThis->hLdrOpenGL, s_aSymbols[i].pszName, (void **)((uint8_t *)pThis + s_aSymbols[i].offMember));
+        if (RT_FAILURE(rc))
+        {
+            LogRel(("VirtioGpu: opengl32.dll lacks %s: %Rrc\n", s_aSymbols[i].pszName, rc));
+            return rc;
+        }
+    }
+
+    /* A message-only window: it is never shown and gets no broadcast messages, so nobody waits for a
+       thread that does not pump messages. */
+    WNDCLASSW WndClass;
+    RT_ZERO(WndClass);
+    WndClass.style         = CS_OWNDC;
+    WndClass.lpfnWndProc   = DefWindowProcW;
+    WndClass.hInstance     = GetModuleHandleW(NULL);
+    WndClass.lpszClassName = VGPU_WGL_WINDOW_CLASS;
+    if (!RegisterClassW(&WndClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    {
+        LogRel(("VirtioGpu: RegisterClassW failed: %u\n", GetLastError()));
+        return VERR_NOT_SUPPORTED;
+    }
+    pThis->hwndGl = CreateWindowExW(0, VGPU_WGL_WINDOW_CLASS, L"", WS_POPUP, 0, 0, 1, 1, HWND_MESSAGE, NULL,
+                                    WndClass.hInstance, NULL);
+    if (pThis->hwndGl)
+        pThis->hdcGl = GetDC(pThis->hwndGl);
+    if (!pThis->hdcGl)
+    {
+        LogRel(("VirtioGpu: Creating the OpenGL window failed: %u\n", GetLastError()));
+        vgpuR3RendererWglTerm(pThis);
+        return VERR_NOT_SUPPORTED;
+    }
+
+    PIXELFORMATDESCRIPTOR Pfd;
+    RT_ZERO(Pfd);
+    Pfd.nSize      = sizeof(Pfd);
+    Pfd.nVersion   = 1;
+    Pfd.dwFlags    = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL;
+    Pfd.iPixelType = PFD_TYPE_RGBA;
+    Pfd.cColorBits = 32;
+    int const iFormat = ChoosePixelFormat(pThis->hdcGl, &Pfd);
+    if (!iFormat || !SetPixelFormat(pThis->hdcGl, iFormat, &Pfd))
+    {
+        LogRel(("VirtioGpu: No OpenGL pixel format: %u\n", GetLastError()));
+        vgpuR3RendererWglTerm(pThis);
+        return VERR_NOT_SUPPORTED;
+    }
+
+    /* wglCreateContextAttribsARB can only be looked up with a context current. */
+    char szRenderer[128] = "";
+    char szVersion[128]  = "";
+    HGLRC hrcBoot = pThis->pfnWglCreateContext(pThis->hdcGl);
+    if (hrcBoot && pThis->pfnWglMakeCurrent(pThis->hdcGl, hrcBoot))
+    {
+        *(PROC *)&pThis->pfnWglCreateContextAttribs = pThis->pfnWglGetProcAddress("wglCreateContextAttribsARB");
+        const char *psz = (const char *)pThis->pfnGlGetString(VGPU_GL_RENDERER);
+        RTStrCopy(szRenderer, sizeof(szRenderer), psz ? psz : "?");
+        psz = (const char *)pThis->pfnGlGetString(VGPU_GL_VERSION);
+        RTStrCopy(szVersion, sizeof(szVersion), psz ? psz : "?");
+        pThis->pfnWglMakeCurrent(NULL, NULL);
+    }
+    if (hrcBoot)
+        pThis->pfnWglDeleteContext(hrcBoot);
+    if (!pThis->pfnWglCreateContextAttribs)
+    {
+        LogRel(("VirtioGpu: The host OpenGL has no wglCreateContextAttribsARB (%u)\n", GetLastError()));
+        vgpuR3RendererWglTerm(pThis);
+        return VERR_NOT_SUPPORTED;
+    }
+
+    /* The root of the share group.  The driver returns the newest version compatible with 3.2 core. */
+    int const aiAttribs[] =
+    {
+        VGPU_WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
+        VGPU_WGL_CONTEXT_MINOR_VERSION_ARB, 2,
+        VGPU_WGL_CONTEXT_PROFILE_MASK_ARB,  VGPU_WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+        0
+    };
+    pThis->hrcRoot = pThis->pfnWglCreateContextAttribs(pThis->hdcGl, NULL, aiAttribs);
+    if (!pThis->hrcRoot)
+    {
+        LogRel(("VirtioGpu: The host OpenGL (%s, %s) has no 3.2 core profile (%u)\n", szRenderer, szVersion, GetLastError()));
+        vgpuR3RendererWglTerm(pThis);
+        return VERR_NOT_SUPPORTED;
+    }
+    LogRel(("VirtioGpu: Host OpenGL: %s, %s\n", szRenderer, szVersion));
+    return VINF_SUCCESS;
+}
+#endif /* RT_OS_WINDOWS */
+
+
 /*********************************************************************************************************************************
 *   Renderer thread                                                                                                              *
 *********************************************************************************************************************************/
@@ -494,37 +854,26 @@ static int vgpuR3VirglRcToVBox(int iVirglRc)
 
 
 /**
- * Initializes the library and fetches the Venus capset.  Renderer thread.
+ * Fetches a capset and keeps a copy of it.  Renderer thread, after init.
  *
- * @returns VBox status code.  On failure after a successful
- *          virgl_renderer_init(), fInitialized stays set and the caller
- *          has to clean up.
+ * @returns VBox status code.
  * @param   pThis       The renderer instance.
+ * @param   iSlot       The index into VGPURENDERER::aCapsets.
+ * @param   idCapset    The capset id.
+ * @param   cbMin       The smallest plausible size.
  */
-static int vgpuR3RendererExecInit(PVGPURENDERER pThis)
+static int vgpuR3RendererFetchCapset(PVGPURENDERER pThis, unsigned iSlot, uint32_t idCapset, uint32_t cbMin)
 {
-    uint32_t const fFlags = VGPU_VIRGL_RENDERER_VENUS
-                          | VGPU_VIRGL_RENDERER_RENDER_SERVER
-                          | VGPU_VIRGL_RENDERER_THREAD_SYNC
-                          | VGPU_VIRGL_RENDERER_ASYNC_FENCE_CB
-                          | VGPU_VIRGL_RENDERER_NO_VIRGL;
-    int iRc = pThis->Fns.pfnInit(pThis, (int)fFlags, &pThis->Callbacks);
-    if (iRc != 0)
-    {
-        LogRel(("VirtioGpu: virgl_renderer_init(%#RX32) failed: %d\n", fFlags, iRc));
-        return VERR_NOT_SUPPORTED;
-    }
-    pThis->fInitialized = true;
-
-    /* Queried after init (the library wants proxy_initialized to be set for this). */
+    AssertReturn(iSlot < RT_ELEMENTS(pThis->aCapsets) && !pThis->aCapsets[iSlot].pbCapset, VERR_INTERNAL_ERROR_4);
     uint32_t uMaxVersion = UINT32_MAX;
     uint32_t cbCapset    = UINT32_MAX;
-    pThis->Fns.pfnGetCapSet(VGPU_VIRGL_CAPSET_VENUS, &uMaxVersion, &cbCapset);
-    if (   cbCapset < sizeof(VGPUVENUSCAPSETHDR)
+    pThis->Fns.pfnGetCapSet(idCapset, &uMaxVersion, &cbCapset);
+    if (   cbCapset < cbMin
         || cbCapset > VGPURENDERER_MAX_CAPSET_SIZE
         || uMaxVersion > VGPURENDERER_MAX_CAPSET_VERSION)
     {
-        LogRel(("VirtioGpu: Implausible Venus capset from the renderer: version %RU32, %RU32 bytes\n", uMaxVersion, cbCapset));
+        LogRel(("VirtioGpu: Implausible capset %RU32 from the renderer: version %RU32, %RU32 bytes\n",
+                idCapset, uMaxVersion, cbCapset));
         return VERR_NOT_SUPPORTED;
     }
 
@@ -533,23 +882,109 @@ static int vgpuR3RendererExecInit(PVGPURENDERER pThis)
     uint8_t *pbCapset = (uint8_t *)RTMemAllocZ(VGPURENDERER_MAX_CAPSET_SIZE);
     if (!pbCapset)
         return VERR_NO_MEMORY;
-    pThis->Fns.pfnFillCaps(VGPU_VIRGL_CAPSET_VENUS, uMaxVersion, pbCapset);
+    pThis->Fns.pfnFillCaps(idCapset, uMaxVersion, pbCapset);
+    pThis->aCapsets[iSlot].idCapset    = idCapset;
+    pThis->aCapsets[iSlot].uMaxVersion = uMaxVersion;
+    pThis->aCapsets[iSlot].cbCapset    = cbCapset;
+    pThis->aCapsets[iSlot].pbCapset    = pbCapset;
+    return VINF_SUCCESS;
+}
 
-    VGPUVENUSCAPSETHDR const *pHdr = (VGPUVENUSCAPSETHDR const *)pbCapset;
+
+/**
+ * Initializes the library and fetches the capsets.  Renderer thread.
+ *
+ * @returns VBox status code.  On failure after a successful
+ *          virgl_renderer_init(), fInitialized stays set and the caller
+ *          has to clean up.
+ * @param   pThis       The renderer instance.
+ */
+static int vgpuR3RendererExecInit(PVGPURENDERER pThis)
+{
+    uint32_t fFlags = VGPU_VIRGL_RENDERER_VENUS
+                    | VGPU_VIRGL_RENDERER_RENDER_SERVER
+                    | VGPU_VIRGL_RENDERER_THREAD_SYNC
+                    | VGPU_VIRGL_RENDERER_ASYNC_FENCE_CB;
+
+    /* OpenGL needs contexts from us.  Without them (or without the entry points) only Venus is offered. */
+    bool fVirgl = false;
+#ifdef RT_OS_WINDOWS
+    if (pThis->fWantVirgl && pThis->fHaveGlSymbols)
+    {
+        int rc = vgpuR3RendererWglInit(pThis);
+        if (RT_SUCCESS(rc))
+        {
+            pThis->Callbacks.pfnCreateGlContext  = vgpuR3VirglCreateGlContext;
+            pThis->Callbacks.pfnDestroyGlContext = vgpuR3VirglDestroyGlContext;
+            pThis->Callbacks.pfnMakeCurrent      = vgpuR3VirglMakeCurrent;
+            fVirgl = true;
+        }
+        else
+            LogRel(("VirtioGpu: No host OpenGL contexts (%Rrc), offering Vulkan only\n", rc));
+    }
+    else if (pThis->fWantVirgl)
+        LogRel(("VirtioGpu: The renderer library has no OpenGL entry points, offering Vulkan only\n"));
+#else
+    if (pThis->fWantVirgl)
+        LogRel(("VirtioGpu: OpenGL (virgl) is not implemented for this host, offering Vulkan only\n"));
+#endif
+    if (!fVirgl)
+        fFlags |= VGPU_VIRGL_RENDERER_NO_VIRGL;
+
+    int iRc = pThis->Fns.pfnInit(pThis, (int)fFlags, &pThis->Callbacks);
+    if (iRc != 0)
+    {
+        LogRel(("VirtioGpu: virgl_renderer_init(%#RX32) failed: %d\n", fFlags, iRc));
+#ifdef RT_OS_WINDOWS
+        if (fVirgl)
+            vgpuR3RendererWglTerm(pThis);
+#endif
+        return VERR_NOT_SUPPORTED;
+    }
+    pThis->fInitialized = true;
+
+    /* Queried after init (the library wants proxy_initialized to be set for this). */
+    int rc = vgpuR3RendererFetchCapset(pThis, 0, VGPU_VIRGL_CAPSET_VENUS, sizeof(VGPUVENUSCAPSETHDR));
+    if (RT_FAILURE(rc))
+        return rc;
+    VGPUVENUSCAPSETHDR const *pHdr = (VGPUVENUSCAPSETHDR const *)pThis->aCapsets[0].pbCapset;
     if (!pHdr->uWireFormatVersion || !pHdr->uVkXmlVersion)
     {
         LogRel(("VirtioGpu: The Venus capset is empty (wire format %RU32, vk.xml %#RX32); is this the right library?\n",
                 pHdr->uWireFormatVersion, pHdr->uVkXmlVersion));
-        RTMemFree(pbCapset);
+        RTMemFree(pThis->aCapsets[0].pbCapset);
+        pThis->aCapsets[0].pbCapset = NULL;
         return VERR_NOT_SUPPORTED;
     }
     LogRel(("VirtioGpu: Venus capset v%RU32, %RU32 bytes: wire format %RU32, vk.xml %#RX32, serialization spec %RU32,"
-            " protocol spec %RU32, blob id 0 %RU32\n", uMaxVersion, cbCapset, pHdr->uWireFormatVersion, pHdr->uVkXmlVersion,
-            pHdr->uVkExtCmdSerializationSpecVersion, pHdr->uVkMesaVenusProtocolSpecVersion, pHdr->fSupportsBlobId0));
+            " protocol spec %RU32, blob id 0 %RU32\n", pThis->aCapsets[0].uMaxVersion, pThis->aCapsets[0].cbCapset,
+            pHdr->uWireFormatVersion, pHdr->uVkXmlVersion, pHdr->uVkExtCmdSerializationSpecVersion,
+            pHdr->uVkMesaVenusProtocolSpecVersion, pHdr->fSupportsBlobId0));
 
-    pThis->uCapsetMaxVersion = uMaxVersion;
-    pThis->cbCapset          = cbCapset;
-    pThis->pbCapset          = pbCapset;
+    /* The OpenGL capsets.  Both or none: guests pick virgl2 when it is there and fall back to virgl. */
+    if (fVirgl)
+    {
+        rc = vgpuR3RendererFetchCapset(pThis, 1, VGPU_VIRGL_CAPSET_VIRGL, sizeof(uint32_t));
+        if (RT_SUCCESS(rc))
+            rc = vgpuR3RendererFetchCapset(pThis, 2, VGPU_VIRGL_CAPSET_VIRGL2, sizeof(uint32_t));
+        if (RT_SUCCESS(rc))
+        {
+            pThis->fVirgl = true;
+            LogRel(("VirtioGpu: OpenGL (virgl) capsets: v%RU32 %RU32 bytes, v%RU32 %RU32 bytes\n",
+                    pThis->aCapsets[1].uMaxVersion, pThis->aCapsets[1].cbCapset,
+                    pThis->aCapsets[2].uMaxVersion, pThis->aCapsets[2].cbCapset));
+        }
+        else
+        {
+            /* The library is initialized with OpenGL but the device will not offer it. */
+            LogRel(("VirtioGpu: No usable OpenGL capsets (%Rrc), offering Vulkan only\n", rc));
+            for (unsigned i = 1; i < RT_ELEMENTS(pThis->aCapsets); i++)
+            {
+                RTMemFree(pThis->aCapsets[i].pbCapset);
+                pThis->aCapsets[i].pbCapset = NULL;
+            }
+        }
+    }
     return VINF_SUCCESS;
 }
 
@@ -579,6 +1014,10 @@ static void vgpuR3RendererExec(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
         case kVGpuRenderReq_Cleanup:
             pThis->Fns.pfnCleanup(pThis);
             pThis->fInitialized = false;
+#ifdef RT_OS_WINDOWS
+            /* The library destroyed its contexts (and joined its fence thread). */
+            vgpuR3RendererWglTerm(pThis);
+#endif
             break;
 
         case kVGpuRenderReq_ContextCreate:
@@ -646,6 +1085,52 @@ static void vgpuR3RendererExec(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
             iRc = pThis->Fns.pfnResourceUnmap(pReq->u.Ids.idResource);
             break;
 
+        case kVGpuRenderReq_ResourceCreate3d:
+            iRc = pThis->fVirgl ? pThis->Fns.pfnResourceCreate(&pReq->u.Create3d, NULL, 0) : -VGPU_VIRGL_EINVAL;
+            break;
+
+        case kVGpuRenderReq_ResourceAttachIov:
+            iRc = pThis->fVirgl
+                ? pThis->Fns.pfnResourceAttachIov((int)pReq->u.AttachIov.idResource, pReq->u.AttachIov.paIov,
+                                                  (int)pReq->u.AttachIov.cIov)
+                : -VGPU_VIRGL_EINVAL;
+            break;
+
+        case kVGpuRenderReq_ResourceDetachIov:
+            if (pThis->fVirgl)
+            {
+                PVGPURENDERERIOV paIov = NULL;
+                int              cIov  = 0;
+                pThis->Fns.pfnResourceDetachIov((int)pReq->u.Ids.idResource, &paIov, &cIov);
+            }
+            break;
+
+        case kVGpuRenderReq_Transfer:
+            if (!pThis->fVirgl)
+                iRc = -VGPU_VIRGL_EINVAL;
+            else if (pReq->u.Transfer.fToHost)
+                iRc = pThis->Fns.pfnTransferWriteIov(pReq->u.Transfer.idResource, pReq->u.Transfer.idCtx,
+                                                     (int)pReq->u.Transfer.uLevel, pReq->u.Transfer.cbStride,
+                                                     pReq->u.Transfer.cbLayerStride, &pReq->u.Transfer.Box,
+                                                     pReq->u.Transfer.off, NULL, 0);
+            else
+                iRc = pThis->Fns.pfnTransferReadIov(pReq->u.Transfer.idResource, pReq->u.Transfer.idCtx,
+                                                    pReq->u.Transfer.uLevel, pReq->u.Transfer.cbStride,
+                                                    pReq->u.Transfer.cbLayerStride, &pReq->u.Transfer.Box,
+                                                    pReq->u.Transfer.off, NULL, 0);
+            break;
+
+        case kVGpuRenderReq_ResourceRead:
+            if (!pThis->fVirgl)
+                iRc = -VGPU_VIRGL_EINVAL;
+            else
+            {
+                VGPURENDERERIOV Iov = { pReq->u.Read.pvDst, pReq->u.Read.cbDst };
+                iRc = pThis->Fns.pfnTransferReadIov(pReq->u.Read.idResource, 0 /*idCtx*/, 0 /*uLevel*/, pReq->u.Read.cbStride,
+                                                    0 /*cbLayerStride*/, &pReq->u.Read.Box, 0 /*off*/, &Iov, 1);
+            }
+            break;
+
         default:
             AssertMsgFailed(("%d\n", pReq->enmType));
             pReq->rc = VERR_INTERNAL_ERROR_3;
@@ -664,6 +1149,7 @@ static DECLCALLBACK(int) vgpuR3RendererThread(RTTHREAD hThreadSelf, void *pvUser
     PVGPURENDERER pThis = (PVGPURENDERER)pvUser;
     RT_NOREF(hThreadSelf);
 
+    uint64_t msLastReq = 0;
     for (;;)
     {
         PVGPURENDERREQ pReq = ASMAtomicXchgPtrT(&pThis->pReqPending, NULL, PVGPURENDERREQ);
@@ -672,11 +1158,24 @@ static DECLCALLBACK(int) vgpuR3RendererThread(RTTHREAD hThreadSelf, void *pvUser
             vgpuR3RendererExec(pThis, pReq);
             int rc = RTSemEventSignal(pThis->hEvtDone);
             AssertLogRelRC(rc);
+            msLastReq = RTTimeMilliTS();
             continue;
         }
         if (ASMAtomicReadBool(&pThis->fTerminate))
             break;
-        int rc = RTSemEventWait(pThis->hEvtReq, RT_INDEFINITE_WAIT);
+
+        /* With OpenGL the library wants to be polled, see VGPURENDERER_GL_POLL_BUSY_MS. */
+        RTMSINTERVAL cMsWait = RT_INDEFINITE_WAIT;
+        if (pThis->fVirgl && pThis->fInitialized)
+            cMsWait = RTTimeMilliTS() - msLastReq < VGPURENDERER_GL_POLL_BUSY_WINDOW_MS
+                    ? VGPURENDERER_GL_POLL_BUSY_MS : VGPURENDERER_GL_POLL_IDLE_MS;
+        int rc = RTSemEventWait(pThis->hEvtReq, cMsWait);
+        if (rc == VERR_TIMEOUT)
+        {
+            if (pThis->fVirgl && pThis->fInitialized)
+                pThis->Fns.pfnPoll();
+            continue;
+        }
         AssertLogRelMsgReturn(RT_SUCCESS(rc), ("%Rrc\n", rc), rc);
     }
     return VINF_SUCCESS;
@@ -743,9 +1242,16 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
         }
         pReqHeap->u.ContextCreate.pachName = (const char *)pvPayload;
     }
+    else if (pReq->enmType == kVGpuRenderReq_ResourceRead)
+    {
+        /* The library writes into a heap block, copied to the caller's buffer when the call is done. */
+        pvPayload = RTMemAllocZ(pReq->u.Read.cbDst);
+        pReqHeap->u.Read.pvDst = pvPayload;
+    }
     if (   !pvPayload
         && (   (pReq->enmType == kVGpuRenderReq_Submit && pReq->u.Submit.cDWords)
-            || pReq->enmType == kVGpuRenderReq_ContextCreate))
+            || pReq->enmType == kVGpuRenderReq_ContextCreate
+            || pReq->enmType == kVGpuRenderReq_ResourceRead))
     {
         RTMemFree(pReqHeap);
         RTCritSectLeave(&pThis->CritSectCall);
@@ -788,7 +1294,14 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
     /* Hand the results back, but keep the caller's own pointers. */
     void const * const pvOrgCmds = pReq->enmType == kVGpuRenderReq_Submit ? pReq->u.Submit.pvCmds : NULL;
     const char * const pachOrgName = pReq->enmType == kVGpuRenderReq_ContextCreate ? pReq->u.ContextCreate.pachName : NULL;
+    void * const       pvOrgDst    = pReq->enmType == kVGpuRenderReq_ResourceRead ? pReq->u.Read.pvDst : NULL;
     *pReq = *pReqHeap;
+    if (pReq->enmType == kVGpuRenderReq_ResourceRead)
+    {
+        if (RT_SUCCESS(pReq->rc))
+            memcpy(pvOrgDst, pvPayload, pReq->u.Read.cbDst);
+        pReq->u.Read.pvDst = pvOrgDst;
+    }
     if (pReq->enmType == kVGpuRenderReq_Submit)
         pReq->u.Submit.pvCmds = (void *)pvOrgCmds;
     else if (pReq->enmType == kVGpuRenderReq_ContextCreate)
@@ -810,12 +1323,14 @@ static int vgpuR3RendererCall(PVGPURENDERER pThis, PVGPURENDERREQ pReq)
  * @returns VBox status code.  On failure the device has to run 2D only; the
  *          reason is in the release log and in pErrInfo.
  * @param   pszLibrary      The library path.
+ * @param   fVirgl          Whether to offer OpenGL (virgl) as well as Vulkan (Venus).  Not getting
+ *                          it is no failure, see vgpuR3RendererHasVirgl.
  * @param   pfnFence        The fence callback.
  * @param   pvFenceUser     User argument for pfnFence.
  * @param   ppRenderer      Where to return the renderer instance.
  * @param   pErrInfo        Where to return extended error information, optional.
  */
-DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENCE pfnFence, void *pvFenceUser,
+DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, bool fVirgl, PFNVGPURENDERERFENCE pfnFence, void *pvFenceUser,
                                      PVGPURENDERER *ppRenderer, PRTERRINFO pErrInfo)
 {
     AssertPtrReturn(ppRenderer, VERR_INVALID_POINTER);
@@ -843,10 +1358,14 @@ DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENC
     pThis->hEvtDone                       = NIL_RTSEMEVENT;
     pThis->pfnFence                       = pfnFence;
     pThis->pvFenceUser                    = pvFenceUser;
+    pThis->fWantVirgl                     = fVirgl;
+#ifdef RT_OS_WINDOWS
+    pThis->hLdrOpenGL                     = NIL_RTLDRMOD;
+#endif
     pThis->Callbacks.iVersion             = VGPU_VIRGL_CALLBACKS_VERSION;
     pThis->Callbacks.pfnWriteFence        = vgpuR3VirglWriteFence;
     pThis->Callbacks.pfnWriteContextFence = vgpuR3VirglWriteContextFence;
-    /* The GL, DRM, server fd and EGL callbacks stay NULL (zeroed). */
+    /* The DRM, server fd and EGL callbacks stay NULL (zeroed); the GL ones are set by init when OpenGL is used. */
 
     /* Imported DLLs (the MinGW runtime, the Vulkan loader) are looked for next to the library. */
     int rc = RTLdrLoadEx(pszLibrary, &pThis->hLdrMod, RTLDRLOAD_FLAGS_NO_UNLOAD | RTLDRLOAD_FLAGS_NT_SEARCH_DLL_LOAD_DIR,
@@ -864,6 +1383,11 @@ DECLHIDDEN(int) vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENC
             if (RT_FAILURE(RTLdrGetSymbol(pThis->hLdrMod, g_aVirglOptionalSymbols[i].pszName,
                                           (void **)((uint8_t *)&pThis->Fns + g_aVirglOptionalSymbols[i].offMember))))
                 *(void **)((uint8_t *)&pThis->Fns + g_aVirglOptionalSymbols[i].offMember) = NULL;
+        pThis->fHaveGlSymbols = RT_SUCCESS(rc);
+        for (unsigned i = 0; i < RT_ELEMENTS(g_aVirglGlSymbols) && RT_SUCCESS(rc); i++)
+            if (RT_FAILURE(RTLdrGetSymbol(pThis->hLdrMod, g_aVirglGlSymbols[i].pszName,
+                                          (void **)((uint8_t *)&pThis->Fns + g_aVirglGlSymbols[i].offMember))))
+                pThis->fHaveGlSymbols = false;
     }
     else
         RTErrInfoAddF(pErrInfo, rc, " (loading '%s')", pszLibrary);
@@ -1004,7 +1528,8 @@ DECLHIDDEN(void) vgpuR3RendererDestroy(PVGPURENDERER pThis, bool fCleanup)
         RTCritSectDelete(&pThis->CritSectCall);
     if (pThis->hLdrMod != NIL_RTLDRMOD)
         RTLdrClose(pThis->hLdrMod); /* RTLDRLOAD_FLAGS_NO_UNLOAD: the image stays loaded. */
-    RTMemFree(pThis->pbCapset);
+    for (unsigned i = 0; i < RT_ELEMENTS(pThis->aCapsets); i++)
+        RTMemFree(pThis->aCapsets[i].pbCapset);
     pThis->u32Magic = ~VGPURENDERER_MAGIC;
     RTMemFree(pThis);
 }
@@ -1015,7 +1540,8 @@ DECLHIDDEN(void) vgpuR3RendererDestroy(PVGPURENDERER pThis, bool fCleanup)
  *
  * @returns VBox status code, VERR_NOT_FOUND for an unsupported capset id.
  * @param   pThis           The renderer instance.
- * @param   idCapset        The capset id, only VIRTIOGPU_CAPSET_VENUS is known.
+ * @param   idCapset        The capset id: VIRTIOGPU_CAPSET_VENUS and, with OpenGL,
+ *                          VIRTIOGPU_CAPSET_VIRGL and VIRTIOGPU_CAPSET_VIRGL2.
  * @param   puMaxVersion    Where to return the highest version.
  * @param   pcbCapset       Where to return the capset size.
  * @param   ppbCapset       Where to return the capset data (read only, valid
@@ -1025,13 +1551,192 @@ DECLHIDDEN(int) vgpuR3RendererQueryCapset(PVGPURENDERER pThis, uint32_t idCapset
                                           uint32_t *pcbCapset, uint8_t const **ppbCapset)
 {
     AssertReturn(pThis && pThis->u32Magic == VGPURENDERER_MAGIC, VERR_INVALID_HANDLE);
-    if (idCapset != VIRTIOGPU_CAPSET_VENUS || !pThis->pbCapset)
-        return VERR_NOT_FOUND;
-    *puMaxVersion = pThis->uCapsetMaxVersion;
-    *pcbCapset    = pThis->cbCapset;
-    if (ppbCapset)
-        *ppbCapset = pThis->pbCapset;
-    return VINF_SUCCESS;
+    for (unsigned i = 0; i < RT_ELEMENTS(pThis->aCapsets); i++)
+        if (pThis->aCapsets[i].pbCapset && pThis->aCapsets[i].idCapset == idCapset)
+        {
+            *puMaxVersion = pThis->aCapsets[i].uMaxVersion;
+            *pcbCapset    = pThis->aCapsets[i].cbCapset;
+            if (ppbCapset)
+                *ppbCapset = pThis->aCapsets[i].pbCapset;
+            return VINF_SUCCESS;
+        }
+    return VERR_NOT_FOUND;
+}
+
+
+/**
+ * Whether OpenGL (virgl) contexts and resources can be used.
+ *
+ * @returns true if the library was initialized with OpenGL.
+ * @param   pThis       The renderer instance.
+ */
+DECLHIDDEN(bool) vgpuR3RendererHasVirgl(PVGPURENDERER pThis)
+{
+    AssertReturn(pThis && pThis->u32Magic == VGPURENDERER_MAGIC, false);
+    return pThis->fVirgl;
+}
+
+
+/**
+ * Checks whether the renderer stopped answering (a call timed out).
+ *
+ * The library may then still be working with memory it was given, so the caller
+ * must not release such memory.
+ *
+ * @returns true if the renderer is dead.
+ * @param   pThis       The renderer instance.
+ */
+DECLHIDDEN(bool) vgpuR3RendererIsDead(PVGPURENDERER pThis)
+{
+    AssertReturn(pThis && pThis->u32Magic == VGPURENDERER_MAGIC, true);
+    return ASMAtomicReadBool(&pThis->fDead);
+}
+
+
+/**
+ * Creates an OpenGL resource without a backing (virgl_renderer_resource_create).
+ *
+ * @returns VBox status code.
+ * @param   pThis       The renderer instance.
+ * @param   pArgs       What to create.  Guest values, checked by the library.
+ */
+DECLHIDDEN(int) vgpuR3RendererResourceCreate3d(PVGPURENDERER pThis, PCVGPURENDERERCREATE3D pArgs)
+{
+    VGPURENDERREQ Req;
+    RT_ZERO(Req);
+    Req.enmType    = kVGpuRenderReq_ResourceCreate3d;
+    Req.u.Create3d = *pArgs;
+    int rc = vgpuR3RendererCall(pThis, &Req);
+    if (RT_FAILURE(rc))
+        LogRelMax(16, ("VirtioGpu: Creating OpenGL resource %RU32 (target %RU32, format %RU32, bind %#RX32, %RU32x%RU32x%RU32) failed: %d (%Rrc)\n",
+                       pArgs->idResource, pArgs->uTarget, pArgs->uFormat, pArgs->fBind, pArgs->cx, pArgs->cy, pArgs->cDepth,
+                       Req.iVirglRc, rc));
+    return rc;
+}
+
+
+/**
+ * Gives an OpenGL resource its guest memory (virgl_renderer_resource_attach_iov).
+ *
+ * The library reads and writes that memory whenever the guest asks for a
+ * transfer, also from commands inside a command stream.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The renderer instance.
+ * @param   idResource  The resource id.
+ * @param   paIov       The pieces.  The library keeps this pointer: the array
+ *                      and the memory it describes must stay valid until
+ *                      vgpuR3RendererResourceDetachIov() or
+ *                      vgpuR3RendererResourceUnref() returned.  If the renderer
+ *                      died (a call timed out) they must never be freed.
+ * @param   cIov        The number of pieces, at most INT32_MAX.
+ */
+DECLHIDDEN(int) vgpuR3RendererResourceAttachIov(PVGPURENDERER pThis, uint32_t idResource, PVGPURENDERERIOV paIov, uint32_t cIov)
+{
+    AssertReturn(cIov && cIov <= INT32_MAX, VERR_INVALID_PARAMETER);
+    VGPURENDERREQ Req;
+    RT_ZERO(Req);
+    Req.enmType                = kVGpuRenderReq_ResourceAttachIov;
+    Req.u.AttachIov.idResource = idResource;
+    Req.u.AttachIov.cIov       = cIov;
+    Req.u.AttachIov.paIov      = paIov;
+    int rc = vgpuR3RendererCall(pThis, &Req);
+    if (RT_FAILURE(rc))
+        LogRelMax(16, ("VirtioGpu: Attaching a backing to resource %RU32 failed: %d (%Rrc)\n", idResource, Req.iVirglRc, rc));
+    return rc;
+}
+
+
+/**
+ * Takes the guest memory away from an OpenGL resource again
+ * (virgl_renderer_resource_detach_iov).
+ *
+ * @param   pThis       The renderer instance.
+ * @param   idResource  The resource id.
+ */
+DECLHIDDEN(void) vgpuR3RendererResourceDetachIov(PVGPURENDERER pThis, uint32_t idResource)
+{
+    VGPURENDERREQ Req;
+    RT_ZERO(Req);
+    Req.enmType          = kVGpuRenderReq_ResourceDetachIov;
+    Req.u.Ids.idResource = idResource;
+    vgpuR3RendererCall(pThis, &Req);
+}
+
+
+/**
+ * Copies between an OpenGL resource and its guest memory
+ * (virgl_renderer_transfer_write_iov / virgl_renderer_transfer_read_iov).
+ *
+ * @returns VBox status code.
+ * @param   pThis           The renderer instance.
+ * @param   fToHost         true: guest memory to host resource, false: the other way.
+ * @param   idResource      The resource id.
+ * @param   idCtx           The context id, 0 for none.
+ * @param   uLevel          The mipmap level.
+ * @param   cbStride        The row stride in the guest memory, 0 for the default.
+ * @param   cbLayerStride   The layer stride in the guest memory, 0 for the default.
+ * @param   pBox            The part of the resource.
+ * @param   off             Where the data starts in the guest memory.
+ * @note    All values come from the guest, the library checks them against
+ *          the resource and the attached memory.
+ */
+DECLHIDDEN(int) vgpuR3RendererTransfer(PVGPURENDERER pThis, bool fToHost, uint32_t idResource, uint32_t idCtx, uint32_t uLevel,
+                                       uint32_t cbStride, uint32_t cbLayerStride, PCVGPURENDERERBOX pBox, uint64_t off)
+{
+    VGPURENDERREQ Req;
+    RT_ZERO(Req);
+    Req.enmType                  = kVGpuRenderReq_Transfer;
+    Req.u.Transfer.fToHost       = fToHost;
+    Req.u.Transfer.idResource    = idResource;
+    Req.u.Transfer.idCtx         = idCtx;
+    Req.u.Transfer.uLevel        = uLevel;
+    Req.u.Transfer.cbStride      = cbStride;
+    Req.u.Transfer.cbLayerStride = cbLayerStride;
+    Req.u.Transfer.Box           = *pBox;
+    Req.u.Transfer.off           = off;
+    int rc = vgpuR3RendererCall(pThis, &Req);
+    if (RT_FAILURE(rc))
+        Log(("VirtioGpu: Transfer %s resource %RU32 failed: %d (%Rrc)\n", fToHost ? "to" : "from", idResource, Req.iVirglRc, rc));
+    return rc;
+}
+
+
+/**
+ * Reads pixels of an OpenGL resource into host memory, for the display.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The renderer instance.
+ * @param   idResource  The resource id.
+ * @param   x           The left edge.
+ * @param   y           The top edge.
+ * @param   cx          The width.
+ * @param   cy          The height.
+ * @param   cbStride    The row stride of the destination.
+ * @param   pvDst       Where to store the pixels (in the format of the resource).
+ * @param   cbDst       The size of the destination, at least cbStride * cy.
+ */
+DECLHIDDEN(int) vgpuR3RendererResourceRead(PVGPURENDERER pThis, uint32_t idResource, uint32_t x, uint32_t y,
+                                           uint32_t cx, uint32_t cy, uint32_t cbStride, void *pvDst, size_t cbDst)
+{
+    AssertReturn(cx && cy && cbDst && (uint64_t)cbStride * cy <= cbDst, VERR_INVALID_PARAMETER);
+    VGPURENDERREQ Req;
+    RT_ZERO(Req);
+    Req.enmType           = kVGpuRenderReq_ResourceRead;
+    Req.u.Read.idResource = idResource;
+    Req.u.Read.cbStride   = cbStride;
+    Req.u.Read.Box.x      = x;
+    Req.u.Read.Box.y      = y;
+    Req.u.Read.Box.cx     = cx;
+    Req.u.Read.Box.cy     = cy;
+    Req.u.Read.Box.cDepth = 1;
+    Req.u.Read.pvDst      = pvDst;
+    Req.u.Read.cbDst      = cbDst;
+    int rc = vgpuR3RendererCall(pThis, &Req);
+    if (RT_FAILURE(rc))
+        LogRelMax(16, ("VirtioGpu: Reading resource %RU32 (%RU32,%RU32 %RU32x%RU32) failed: %d (%Rrc)\n",
+                       idResource, x, y, cx, cy, Req.iVirglRc, rc));
+    return rc;
 }
 
 

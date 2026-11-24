@@ -32,6 +32,7 @@
 #endif
 
 #include <iprt/types.h>
+#include <iprt/assertcompile.h>
 
 
 /*
@@ -65,8 +66,80 @@ typedef DECLCALLBACKTYPE(void, FNVGPURENDERERFENCE,(void *pvUser, uint32_t idCtx
 /** Pointer to a fence callback. */
 typedef FNVGPURENDERERFENCE *PFNVGPURENDERERFENCE;
 
-DECLHIDDEN(int)  vgpuR3RendererCreate(const char *pszLibrary, PFNVGPURENDERERFENCE pfnFence, void *pvFenceUser,
+/**
+ * A piece of host memory given to the library (struct iovec).
+ */
+typedef struct VGPURENDERERIOV
+{
+    /** The start of the memory. */
+    void       *pv;
+    /** The size in bytes. */
+    size_t      cb;
+} VGPURENDERERIOV;
+/** Pointer to a piece of host memory given to the library. */
+typedef VGPURENDERERIOV *PVGPURENDERERIOV;
+
+/**
+ * The arguments for an OpenGL (virgl) resource, struct
+ * virgl_renderer_resource_create_args.  The values come from the guest and
+ * are checked by the library.
+ */
+typedef struct VGPURENDERERCREATE3D
+{
+    /** The resource id, 1..INT32_MAX. */
+    uint32_t    idResource;
+    /** The gallium texture target (PIPE_BUFFER, PIPE_TEXTURE_2D, ...). */
+    uint32_t    uTarget;
+    /** The virgl format. */
+    uint32_t    uFormat;
+    /** The bind flags. */
+    uint32_t    fBind;
+    /** The size. */
+    uint32_t    cx;
+    uint32_t    cy;
+    uint32_t    cDepth;
+    /** The number of array layers. */
+    uint32_t    cArraySize;
+    /** The last mipmap level. */
+    uint32_t    uLastLevel;
+    /** The number of samples. */
+    uint32_t    cSamples;
+    /** The flags. */
+    uint32_t    fFlags;
+} VGPURENDERERCREATE3D;
+AssertCompileSize(VGPURENDERERCREATE3D, 44);
+/** Pointer to const arguments for an OpenGL resource. */
+typedef VGPURENDERERCREATE3D const *PCVGPURENDERERCREATE3D;
+
+/**
+ * A box inside a resource (struct virgl_box).
+ */
+typedef struct VGPURENDERERBOX
+{
+    uint32_t    x;
+    uint32_t    y;
+    uint32_t    z;
+    uint32_t    cx;
+    uint32_t    cy;
+    uint32_t    cDepth;
+} VGPURENDERERBOX;
+AssertCompileSize(VGPURENDERERBOX, 24);
+/** Pointer to a const box. */
+typedef VGPURENDERERBOX const *PCVGPURENDERERBOX;
+
+DECLHIDDEN(int)  vgpuR3RendererCreate(const char *pszLibrary, bool fVirgl, PFNVGPURENDERERFENCE pfnFence, void *pvFenceUser,
                                       PVGPURENDERER *ppRenderer, PRTERRINFO pErrInfo);
+DECLHIDDEN(bool) vgpuR3RendererHasVirgl(PVGPURENDERER pRenderer);
+DECLHIDDEN(bool) vgpuR3RendererIsDead(PVGPURENDERER pRenderer);
+DECLHIDDEN(int)  vgpuR3RendererResourceCreate3d(PVGPURENDERER pRenderer, PCVGPURENDERERCREATE3D pArgs);
+DECLHIDDEN(int)  vgpuR3RendererResourceAttachIov(PVGPURENDERER pRenderer, uint32_t idResource, PVGPURENDERERIOV paIov,
+                                                 uint32_t cIov);
+DECLHIDDEN(void) vgpuR3RendererResourceDetachIov(PVGPURENDERER pRenderer, uint32_t idResource);
+DECLHIDDEN(int)  vgpuR3RendererTransfer(PVGPURENDERER pRenderer, bool fToHost, uint32_t idResource, uint32_t idCtx,
+                                        uint32_t uLevel, uint32_t cbStride, uint32_t cbLayerStride, PCVGPURENDERERBOX pBox,
+                                        uint64_t off);
+DECLHIDDEN(int)  vgpuR3RendererResourceRead(PVGPURENDERER pRenderer, uint32_t idResource, uint32_t x, uint32_t y,
+                                            uint32_t cx, uint32_t cy, uint32_t cbStride, void *pvDst, size_t cbDst);
 DECLHIDDEN(void) vgpuR3RendererDestroy(PVGPURENDERER pRenderer, bool fCleanup);
 DECLHIDDEN(int)  vgpuR3RendererSetMemoryLimit(PVGPURENDERER pRenderer, uint64_t cbLimit);
 DECLHIDDEN(uint64_t) vgpuR3RendererGetMemoryUsed(PVGPURENDERER pRenderer);  /* UINT64_MAX if unknown */

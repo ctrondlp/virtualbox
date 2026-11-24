@@ -111,7 +111,23 @@ Rules for adding a changelog entry to make them look more uniform:
           can get a second compute-only virtio-gpu for Vulkan compute in
           Linux guests (VBoxManage modifyvm --compute-gpu), and the memory
           the guest can allocate on the host graphics card can be limited
-          (--gpu-memory-limit) (github:gh-NNN)</para>
+          (--gpu-memory-limit). On Windows hosts the device can also offer
+          OpenGL (virgl) next to Vulkan, which guests such as SteamOS need
+          for their desktop and Game mode; this is experimental and turned
+          on per VM with VBoxManage setextradata VM
+          VBoxInternal/Devices/virtio-gpu/0/Config/Virgl 1
+          (github:gh-NNN)</para>
+      </listitem>
+
+      <listitem>
+        <para>Network: Added a simulated Wi-Fi radio for Linux guests
+          (virtio-wifi-sim, the virtio transport of the mac80211_hwsim
+          driver). The guest gets Wi-Fi interfaces that never find a
+          network, for guests that do not work properly without a Wi-Fi
+          adapter, such as the first-time setup of SteamOS 3.8. It is
+          experimental and added per VM with VBoxManage setextradata
+          (VBoxInternal/Devices/virtio-wifi-sim/0/ with Trusted, PCIBusNo,
+          PCIDeviceNo and PCIFunctionNo) (github:gh-NNN)</para>
       </listitem>
 
     </itemizedlist>

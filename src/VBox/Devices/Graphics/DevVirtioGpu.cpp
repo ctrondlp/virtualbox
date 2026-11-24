@@ -161,6 +161,10 @@
  *  - "MmioBase", "Irq": use the virtio-over-MMIO transport instead of PCI
  *    (read by VirtioCore).  Venus needs PCI and is disabled then.
  *  - "Venus": offer Venus 3D (default false).
+ *  - "Virgl": with "Venus", also offer OpenGL through the virgl capsets
+ *    (default false).  The guest's OpenGL is then rendered with the host's
+ *    OpenGL, which most Linux guests pick for the desktop when it is there.
+ *    Windows hosts only; ignored when the host has no usable OpenGL.
  *  - "RendererPath": absolute path of the renderer library (default
  *    VIRTIOGPU_RENDERER_DEFAULT_NAME in the VirtualBox architecture
  *    directory).
@@ -174,6 +178,8 @@
  *    VK_ERROR_OUT_OF_DEVICE_MEMORY, as it does when the card is full, so a
  *    guest cannot take the memory the host's own programs need.  Needs a
  *    renderer library that supports it, otherwise it is logged and ignored.
+ *    With "Virgl" the same value also limits the OpenGL resources, whose size
+ *    the device estimates and counts separately.
  *  - "HaltPollHint": how long in milliseconds after a Venus command a halted
  *    virtual CPU may poll for longer than usual before it blocks, 0 to turn
  *    it off, at most 100 (default 10).  See PDMDevHlpVMHaltPollHint.
@@ -257,6 +263,13 @@
  * @{ */
 /** The maximum number of 3D contexts. */
 #define VIRTIOGPU_MAX_CONTEXTS                  64
+/** The most OpenGL (virgl) resources.  A guest desktop uses a few thousand: every
+ * texture and every buffer object of every program is one. */
+#define VIRTIOGPU_MAX_3D_RESOURCES              65536
+/** The number of hash buckets for the OpenGL resources (a power of two). */
+#define VIRTIOGPU_3D_HASH_SIZE                  4096
+/** The most guest pages kept mapped as the backing of OpenGL resources (4 GB). */
+#define VIRTIOGPU_MAX_3D_BACKING_PAGES          _1M
 /** The number of fence rings (timelines) per context: the virtio limit, and
  * the library's PROXY_CONTEXT_TIMELINE_COUNT. */
 #define VIRTIOGPU_MAX_RINGS                     64
@@ -340,6 +353,10 @@ typedef struct VIRTIOGPURESOURCE
     uint32_t                idResource;
     /** Set for a Venus blob resource, clear for a 2D resource. */
     bool                    fBlob;
+    /** Set for an OpenGL (virgl) resource.  These live in the renderer library and are kept in the hash
+     * table VIRTIOGPUR3::papRes3d, not in the resource list.  cx, cy and uFormat are what the guest
+     * asked for; the shadow only exists while the resource is (or was) shown on the scanout. */
+    bool                    f3d;
     /** Blob: set while the blob is mapped into the host visible window. */
     bool                    fMapped;
     /** Blob: taking the mapping out of the window failed, so the library
@@ -367,6 +384,19 @@ typedef struct VIRTIOGPURESOURCE
     uint64_t                cbMap;
     /** Blob: the library's host mapping while mapped. */
     void                   *pvMap;
+    /** Blob: the library keeps a host mapping of the resource (the library allows only one).  It is
+     * shared by the guest's window mapping (fMapped) and the display (fScanHold) and released when
+     * both are gone.  Only the control worker changes it; the display reads pvLib only while
+     * fScanHold is set. */
+    bool                    fLibMapped;
+    /** Blob: the display holds the library mapping (set while the blob is, or was, a scanout). */
+    bool                    fScanHold;
+    /** Blob: the library's map info (VIRTIOGPU_MAP_CACHE_XXX) when fLibMapped. */
+    uint32_t                fLibMapInfo;
+    /** Blob: the library's host mapping when fLibMapped. */
+    void                   *pvLib;
+    /** Blob: the size of the library's host mapping when fLibMapped. */
+    uint64_t                cbLib;
     /** 2D: the guest format (VIRTIOGPU_FORMAT_XXX). */
     uint32_t                uFormat;
     /** The width in pixels, 1..VIRTIOGPU_MAX_DIMENSION. */
@@ -385,6 +415,18 @@ typedef struct VIRTIOGPURESOURCE
     VIRTIOGPUMEMENTRY      *paEntries;
     /** The sum of the sizes of all backing entries. */
     uint64_t                cbBacking;
+    /** OpenGL: the next resource in the same hash bucket. */
+    struct VIRTIOGPURESOURCE *pHashNext;
+    /** OpenGL: the estimated host memory of the resource, counted in VIRTIOGPUR3::cbRes3dTotal. */
+    uint64_t                cbHost3d;
+    /** OpenGL: the guest backing as host memory, the library holds this pointer while attached. */
+    PVGPURENDERERIOV        paIov;
+    /** OpenGL: the number of entries in paIov. */
+    uint32_t                cIov;
+    /** OpenGL: the number of guest pages kept mapped for the backing (entries in paLocks). */
+    uint32_t                cLockedPages;
+    /** OpenGL: the mapping locks of the backing pages. */
+    PPGMPAGEMAPLOCK         paLocks;
 } VIRTIOGPURESOURCE;
 /** Pointer to a resource. */
 typedef VIRTIOGPURESOURCE *PVIRTIOGPURESOURCE;
@@ -413,6 +455,7 @@ typedef union VIRTIOGPUCTRLREQ
     VIRTIOGPURESOURCECREATE2D       Create2d;
     VIRTIOGPURESOURCEUNREF          Unref;
     VIRTIOGPUSETSCANOUT             SetScanout;
+    VIRTIOGPUSETSCANOUTBLOB         SetScanoutBlob;
     VIRTIOGPURESOURCEFLUSH          Flush;
     VIRTIOGPUTRANSFERTOHOST2D       Transfer2d;
     VIRTIOGPURESOURCEATTACHBACKING  AttachBacking;
@@ -425,6 +468,8 @@ typedef union VIRTIOGPUCTRLREQ
     VIRTIOGPURESOURCECREATEBLOB     CreateBlob;
     VIRTIOGPURESOURCEMAPBLOB        MapBlob;
     VIRTIOGPURESOURCEUNMAPBLOB      UnmapBlob;
+    VIRTIOGPURESOURCECREATE3D       Create3d;
+    VIRTIOGPUTRANSFERHOST3D         Transfer3d;
 } VIRTIOGPUCTRLREQ;
 
 /**
@@ -575,6 +620,9 @@ typedef struct VIRTIOGPU
     STAMCOUNTER             StatBlobMaps;
     STAMCOUNTER             StatFencesDeferred;
     STAMCOUNTER             StatFencesSignaled;
+    STAMCOUNTER             StatRes3dCreates;
+    STAMCOUNTER             StatTransfers3d;
+    STAMCOUNTER             StatScanoutReads3d;
     /** @} */
 } VIRTIOGPU;
 /** Pointer to the shared state of the virtio GPU device. */
@@ -653,12 +701,39 @@ typedef struct VIRTIOGPUR3
     const char             *pszVenusState;
     /** @} */
 
+    /** @name OpenGL (virgl): owned by the control worker; the shadow of a resource and the hash
+     *        membership change under CritSectState.
+     * @{ */
+    /** Set when the renderer offers OpenGL (set at construction, read only afterwards). */
+    bool                    fVirgl;
+    /** The OpenGL resources, VIRTIOGPU_3D_HASH_SIZE buckets hashed by resource id; NULL without OpenGL. */
+    PVIRTIOGPURESOURCE     *papRes3d;
+    /** The number of OpenGL resources. */
+    uint32_t                cRes3d;
+    /** The number of guest pages kept mapped as backing of OpenGL resources. */
+    uint32_t                cRes3dPages;
+    /** The estimated host memory of all OpenGL resources (the sum of VIRTIOGPURESOURCE::cbHost3d). */
+    uint64_t                cbRes3dTotal;
+    /** @} */
+
     /** @name Display state, protected by CritSectState.
      * @{ */
     /** The resource shown on scanout 0, NULL if the scanout is disabled. */
     PVIRTIOGPURESOURCE      pScanoutRes;
     /** The part of pScanoutRes shown, inside the resource; its size is the display size. */
     VIRTIOGPURECT           ScanoutRect;
+    /** Set when pScanoutRes is a blob (SET_SCANOUT_BLOB) read through its library mapping, clear for a
+     * 2D resource read from its shadow. */
+    bool                    fScanoutBlob;
+    /** Blob scanout: the buffer size in pixels (the guest's flush rectangles are relative to it). */
+    uint32_t                cxScanBlob;
+    uint32_t                cyScanBlob;
+    /** Blob scanout: VIRTIOGPU_FORMAT_XXX of the buffer. */
+    uint32_t                uScanFormat;
+    /** Blob scanout: bytes per row of the buffer. */
+    uint32_t                cbScanStride;
+    /** Blob scanout: byte offset of the buffer in the blob. */
+    uint32_t                offScanBlob;
     /** Incremented whenever the display size or the enabled state changes. */
     uint32_t                uScanoutGen;
     /** The uScanoutGen value Main's framebuffer was last resized for. */
@@ -792,12 +867,16 @@ static void vgpuR3ScanoutDisableLocked(PVIRTIOGPUCC pThisCC)
 {
     if (pThisCC->pScanoutRes)
     {
-        pThisCC->pScanoutRes = NULL;
+        pThisCC->pScanoutRes  = NULL;
+        pThisCC->fScanoutBlob = false;
         RT_ZERO(pThisCC->ScanoutRect);
         pThisCC->uScanoutGen++;
         vgpuR3DirtyClear(pThisCC);
     }
 }
+
+
+static void vgpuR3ConvertRow(uint32_t uFormat, uint8_t *pbRow, uint32_t cPixels);
 
 
 /**
@@ -819,6 +898,27 @@ static void vgpuR3ScanoutCopyLocked(PVIRTIOGPUCC pThisCC, uint32_t x, uint32_t y
     AssertReturnVoid(x <= pThisCC->ScanoutRect.cx && cx <= pThisCC->ScanoutRect.cx - x);
     AssertReturnVoid(y <= pThisCC->ScanoutRect.cy && cy <= pThisCC->ScanoutRect.cy - y);
     Assert(cbDstLine >= (size_t)pThisCC->ScanoutRect.cx * VIRTIOGPU_BPP_BYTES);
+
+    if (pThisCC->fScanoutBlob)
+    {
+        /* A blob scanout: read it through the library mapping the display holds.  SET_SCANOUT_BLOB checked
+           that the whole buffer lies inside that mapping, and the hold is only dropped after the scanout was
+           disabled (with this lock held), so the mapping is valid here. */
+        AssertReturnVoid(pRes->fBlob && pRes->fScanHold && pRes->fLibMapped && pRes->pvLib);
+        uint32_t const xSrcB  = pThisCC->ScanoutRect.x + x;
+        uint32_t const ySrcB  = pThisCC->ScanoutRect.y + y;
+        size_t const   cbRowB = (size_t)cx * VIRTIOGPU_BPP_BYTES;
+        uint8_t const *pbBlob = (uint8_t const *)pRes->pvLib + pThisCC->offScanBlob;
+        for (uint32_t iRow = 0; iRow < cy; iRow++)
+        {
+            uint8_t *pbRowDst = pbDst + (size_t)(y + iRow) * cbDstLine + (size_t)x * VIRTIOGPU_BPP_BYTES;
+            memcpy(pbRowDst,
+                   pbBlob + (size_t)(ySrcB + iRow) * pThisCC->cbScanStride + (size_t)xSrcB * VIRTIOGPU_BPP_BYTES,
+                   cbRowB);
+            vgpuR3ConvertRow(pThisCC->uScanFormat, pbRowDst, cx);
+        }
+        return;
+    }
 
     /* ScanoutRect was checked to lie inside the resource by SET_SCANOUT. */
     uint32_t const xSrc  = pThisCC->ScanoutRect.x + x;
@@ -913,6 +1013,9 @@ static void vgpuR3ConvertRow(uint32_t uFormat, uint8_t *pbRow, uint32_t cPixels)
  */
 static void vgpuR3ResourceFree(PVIRTIOGPURESOURCE pRes)
 {
+    Assert(!pRes->cLockedPages);
+    RTMemFree(pRes->paLocks);
+    RTMemFree(pRes->paIov);
     RTMemFree(pRes->paEntries);
     RTMemFree(pRes->pbShadow);
     RTMemFree(pRes);
@@ -932,6 +1035,10 @@ static void vgpuR3ResourceFree(PVIRTIOGPURESOURCE pRes)
 static PVIRTIOGPURESOURCE vgpuR3ResourceFind(PVIRTIOGPUCC pThisCC, uint32_t idResource)
 {
     PVIRTIOGPURESOURCE pRes;
+    if (pThisCC->papRes3d)
+        for (pRes = pThisCC->papRes3d[idResource & (VIRTIOGPU_3D_HASH_SIZE - 1)]; pRes; pRes = pRes->pHashNext)
+            if (pRes->idResource == idResource)
+                return pRes;
     RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
     {
         if (pRes->idResource == idResource)
@@ -944,14 +1051,14 @@ static PVIRTIOGPURESOURCE vgpuR3ResourceFind(PVIRTIOGPUCC pThisCC, uint32_t idRe
 /**
  * Looks up a 2D resource, see vgpuR3ResourceFind.
  *
- * @returns The resource or NULL if not found or a blob resource.
+ * @returns The resource or NULL if not found or a blob or OpenGL resource.
  * @param   pThisCC     The ring-3 device state.
  * @param   idResource  The resource ID (guest supplied).
  */
 static PVIRTIOGPURESOURCE vgpuR3Resource2dFind(PVIRTIOGPUCC pThisCC, uint32_t idResource)
 {
     PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, idResource);
-    return pRes && !pRes->fBlob ? pRes : NULL;
+    return pRes && !pRes->fBlob && !pRes->f3d ? pRes : NULL;
 }
 
 
@@ -974,6 +1081,8 @@ static uint32_t vgpuR3ContextLookup(PVIRTIOGPUCC pThisCC, uint32_t idCtx)
     return UINT32_MAX;
 }
 
+
+static void vgpuR3Res3dBackingRelease(PPDMDEVINS pDevIns, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes, bool fDetach);
 
 /**
  * Frees all resources and disables the scanout.
@@ -1004,6 +1113,19 @@ static void vgpuR3ResourcesDestroyAll(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIR
     pThisCC->cbMapped             = 0;
     pThisCC->cbShmBlobs           = 0;
     pThisCC->cbBlobTotal          = 0;
+    /* The OpenGL resources leave the table here, the cursor worker looks resources up under this lock. */
+    PVIRTIOGPURESOURCE pFree3d = NULL;
+    if (pThisCC->papRes3d)
+        for (uint32_t i = 0; i < VIRTIOGPU_3D_HASH_SIZE; i++)
+            while (pThisCC->papRes3d[i])
+            {
+                PVIRTIOGPURESOURCE const pCur = pThisCC->papRes3d[i];
+                pThisCC->papRes3d[i] = pCur->pHashNext;
+                pCur->pHashNext      = pFree3d;
+                pFree3d              = pCur;
+            }
+    pThisCC->cRes3d       = 0;
+    pThisCC->cbRes3dTotal = 0;
     if (fLock)
         vgpuR3StateUnlock(pDevIns, pThis);
 
@@ -1011,6 +1133,15 @@ static void vgpuR3ResourcesDestroyAll(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIR
     RTListForEachSafe(&ListFree, pRes, pResNext, VIRTIOGPURESOURCE, Node)
     {
         RTListNodeRemove(&pRes->Node);
+        vgpuR3ResourceFree(pRes);
+    }
+
+    /* The OpenGL resources: nobody else can find them any more. */
+    while (pFree3d)
+    {
+        pRes    = pFree3d;
+        pFree3d = pRes->pHashNext;
+        vgpuR3Res3dBackingRelease(pDevIns, pThisCC, pRes, false /*fDetach*/);
         vgpuR3ResourceFree(pRes);
     }
 }
@@ -1065,6 +1196,80 @@ static int vgpuR3BackingRead(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPURES
 
 
 /**
+ * Makes sure the library has a host mapping of a blob (the library allows only one per resource).
+ *
+ * Control worker only.
+ *
+ * @returns VBox status code.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The blob resource.
+ */
+static int vgpuR3BlobLibMapAcquire(PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
+{
+    Assert(pRes->fBlob);
+    if (pRes->fLibMapped)
+        return VINF_SUCCESS;
+    void    *pvHost   = NULL;
+    uint64_t cbHost   = 0;
+    uint32_t fMapInfo = 0;
+    int rc = vgpuR3RendererResourceMap(pThisCC->pRenderer, pRes->idResource, &pvHost, &cbHost, &fMapInfo);
+    if (RT_FAILURE(rc))
+        return rc;
+    pRes->pvLib       = pvHost;
+    pRes->cbLib       = cbHost;
+    pRes->fLibMapInfo = fMapInfo;
+    pRes->fLibMapped  = true;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Releases the library's host mapping of a blob when neither the guest's window mapping nor the
+ * display needs it any more.
+ *
+ * Control worker or destructor.  A failure to unmap only leaks the mapping.
+ *
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The blob resource.
+ */
+static void vgpuR3BlobLibMapRelease(PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
+{
+    if (pRes->fLibMapped && !pRes->fMapped && !pRes->fScanHold)
+    {
+        if (pThisCC->pRenderer)
+            vgpuR3RendererResourceUnmap(pThisCC->pRenderer, pRes->idResource);
+        pRes->fLibMapped  = false;
+        pRes->pvLib       = NULL;
+        pRes->cbLib       = 0;
+        pRes->fLibMapInfo = 0;
+    }
+}
+
+
+/**
+ * Drops the display's hold on a blob: the scanout is disabled if it shows the blob, then the library
+ * mapping is released unless the guest's window mapping still uses it.
+ *
+ * Called before a blob is unmapped, released or orphaned, so the display never reads memory that is
+ * about to go away.  Control worker or destructor, no locks held.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The blob resource.
+ */
+static void vgpuR3BlobScanRelease(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
+{
+    vgpuR3StateLock(pDevIns, pThis);
+    if (pThisCC->pScanoutRes == pRes)
+        vgpuR3ScanoutDisableLocked(pThisCC);
+    pRes->fScanHold = false;
+    vgpuR3StateUnlock(pDevIns, pThis);
+    vgpuR3BlobLibMapRelease(pThisCC, pRes);
+}
+
+
+/**
  * Takes a blob out of the host visible window, then releases the library's
  * host mapping of it.
  *
@@ -1096,9 +1301,6 @@ static int vgpuR3BlobUnmap(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pT
         return rc;
     }
 
-    /* The guest cannot reach the memory any more; a failure here only leaks it. */
-    vgpuR3RendererResourceUnmap(pThisCC->pRenderer, pRes->idResource);
-
     vgpuR3StateLock(pDevIns, pThis);
     pThisCC->cMappedBlobs--;
     pThisCC->cbMapped -= pRes->cbMap;
@@ -1108,6 +1310,10 @@ static int vgpuR3BlobUnmap(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pT
     pRes->pvMap    = NULL;
     pRes->fMapInfo = 0;
     vgpuR3StateUnlock(pDevIns, pThis);
+
+    /* The guest cannot reach the memory any more; a failure here only leaks it.  The library mapping stays
+       while the display still holds it. */
+    vgpuR3BlobLibMapRelease(pThisCC, pRes);
     return VINF_SUCCESS;
 }
 
@@ -1124,6 +1330,7 @@ static int vgpuR3BlobUnmap(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pT
 static uint32_t vgpuR3BlobUnref(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
 {
     Assert(pRes->fBlob);
+    vgpuR3BlobScanRelease(pDevIns, pThis, pThisCC, pRes);
     if (!pRes->fOrphan)
     {
         /* Out of the guest's reach first, then the library may free the memory. */
@@ -1162,6 +1369,7 @@ static uint32_t vgpuR3BlobUnref(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
 static uint32_t vgpuR3BlobOrphan(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
 {
     Assert(pRes->fBlob && !pRes->fOrphan);
+    vgpuR3BlobScanRelease(pDevIns, pThis, pThisCC, pRes);
     if (pRes->fMapped && RT_FAILURE(vgpuR3BlobUnmap(pDevIns, pThis, pThisCC, pRes)))
         return VIRTIOGPU_RESP_ERR_UNSPEC;
     vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
@@ -1176,6 +1384,362 @@ static uint32_t vgpuR3BlobOrphan(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGP
 /*********************************************************************************************************************************
 *   Command processing                                                                                                           *
 *********************************************************************************************************************************/
+
+static uint32_t vgpuR3RespFromRendererRc(int rc);
+
+
+/**
+ * VIRTIOGPU_CMD_RESOURCE_CREATE_3D: creates an OpenGL (virgl) resource in the
+ * renderer.  The library checks the parameters.
+ *
+ * @returns Response type.
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pReq        The request (host copy).
+ */
+static uint32_t vgpuR3CmdResourceCreate3d(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC,
+                                          PCVIRTIOGPURESOURCECREATE3D pReq)
+{
+    if (!pThisCC->fVirgl)
+        return VIRTIOGPU_RESP_ERR_UNSPEC;
+    /* The library takes the id as an int in places. */
+    if (!pReq->idResource || pReq->idResource > INT32_MAX || vgpuR3ResourceFind(pThisCC, pReq->idResource))
+        return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
+    if (pThisCC->cRes3d >= VIRTIOGPU_MAX_3D_RESOURCES)
+        return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+
+    /* The library has no memory counter for OpenGL, so estimate: four bytes per sample, a third more
+       with mipmaps.  The same limit as for Vulkan applies ("MaxHostMemory"), counted separately. */
+    uint64_t cbHost3d = (uint64_t)RT_MAX(pReq->cx, 1) * RT_MAX(pReq->cy, 1);
+    uint32_t const acFactors[] = { RT_MAX(pReq->cDepth, 1), RT_MAX(pReq->cArraySize, 1), RT_MAX(pReq->cSamples, 1), 4 };
+    for (unsigned i = 0; i < RT_ELEMENTS(acFactors); i++)
+        cbHost3d = cbHost3d <= UINT64_MAX / 2 / acFactors[i] ? cbHost3d * acFactors[i] : UINT64_MAX / 2;
+    if (pReq->uLastLevel)
+        cbHost3d += cbHost3d / 3;
+    if (   pThisCC->cbMaxHostMemory
+        && (   cbHost3d > pThisCC->cbMaxHostMemory
+            || pThisCC->cbRes3dTotal > pThisCC->cbMaxHostMemory - cbHost3d))
+    {
+        LogRelMax(16, ("%s: OpenGL resource %RU32 (about %RU64 MB) would exceed the host memory limit"
+                       " (%RU64 of %RU64 MB in use)\n",
+                       pThis->szInstance, pReq->idResource, cbHost3d / _1M, pThisCC->cbRes3dTotal / _1M,
+                       pThisCC->cbMaxHostMemory / _1M));
+        return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+    }
+
+    PVIRTIOGPURESOURCE pRes = (PVIRTIOGPURESOURCE)RTMemAllocZ(sizeof(*pRes));
+    if (!pRes)
+        return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+    pRes->idResource = pReq->idResource;
+    pRes->f3d        = true;
+    pRes->cbHost3d   = cbHost3d;
+    pRes->uFormat    = pReq->uFormat;
+    pRes->cx         = pReq->cx;
+    pRes->cy         = pReq->cy;
+
+    VGPURENDERERCREATE3D Args;
+    Args.idResource = pReq->idResource;
+    Args.uTarget    = pReq->uTarget;
+    Args.uFormat    = pReq->uFormat;
+    Args.fBind      = pReq->fBind;
+    Args.cx         = pReq->cx;
+    Args.cy         = pReq->cy;
+    Args.cDepth     = pReq->cDepth;
+    Args.cArraySize = pReq->cArraySize;
+    Args.uLastLevel = pReq->uLastLevel;
+    Args.cSamples   = pReq->cSamples;
+    Args.fFlags     = pReq->fFlags;
+    int rc = vgpuR3RendererResourceCreate3d(pThisCC->pRenderer, &Args);
+    if (RT_FAILURE(rc))
+    {
+        RTMemFree(pRes);
+        return vgpuR3RespFromRendererRc(rc);
+    }
+
+    vgpuR3StateLock(pDevIns, pThis);
+    PVIRTIOGPURESOURCE *ppHead = &pThisCC->papRes3d[pRes->idResource & (VIRTIOGPU_3D_HASH_SIZE - 1)];
+    pRes->pHashNext = *ppHead;
+    *ppHead         = pRes;
+    pThisCC->cRes3d++;
+    pThisCC->cbRes3dTotal += pRes->cbHost3d;
+    vgpuR3StateUnlock(pDevIns, pThis);
+    STAM_REL_COUNTER_INC(&pThis->StatRes3dCreates);
+    return VIRTIOGPU_RESP_OK_NODATA;
+}
+
+
+/**
+ * Takes the guest backing away from an OpenGL resource and releases the guest
+ * pages.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The OpenGL resource.
+ * @param   fDetach     Whether to tell the library (not needed when the
+ *                      library resource is already gone).
+ */
+static void vgpuR3Res3dBackingRelease(PPDMDEVINS pDevIns, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes, bool fDetach)
+{
+    Assert(pRes->f3d);
+    if (fDetach && pRes->paIov && pThisCC->pRenderer)
+        vgpuR3RendererResourceDetachIov(pThisCC->pRenderer, pRes->idResource);
+    if (pRes->paIov && pThisCC->pRenderer && vgpuR3RendererIsDead(pThisCC->pRenderer))
+    {
+        /* The renderer stopped answering and may still be working with the memory: the pages stay
+           mapped and the arrays allocated (and counted) for the rest of the VM's life. */
+        LogRelMax(8, ("VirtioGpu: The renderer does not answer, keeping the %RU32 backing pages of OpenGL resource"
+                      " %RU32 mapped\n",
+                      pRes->cLockedPages, pRes->idResource));
+    }
+    else
+    {
+        for (uint32_t i = 0; i < pRes->cLockedPages; i++)
+            PDMDevHlpPhysReleasePageMappingLock(pDevIns, &pRes->paLocks[i]);
+        Assert(pThisCC->cRes3dPages >= pRes->cLockedPages);
+        pThisCC->cRes3dPages -= pRes->cLockedPages;
+        RTMemFree(pRes->paLocks);
+        RTMemFree(pRes->paIov);
+    }
+    pRes->cLockedPages = 0;
+    pRes->paLocks      = NULL;
+    pRes->paIov        = NULL;
+    pRes->cIov         = 0;
+}
+
+
+/**
+ * Gives an OpenGL resource its guest backing.
+ *
+ * The library reads and writes the backing whenever the guest asks for a
+ * transfer, including from inside command streams, so unlike the 2D resources
+ * (which are copied on demand) the guest pages are mapped into the host and
+ * stay mapped until the backing is detached or the resource is released.
+ *
+ * A mapping lock does not keep PGM from giving a page back to the host (memory
+ * balloon, VM reset).  The pointers stay usable all the same, because the 3D
+ * features only exist in the simplified (NEM) memory mode (see the host visible
+ * window in the constructor), where guest RAM is one host allocation that
+ * lives as long as the VM.  A guest that names a page very often can saturate
+ * its lock count; that page then merely stays locked.
+ *
+ * @returns Response type.
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The OpenGL resource, without a backing.
+ * @param   paEntries   The backing entries (host copy, sizes validated).
+ * @param   cEntries    The number of entries.
+ */
+static uint32_t vgpuR3Res3dBackingAttach(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes,
+                                         VIRTIOGPUMEMENTRY const *paEntries, uint32_t cEntries)
+{
+    /* Count the pages. */
+    uint64_t cPages = 0;
+    for (uint32_t i = 0; i < cEntries; i++)
+        if (paEntries[i].cb)
+            cPages +=    ((paEntries[i].GCPhysAddr & GUEST_PAGE_OFFSET_MASK) + paEntries[i].cb + GUEST_PAGE_SIZE - 1)
+                      >> GUEST_PAGE_SHIFT;
+    if (!cPages)
+        return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+    if (cPages > VIRTIOGPU_MAX_3D_BACKING_PAGES - pThisCC->cRes3dPages)
+    {
+        LogRelMax(16, ("%s: The backing of OpenGL resource %RU32 (%RU64 pages) exceeds the limit (%RU32 pages in use)\n",
+                       pThis->szInstance, pRes->idResource, cPages, pThisCC->cRes3dPages));
+        return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+    }
+
+    PPGMPAGEMAPLOCK  paLocks = (PPGMPAGEMAPLOCK)RTMemAllocZ((size_t)cPages * sizeof(paLocks[0]));
+    PVGPURENDERERIOV paIov   = (PVGPURENDERERIOV)RTMemAllocZ((size_t)cPages * sizeof(paIov[0]));
+    if (!paLocks || !paIov)
+    {
+        RTMemFree(paLocks);
+        RTMemFree(paIov);
+        return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Map page by page; pieces that are adjacent in host memory become one entry. */
+    uint32_t cLocked = 0;
+    uint32_t cIov    = 0;
+    int      rc      = VINF_SUCCESS;
+    for (uint32_t i = 0; i < cEntries && RT_SUCCESS(rc); i++)
+    {
+        RTGCPHYS GCPhys = paEntries[i].GCPhysAddr;
+        uint32_t cbLeft = paEntries[i].cb;
+        while (cbLeft)
+        {
+            uint32_t const offPage = (uint32_t)(GCPhys & GUEST_PAGE_OFFSET_MASK);
+            uint32_t const cbPiece = RT_MIN(cbLeft, GUEST_PAGE_SIZE - offPage);
+            void          *pvPage  = NULL;
+            rc = PDMDevHlpPhysGCPhys2CCPtr(pDevIns, GCPhys, 0 /*fFlags*/, &pvPage, &paLocks[cLocked]);
+            if (RT_FAILURE(rc))
+            {
+                LogRelMax(16, ("%s: Cannot map %RGp for the backing of OpenGL resource %RU32: %Rrc\n",
+                               pThis->szInstance, GCPhys, pRes->idResource, rc));
+                break;
+            }
+            cLocked++;
+            if (cIov && (uint8_t *)paIov[cIov - 1].pv + paIov[cIov - 1].cb == (uint8_t *)pvPage)
+                paIov[cIov - 1].cb += cbPiece;
+            else
+            {
+                paIov[cIov].pv = pvPage;
+                paIov[cIov].cb = cbPiece;
+                cIov++;
+            }
+            GCPhys += cbPiece;
+            cbLeft -= cbPiece;
+        }
+    }
+    if (RT_SUCCESS(rc))
+    {
+        rc = vgpuR3RendererResourceAttachIov(pThisCC->pRenderer, pRes->idResource, paIov, cIov);
+        if (rc == VERR_TIMEOUT)
+        {
+            /* The renderer is stuck and may still use the memory: leave everything as it is. */
+            pThisCC->cRes3dPages += cLocked;
+            return VIRTIOGPU_RESP_ERR_UNSPEC;
+        }
+    }
+    if (RT_FAILURE(rc))
+    {
+        for (uint32_t i = 0; i < cLocked; i++)
+            PDMDevHlpPhysReleasePageMappingLock(pDevIns, &paLocks[i]);
+        RTMemFree(paLocks);
+        RTMemFree(paIov);
+        return VIRTIOGPU_RESP_ERR_UNSPEC;
+    }
+
+    pRes->paLocks         = paLocks;
+    pRes->cLockedPages    = cLocked;
+    pRes->paIov           = paIov;
+    pRes->cIov            = cIov;
+    pThisCC->cRes3dPages += cLocked;
+    return VIRTIOGPU_RESP_OK_NODATA;
+}
+
+
+/**
+ * Releases an OpenGL resource (VIRTIOGPU_CMD_RESOURCE_UNREF).
+ *
+ * @returns Response type.
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The OpenGL resource.
+ */
+static uint32_t vgpuR3Res3dUnref(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes)
+{
+    Assert(pRes->f3d);
+    vgpuR3StateLock(pDevIns, pThis);
+    if (pThisCC->pScanoutRes == pRes)
+        vgpuR3ScanoutDisableLocked(pThisCC);
+    PVIRTIOGPURESOURCE *ppCur = &pThisCC->papRes3d[pRes->idResource & (VIRTIOGPU_3D_HASH_SIZE - 1)];
+    while (*ppCur && *ppCur != pRes)
+        ppCur = &(*ppCur)->pHashNext;
+    if (*ppCur)
+        *ppCur = pRes->pHashNext;
+    pThisCC->cRes3d--;
+    pThisCC->cbRes3dTotal         -= RT_MIN(pRes->cbHost3d, pThisCC->cbRes3dTotal);
+    pThisCC->cbShadowTotal        -= pRes->cbShadow;
+    pThisCC->cTotalBackingEntries -= pRes->cEntries;
+    vgpuR3StateUnlock(pDevIns, pThis);
+
+    /* The library drops the backing with the resource; the pages are released afterwards. */
+    vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
+    vgpuR3Res3dBackingRelease(pDevIns, pThisCC, pRes, false /*fDetach*/);
+    vgpuR3ResourceFree(pRes);
+    return VIRTIOGPU_RESP_OK_NODATA;
+}
+
+
+/**
+ * VIRTIOGPU_CMD_TRANSFER_TO_HOST_3D and VIRTIOGPU_CMD_TRANSFER_FROM_HOST_3D:
+ * copies between an OpenGL resource and its guest backing.
+ *
+ * @returns Response type.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pReq        The request (host copy).
+ * @param   fToHost     The direction.
+ */
+static uint32_t vgpuR3CmdTransfer3d(PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PCVIRTIOGPUTRANSFERHOST3D pReq, bool fToHost)
+{
+    if (!pThisCC->fVirgl)
+        return VIRTIOGPU_RESP_ERR_UNSPEC;
+    PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
+    if (!pRes || !pRes->f3d)
+        return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
+    if (!pRes->paIov)
+        return VIRTIOGPU_RESP_ERR_UNSPEC; /* No backing to copy from or to. */
+    if (pReq->Hdr.uCtxId)
+    {
+        uint32_t const iCtx = vgpuR3ContextLookup(pThisCC, pReq->Hdr.uCtxId);
+        if (iCtx == UINT32_MAX || pThisCC->paContexts[iCtx].fContextInit == VIRTIOGPU_CAPSET_VENUS)
+            return VIRTIOGPU_RESP_ERR_INVALID_CONTEXT_ID;
+    }
+
+    /* The library checks the box against the resource and the offset and strides against the backing. */
+    VGPURENDERERBOX Box;
+    Box.x      = pReq->x;
+    Box.y      = pReq->y;
+    Box.z      = pReq->z;
+    Box.cx     = pReq->cx;
+    Box.cy     = pReq->cy;
+    Box.cDepth = pReq->cDepth;
+    int rc = vgpuR3RendererTransfer(pThisCC->pRenderer, fToHost, pReq->idResource, pReq->Hdr.uCtxId, pReq->uLevel,
+                                    pReq->cbStride, pReq->cbLayerStride, &Box, pReq->offBacking);
+    STAM_REL_COUNTER_INC(&pThis->StatTransfers3d);
+    return RT_SUCCESS(rc) ? VIRTIOGPU_RESP_OK_NODATA : vgpuR3RespFromRendererRc(rc);
+}
+
+
+/**
+ * Reads a part of an OpenGL resource that is shown on the scanout into its
+ * shadow, converting it to the shadow's B8G8R8X8.
+ *
+ * The pixels are read into a buffer of their own and copied into the shadow
+ * under the state lock, so the refresh never sees unconverted or half written
+ * rows.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pRes        The OpenGL resource, with a shadow.
+ * @param   x           The left edge.
+ * @param   y           The top edge.
+ * @param   cx          The width; the rectangle is inside the resource.
+ * @param   cy          The height.
+ */
+static int vgpuR3Res3dShadowUpdate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTIOGPURESOURCE pRes,
+                                   uint32_t x, uint32_t y, uint32_t cx, uint32_t cy)
+{
+    AssertReturn(pRes->f3d && pRes->pbShadow, VERR_INVALID_STATE);
+    AssertReturn(x < pRes->cx && cx <= pRes->cx - x && y < pRes->cy && cy <= pRes->cy - y && cx && cy, VERR_INVALID_PARAMETER);
+
+    /* The rectangle is inside the resource, whose shadow passed the size checks, so this cannot overflow. */
+    uint32_t const cbRow = cx * VIRTIOGPU_BPP_BYTES;
+    size_t const   cbBuf = (size_t)cbRow * cy;
+    uint8_t       *pbBuf = (uint8_t *)RTMemAlloc(cbBuf);
+    if (!pbBuf)
+        return VERR_NO_MEMORY;
+    int rc = vgpuR3RendererResourceRead(pThisCC->pRenderer, pRes->idResource, x, y, cx, cy, cbRow, pbBuf, cbBuf);
+    if (RT_SUCCESS(rc))
+    {
+        for (uint32_t iRow = 0; iRow < cy; iRow++)
+            vgpuR3ConvertRow(pRes->uFormat, pbBuf + (size_t)iRow * cbRow, cx);
+        vgpuR3StateLock(pDevIns, pThis);
+        uint8_t *pbDst = pRes->pbShadow + (size_t)y * pRes->cbPitch + (size_t)x * VIRTIOGPU_BPP_BYTES;
+        for (uint32_t iRow = 0; iRow < cy; iRow++, pbDst += pRes->cbPitch)
+            memcpy(pbDst, pbBuf + (size_t)iRow * cbRow, cbRow);
+        vgpuR3StateUnlock(pDevIns, pThis);
+        STAM_REL_COUNTER_INC(&pThis->StatScanoutReads3d);
+    }
+    RTMemFree(pbBuf);
+    return rc;
+}
+
 
 /**
  * Returns the size of a fixed size control request.
@@ -1207,9 +1771,13 @@ static size_t vgpuR3CtrlCmdSize(uint32_t uType, uint64_t fFeatures)
         case VIRTIOGPU_CMD_CTX_ATTACH_RESOURCE:
         case VIRTIOGPU_CMD_CTX_DETACH_RESOURCE:     return f3d   ? sizeof(VIRTIOGPUCTXRESOURCE) : 0;
         case VIRTIOGPU_CMD_SUBMIT_3D:               return f3d   ? sizeof(VIRTIOGPUCMDSUBMIT) : 0;
+        case VIRTIOGPU_CMD_RESOURCE_CREATE_3D:      return f3d   ? sizeof(VIRTIOGPURESOURCECREATE3D) : 0;
+        case VIRTIOGPU_CMD_TRANSFER_TO_HOST_3D:
+        case VIRTIOGPU_CMD_TRANSFER_FROM_HOST_3D:   return f3d   ? sizeof(VIRTIOGPUTRANSFERHOST3D) : 0;
         case VIRTIOGPU_CMD_RESOURCE_CREATE_BLOB:    return fBlob ? sizeof(VIRTIOGPURESOURCECREATEBLOB) : 0;
         case VIRTIOGPU_CMD_RESOURCE_MAP_BLOB:       return fBlob ? sizeof(VIRTIOGPURESOURCEMAPBLOB) : 0;
         case VIRTIOGPU_CMD_RESOURCE_UNMAP_BLOB:     return fBlob ? sizeof(VIRTIOGPURESOURCEUNMAPBLOB) : 0;
+        case VIRTIOGPU_CMD_SET_SCANOUT_BLOB:        return fBlob ? sizeof(VIRTIOGPUSETSCANOUTBLOB) : 0;
         default:                                    return 0;
     }
 }
@@ -1315,6 +1883,8 @@ static uint32_t vgpuR3CmdResourceUnref(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVI
         return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
     if (pRes->fBlob)
         return vgpuR3BlobUnref(pDevIns, pThis, pThisCC, pRes);
+    if (pRes->f3d)
+        return vgpuR3Res3dUnref(pDevIns, pThis, pThisCC, pRes);
 
     vgpuR3StateLock(pDevIns, pThis);
     if (pThisCC->pScanoutRes == pRes)
@@ -1353,10 +1923,47 @@ static uint32_t vgpuR3CmdSetScanout(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTI
         return VIRTIOGPU_RESP_OK_NODATA;
     }
 
-    PVIRTIOGPURESOURCE pRes = vgpuR3Resource2dFind(pThisCC, pReq->idResource);
-    if (!pRes)
+    PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
+    if (!pRes || pRes->fBlob)
         return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
-    if (!vgpuR3RectIsInside(&pReq->r, pRes->cx, pRes->cy))
+    if (pRes->f3d)
+    {
+        /* An OpenGL resource cannot be read like a 2D one: it gets a shadow that is refreshed from the
+           host GPU on every flush.  Only what Main can show is accepted. */
+        if (   !vgpuR3IsFormatSupported(pRes->uFormat)
+            || !pRes->cx || pRes->cx > VIRTIOGPU_MAX_DIMENSION
+            || !pRes->cy || pRes->cy > VIRTIOGPU_MAX_DIMENSION)
+        {
+            LogRelMax(16, ("%s: SET_SCANOUT: OpenGL resource %RU32 (format %RU32, %RU32x%RU32) cannot be shown\n",
+                           pThis->szInstance, pRes->idResource, pRes->uFormat, pRes->cx, pRes->cy));
+            return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+        }
+        if (!vgpuR3RectIsInside(&pReq->r, pRes->cx, pRes->cy))
+            return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+        if (!pRes->pbShadow)
+        {
+            uint32_t const cbPitch  = pRes->cx * VIRTIOGPU_BPP_BYTES;
+            size_t const   cbShadow = (size_t)cbPitch * pRes->cy;
+            if (cbShadow > VIRTIOGPU_MAX_SHADOW_MEMORY - pThisCC->cbShadowTotal)
+                return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+            uint8_t *pbShadow = (uint8_t *)RTMemAllocZ(cbShadow);
+            if (!pbShadow)
+                return VIRTIOGPU_RESP_ERR_OUT_OF_MEMORY;
+            vgpuR3StateLock(pDevIns, pThis);
+            pRes->pbShadow  = pbShadow;
+            pRes->cbShadow  = cbShadow;
+            pRes->cbPitch   = cbPitch;
+            pThisCC->cbShadowTotal += cbShadow;
+            vgpuR3StateUnlock(pDevIns, pThis);
+            static uint32_t volatile s_cLogged = 0;
+            if (ASMAtomicIncU32(&s_cLogged) <= 8)
+                LogRel(("%s: SET_SCANOUT: OpenGL resource %RU32 (format %RU32, %RU32x%RU32), showing %RU32,%RU32 %RU32x%RU32\n",
+                        pThis->szInstance, pRes->idResource, pRes->uFormat, pRes->cx, pRes->cy,
+                        pReq->r.x, pReq->r.y, pReq->r.cx, pReq->r.cy));
+        }
+        vgpuR3Res3dShadowUpdate(pDevIns, pThis, pThisCC, pRes, 0, 0, pRes->cx, pRes->cy);
+    }
+    else if (!vgpuR3RectIsInside(&pReq->r, pRes->cx, pRes->cy))
         return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
 
     vgpuR3StateLock(pDevIns, pThis);
@@ -1365,8 +1972,118 @@ static uint32_t vgpuR3CmdSetScanout(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTI
     bool const fSizeChanged = !pThisCC->pScanoutRes
                            || pThisCC->ScanoutRect.cx != pReq->r.cx
                            || pThisCC->ScanoutRect.cy != pReq->r.cy;
-    pThisCC->pScanoutRes = pRes;
-    pThisCC->ScanoutRect = pReq->r;
+    pThisCC->pScanoutRes  = pRes;
+    pThisCC->fScanoutBlob = false;
+    pThisCC->ScanoutRect  = pReq->r;
+    if (fSizeChanged)
+        pThisCC->uScanoutGen++;
+    vgpuR3DirtyAll(pThisCC);
+    vgpuR3StateUnlock(pDevIns, pThis);
+    return VIRTIOGPU_RESP_OK_NODATA;
+}
+
+
+/**
+ * VIRTIOGPU_CMD_SET_SCANOUT_BLOB.
+ *
+ * Shows a Venus blob (for example a buffer the guest compositor renders into and exports) on the
+ * scanout.  Only blobs the library can map into host memory (VIRTIOGPU_BLOB_FLAG_USE_MAPPABLE) can be
+ * shown, because the display reads the pixels through that mapping; the mapping is shared with the
+ * guest's window mapping, see vgpuR3BlobLibMapAcquire.  The mapping stays until the blob is released,
+ * so flipping between a few buffers does not map them again each time.
+ *
+ * @returns Response type.
+ * @param   pDevIns     The device instance.
+ * @param   pThis       The shared device state.
+ * @param   pThisCC     The ring-3 device state.
+ * @param   pReq        The request (host copy).
+ */
+static uint32_t vgpuR3CmdSetScanoutBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC,
+                                        PCVIRTIOGPUSETSCANOUTBLOB pReq)
+{
+    AssertReturn(pThisCC->pRenderer, VIRTIOGPU_RESP_ERR_UNSPEC);
+    if (pReq->idScanout >= pThis->Config.cScanouts)
+        return VIRTIOGPU_RESP_ERR_INVALID_SCANOUT_ID;
+
+    /* Resource 0 or an empty rectangle disables the scanout. */
+    if (!pReq->idResource || !pReq->r.cx || !pReq->r.cy)
+    {
+        vgpuR3StateLock(pDevIns, pThis);
+        vgpuR3ScanoutDisableLocked(pThisCC);
+        vgpuR3StateUnlock(pDevIns, pThis);
+        return VIRTIOGPU_RESP_OK_NODATA;
+    }
+
+    PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
+    if (!pRes || !pRes->fBlob || pRes->fOrphan)
+        return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
+
+    /* One plane only, a format Main can show, and a buffer that lies inside the blob. */
+    if (   !vgpuR3IsFormatSupported(pReq->uFormat)
+        || pReq->cx < 1 || pReq->cx > VIRTIOGPU_MAX_DIMENSION
+        || pReq->cy < 1 || pReq->cy > VIRTIOGPU_MAX_DIMENSION
+        || !vgpuR3RectIsInside(&pReq->r, pReq->cx, pReq->cy)
+        || pReq->acbStride[1] || pReq->acbStride[2] || pReq->acbStride[3]
+        || pReq->aoffPlane[1] || pReq->aoffPlane[2] || pReq->aoffPlane[3]
+        || pReq->acbStride[0] < pReq->cx * VIRTIOGPU_BPP_BYTES /* cx <= 8192, no overflow */)
+    {
+        LogRelMax(16, ("%s: SET_SCANOUT_BLOB: invalid parameters: resource %RU32, buffer %RU32x%RU32, format %RU32, rect %RU32,%RU32 %RU32x%RU32, stride %RU32, offset %RU32\n",
+                       pThis->szInstance, pReq->idResource, pReq->cx, pReq->cy, pReq->uFormat, pReq->r.x, pReq->r.y,
+                       pReq->r.cx, pReq->r.cy, pReq->acbStride[0], pReq->aoffPlane[0]));
+        return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    uint64_t const cbNeeded = (uint64_t)pReq->aoffPlane[0]
+                            + (uint64_t)pReq->acbStride[0] * (pReq->cy - 1)
+                            + (uint64_t)pReq->cx * VIRTIOGPU_BPP_BYTES; /* < 2^47, no overflow */
+    if (cbNeeded > pRes->cbBlob)
+    {
+        LogRelMax(16, ("%s: SET_SCANOUT_BLOB: buffer of %#RX64 bytes does not fit blob %RU32 (%#RX64 bytes)\n",
+                       pThis->szInstance, cbNeeded, pReq->idResource, pRes->cbBlob));
+        return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    RT_UNTRUSTED_VALIDATED_FENCE();
+
+    /* The pixels are read through the library's host mapping, so the blob must be mappable. */
+    if (!(pRes->fBlobFlags & VIRTIOGPU_BLOB_FLAG_USE_MAPPABLE))
+    {
+        LogRelMax(16, ("%s: SET_SCANOUT_BLOB: blob %RU32 (flags %#RX32) is not mappable, cannot be shown\n",
+                       pThis->szInstance, pReq->idResource, pRes->fBlobFlags));
+        return VIRTIOGPU_RESP_ERR_UNSPEC;
+    }
+    if (!pRes->fScanHold)
+    {
+        int rc = vgpuR3BlobLibMapAcquire(pThisCC, pRes);
+        if (RT_FAILURE(rc) || pRes->cbLib < cbNeeded || !pRes->pvLib)
+        {
+            LogRelMax(16, ("%s: SET_SCANOUT_BLOB: mapping blob %RU32 for display failed: %Rrc (mapping %RU64 bytes, need %RU64)\n",
+                           pThis->szInstance, pReq->idResource, rc, pRes->cbLib, cbNeeded));
+            vgpuR3BlobLibMapRelease(pThisCC, pRes);
+            return VIRTIOGPU_RESP_ERR_UNSPEC;
+        }
+        vgpuR3StateLock(pDevIns, pThis);
+        pRes->fScanHold = true;
+        vgpuR3StateUnlock(pDevIns, pThis);
+    }
+    else if (pRes->cbLib < cbNeeded)
+        return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+    static uint32_t volatile s_cLogged = 0;
+    if (ASMAtomicIncU32(&s_cLogged) <= 8)
+        LogRel(("%s: SET_SCANOUT_BLOB: blob %RU32 (flags %#RX32, %#RX64 bytes, mapping %#RX64 bytes), buffer %RU32x%RU32 format %RU32 stride %RU32 offset %RU32, showing %RU32,%RU32 %RU32x%RU32\n",
+                pThis->szInstance, pReq->idResource, pRes->fBlobFlags, pRes->cbBlob, pRes->cbLib, pReq->cx, pReq->cy,
+                pReq->uFormat, pReq->acbStride[0], pReq->aoffPlane[0], pReq->r.x, pReq->r.y, pReq->r.cx, pReq->r.cy));
+
+    vgpuR3StateLock(pDevIns, pThis);
+    bool const fSizeChanged = !pThisCC->pScanoutRes
+                           || pThisCC->ScanoutRect.cx != pReq->r.cx
+                           || pThisCC->ScanoutRect.cy != pReq->r.cy;
+    pThisCC->pScanoutRes  = pRes;
+    pThisCC->fScanoutBlob = true;
+    pThisCC->cxScanBlob   = pReq->cx;
+    pThisCC->cyScanBlob   = pReq->cy;
+    pThisCC->uScanFormat  = pReq->uFormat;
+    pThisCC->cbScanStride = pReq->acbStride[0];
+    pThisCC->offScanBlob  = pReq->aoffPlane[0];
+    pThisCC->ScanoutRect  = pReq->r;
     if (fSizeChanged)
         pThisCC->uScanoutGen++;
     vgpuR3DirtyAll(pThisCC);
@@ -1387,11 +2104,44 @@ static uint32_t vgpuR3CmdSetScanout(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTI
 static uint32_t vgpuR3CmdResourceFlush(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC,
                                        PCVIRTIOGPURESOURCEFLUSH pReq)
 {
-    PVIRTIOGPURESOURCE pRes = vgpuR3Resource2dFind(pThisCC, pReq->idResource);
+    PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
     if (!pRes)
         return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
+    if (pRes->fBlob)
+    {
+        /* Only a blob that is the scanout has anything to flush; the guest's rectangle is relative to the
+           buffer given to SET_SCANOUT_BLOB. */
+        vgpuR3StateLock(pDevIns, pThis);
+        uint32_t uResp = VIRTIOGPU_RESP_OK_NODATA;
+        if (pThisCC->pScanoutRes == pRes && pThisCC->fScanoutBlob)
+        {
+            if (!vgpuR3RectIsInside(&pReq->r, pThisCC->cxScanBlob, pThisCC->cyScanBlob))
+                uResp = VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+            else
+            {
+                PCVIRTIOGPURECT const pScan = &pThisCC->ScanoutRect;
+                uint32_t const x0 = RT_MAX(pReq->r.x, pScan->x);
+                uint32_t const y0 = RT_MAX(pReq->r.y, pScan->y);
+                uint32_t const x1 = RT_MIN(pReq->r.x + pReq->r.cx, pScan->x + pScan->cx);
+                uint32_t const y1 = RT_MIN(pReq->r.y + pReq->r.cy, pScan->y + pScan->cy);
+                if (x0 < x1 && y0 < y1)
+                    vgpuR3DirtyAdd(pThisCC, x0 - pScan->x, y0 - pScan->y, x1 - x0, y1 - y0);
+            }
+        }
+        vgpuR3StateUnlock(pDevIns, pThis);
+        return uResp;
+    }
     if (!vgpuR3RectIsInside(&pReq->r, pRes->cx, pRes->cy))
         return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
+
+    /* An OpenGL resource: fetch the flushed part from the host GPU.  Only the control worker sets the
+       scanout and creates the shadow, so both can be looked at without the lock here. */
+    if (pRes->f3d)
+    {
+        if (pThisCC->pScanoutRes != pRes || !pRes->pbShadow || !pReq->r.cx || !pReq->r.cy)
+            return VIRTIOGPU_RESP_OK_NODATA;
+        vgpuR3Res3dShadowUpdate(pDevIns, pThis, pThisCC, pRes, pReq->r.x, pReq->r.y, pReq->r.cx, pReq->r.cy);
+    }
 
     vgpuR3StateLock(pDevIns, pThis);
     if (pThisCC->pScanoutRes == pRes)
@@ -1484,8 +2234,8 @@ static uint32_t vgpuR3CmdTransferToHost2d(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, 
 static uint32_t vgpuR3CmdAttachBacking(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, PVIRTQBUF pVirtqBuf,
                                        PCVIRTIOGPURESOURCEATTACHBACKING pReq)
 {
-    PVIRTIOGPURESOURCE pRes = vgpuR3Resource2dFind(pThisCC, pReq->idResource);
-    if (!pRes)
+    PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
+    if (!pRes || pRes->fBlob)
         return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
     if (pRes->cEntries)
         return VIRTIOGPU_RESP_ERR_UNSPEC; /* Already has a backing. */
@@ -1526,6 +2276,17 @@ static uint32_t vgpuR3CmdAttachBacking(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVI
     }
     RT_UNTRUSTED_VALIDATED_FENCE();
 
+    /* An OpenGL resource: the library needs the guest memory itself. */
+    if (pRes->f3d)
+    {
+        uint32_t const uRespType = vgpuR3Res3dBackingAttach(pDevIns, pThis, pThisCC, pRes, paEntries, cEntries);
+        if (uRespType != VIRTIOGPU_RESP_OK_NODATA)
+        {
+            RTMemFree(paEntries);
+            return uRespType;
+        }
+    }
+
     vgpuR3StateLock(pDevIns, pThis);
     pRes->paEntries  = paEntries;
     pRes->cEntries   = cEntries;
@@ -1548,11 +2309,13 @@ static uint32_t vgpuR3CmdAttachBacking(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVI
 static uint32_t vgpuR3CmdDetachBacking(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC,
                                        PCVIRTIOGPURESOURCEDETACHBACKING pReq)
 {
-    PVIRTIOGPURESOURCE pRes = vgpuR3Resource2dFind(pThisCC, pReq->idResource);
-    if (!pRes)
+    PVIRTIOGPURESOURCE pRes = vgpuR3ResourceFind(pThisCC, pReq->idResource);
+    if (!pRes || pRes->fBlob)
         return VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID;
     if (!pRes->cEntries)
         return VIRTIOGPU_RESP_ERR_UNSPEC;
+    if (pRes->f3d)
+        vgpuR3Res3dBackingRelease(pDevIns, pThisCC, pRes, true /*fDetach*/);
 
     vgpuR3StateLock(pDevIns, pThis);
     VIRTIOGPUMEMENTRY *paEntries = pRes->paEntries;
@@ -1906,6 +2669,8 @@ static void vgpuR3VenusTeardown(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
     PVIRTIOGPURESOURCE pRes;
     RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
     {
+        if (pRes->fBlob && !pRes->fOrphan)
+            vgpuR3BlobScanRelease(pDevIns, pThis, pThisCC, pRes);
         if (   pRes->fBlob
             && pRes->fMapped
             && RT_FAILURE(vgpuR3BlobUnmap(pDevIns, pThis, pThisCC, pRes)))
@@ -1945,6 +2710,15 @@ static void vgpuR3VenusTeardown(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGPU
             vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
     }
 
+    /* 3b. The OpenGL resources and their guest backings. */
+    if (pThisCC->papRes3d)
+        for (uint32_t i = 0; i < VIRTIOGPU_3D_HASH_SIZE; i++)
+            for (pRes = pThisCC->papRes3d[i]; pRes; pRes = pRes->pHashNext)
+            {
+                vgpuR3RendererResourceUnref(pThisCC->pRenderer, pRes->idResource);
+                vgpuR3Res3dBackingRelease(pDevIns, pThisCC, pRes, false /*fDetach*/);
+            }
+
     /* 4. Nothing should be parked any more, but make sure. */
     vgpuR3PendingFlush(pDevIns, pThis, pThisCC, UINT32_MAX, true /*fDrop*/);
 }
@@ -1966,12 +2740,15 @@ static uint32_t vgpuR3CmdGetCapsetInfo(PVIRTIOGPU pThis, PVIRTIOGPUCC pThisCC, P
     if (pReq->iCapset >= pThis->Config.cCapsets)
         return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
 
-    /* There is one capset, Venus. */
+    /* Venus alone, or the two OpenGL capsets followed by Venus. */
+    static const uint32_t s_aidCapsets[] = { VIRTIOGPU_CAPSET_VIRGL, VIRTIOGPU_CAPSET_VIRGL2, VIRTIOGPU_CAPSET_VENUS };
+    uint32_t const idCapset = pThisCC->fVirgl && pReq->iCapset < RT_ELEMENTS(s_aidCapsets)
+                            ? s_aidCapsets[pReq->iCapset] : VIRTIOGPU_CAPSET_VENUS;
     uint32_t uMaxVersion = 0;
     uint32_t cbCapset    = 0;
-    int rc = vgpuR3RendererQueryCapset(pThisCC->pRenderer, VIRTIOGPU_CAPSET_VENUS, &uMaxVersion, &cbCapset, NULL);
+    int rc = vgpuR3RendererQueryCapset(pThisCC->pRenderer, idCapset, &uMaxVersion, &cbCapset, NULL);
     AssertRCReturn(rc, VIRTIOGPU_RESP_ERR_UNSPEC);
-    pResp->idCapset          = VIRTIOGPU_CAPSET_VENUS;
+    pResp->idCapset          = idCapset;
     pResp->uCapsetMaxVersion = uMaxVersion;
     pResp->cbCapsetMax       = cbCapset;
     return VIRTIOGPU_RESP_OK_CAPSET_INFO;
@@ -2026,12 +2803,22 @@ static uint32_t vgpuR3CmdCtxCreate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIO
     /* The library takes the id as an int in places. */
     if (!idCtx || idCtx > INT32_MAX || vgpuR3ContextLookup(pThisCC, idCtx) != UINT32_MAX)
         return VIRTIOGPU_RESP_ERR_INVALID_CONTEXT_ID;
-    /* Venus contexts only: capset id 4 and no other flag, which needs CONTEXT_INIT. */
-    if (   !(pThis->fNegotiatedFeatures & VIRTIOGPU_F_CONTEXT_INIT)
-        || pReq->fContextInit != VIRTIOGPU_CAPSET_VENUS)
+    /* A Venus context has capset id 4 and no other flag, which needs CONTEXT_INIT.  An OpenGL context has
+       capset id 1 or 2, or no context_init at all (a driver without CONTEXT_INIT only knows OpenGL). */
+    uint32_t fContextInit = pReq->fContextInit;
+    if (!(pThis->fNegotiatedFeatures & VIRTIOGPU_F_CONTEXT_INIT))
+        fContextInit = 0;
+    bool const fGlCtx = pThisCC->fVirgl
+                     && (   fContextInit == 0
+                         || fContextInit == VIRTIOGPU_CAPSET_VIRGL
+                         || fContextInit == VIRTIOGPU_CAPSET_VIRGL2);
+    if (fGlCtx && !fContextInit)
+        fContextInit = VIRTIOGPU_CAPSET_VIRGL2;
+    if (!fGlCtx && fContextInit != VIRTIOGPU_CAPSET_VENUS)
     {
-        LogRelMax(16, ("%s: Refusing context %RU32 with context_init %#RX32 (only Venus contexts are supported)\n",
-                       pThis->szInstance, idCtx, pReq->fContextInit));
+        LogRelMax(16, ("%s: Refusing context %RU32 with context_init %#RX32 (%s)\n", pThis->szInstance, idCtx,
+                       pReq->fContextInit,
+                       pThisCC->fVirgl ? "not a Venus or OpenGL context" : "only Venus contexts are supported"));
         return VIRTIOGPU_RESP_ERR_INVALID_PARAMETER;
     }
     uint32_t const cchName = pReq->cchDebugName;
@@ -2060,14 +2847,14 @@ static uint32_t vgpuR3CmdCtxCreate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIO
     RTCritSectEnter(&pThisCC->CritSectFence);
     vgpuR3StateLock(pDevIns, pThis);
     pCtx->idCtx        = idCtx;
-    pCtx->fContextInit = pReq->fContextInit;
+    pCtx->fContextInit = fContextInit;
     RT_ZERO(pCtx->auFenceSignaled);
     memcpy(pCtx->szName, szName, cchName + 1);
     pThisCC->cContexts++;
     vgpuR3StateUnlock(pDevIns, pThis);
     RTCritSectLeave(&pThisCC->CritSectFence);
 
-    int rc = vgpuR3RendererContextCreate(pThisCC->pRenderer, idCtx, pReq->fContextInit, szName, cchName);
+    int rc = vgpuR3RendererContextCreate(pThisCC->pRenderer, idCtx, fContextInit, szName, cchName);
     if (RT_FAILURE(rc))
     {
         RTCritSectEnter(&pThisCC->CritSectFence);
@@ -2082,7 +2869,7 @@ static uint32_t vgpuR3CmdCtxCreate(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIO
     }
 
     STAM_REL_COUNTER_INC(&pThis->StatCtxCreates);
-    LogRelMax(64, ("%s: Venus context %RU32 '%s' created\n", pThis->szInstance, idCtx, szName));
+    LogRelMax(64, ("%s: %s context %RU32 '%s' created\n", pThis->szInstance, fGlCtx ? "OpenGL" : "Venus", idCtx, szName));
     return VIRTIOGPU_RESP_OK_NODATA;
 }
 
@@ -2156,7 +2943,7 @@ static uint32_t vgpuR3CmdCtxResource(PVIRTIOGPUCC pThisCC, PCVIRTIOGPUCTXRESOURC
         return fAttach ? VIRTIOGPU_RESP_ERR_INVALID_RESOURCE_ID : VIRTIOGPU_RESP_OK_NODATA;
     if (pRes->fOrphan)
         return VIRTIOGPU_RESP_OK_NODATA; /* Released with its creating context. */
-    if (pRes->fBlob)
+    if (pRes->fBlob || pRes->f3d)
     {
         /* Both ids were checked to be at most INT32_MAX when created. */
         if (fAttach)
@@ -2361,12 +3148,12 @@ static uint32_t vgpuR3CmdResourceMapBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, P
     }
     RT_UNTRUSTED_VALIDATED_FENCE();
 
-    void    *pvHost   = NULL;
-    uint64_t cbHost   = 0;
-    uint32_t fMapInfo = 0;
-    int rc = vgpuR3RendererResourceMap(pThisCC->pRenderer, pRes->idResource, &pvHost, &cbHost, &fMapInfo);
+    int rc = vgpuR3BlobLibMapAcquire(pThisCC, pRes);
     if (RT_FAILURE(rc))
         return VIRTIOGPU_RESP_ERR_UNSPEC;
+    void    *pvHost   = pRes->pvLib;
+    uint64_t cbHost   = pRes->cbLib;
+    uint32_t fMapInfo = pRes->fLibMapInfo;
 
     /* Never hand out more than the library mapped, and only whole pages of it. */
     uint64_t const cbMap = RT_MIN(cbHost, cbWant);
@@ -2379,7 +3166,7 @@ static uint32_t vgpuR3CmdResourceMapBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, P
     {
         LogRelMax(16, ("%s: Unusable mapping of blob %RU32: %p LB %#RX64 (want %#RX64), map info %#RX32\n",
                        pThis->szInstance, pRes->idResource, pvHost, cbHost, cbWant, fMapInfo));
-        vgpuR3RendererResourceUnmap(pThisCC->pRenderer, pRes->idResource);
+        vgpuR3BlobLibMapRelease(pThisCC, pRes);
         return VIRTIOGPU_RESP_ERR_UNSPEC;
     }
     if (cbMap < cbWant)
@@ -2400,7 +3187,7 @@ static uint32_t vgpuR3CmdResourceMapBlob(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, P
     {
         LogRelMax(16, ("%s: Mapping blob %RU32 at %#RX64 LB %#RX64 of the host visible window failed: %Rrc\n",
                        pThis->szInstance, pRes->idResource, offRegion, cbMap, rc));
-        vgpuR3RendererResourceUnmap(pThisCC->pRenderer, pRes->idResource);
+        vgpuR3BlobLibMapRelease(pThisCC, pRes);
         return rc == VERR_RESOURCE_BUSY ? VIRTIOGPU_RESP_ERR_INVALID_PARAMETER : VIRTIOGPU_RESP_ERR_UNSPEC;
     }
 
@@ -2552,6 +3339,18 @@ static void vgpuR3CtrlCmdProcess(PPDMDEVINS pDevIns, PVIRTIOGPU pThis, PVIRTIOGP
                     break;
                 case VIRTIOGPU_CMD_RESOURCE_UNMAP_BLOB:
                     uRespType = vgpuR3CmdResourceUnmapBlob(pDevIns, pThis, pThisCC, &uReq.UnmapBlob);
+                    break;
+                case VIRTIOGPU_CMD_SET_SCANOUT_BLOB:
+                    uRespType = vgpuR3CmdSetScanoutBlob(pDevIns, pThis, pThisCC, &uReq.SetScanoutBlob);
+                    break;
+                case VIRTIOGPU_CMD_RESOURCE_CREATE_3D:
+                    uRespType = vgpuR3CmdResourceCreate3d(pDevIns, pThis, pThisCC, &uReq.Create3d);
+                    break;
+                case VIRTIOGPU_CMD_TRANSFER_TO_HOST_3D:
+                    uRespType = vgpuR3CmdTransfer3d(pThis, pThisCC, &uReq.Transfer3d, true /*fToHost*/);
+                    break;
+                case VIRTIOGPU_CMD_TRANSFER_FROM_HOST_3D:
+                    uRespType = vgpuR3CmdTransfer3d(pThis, pThisCC, &uReq.Transfer3d, false /*fToHost*/);
                     break;
                 default:
                     AssertFailed(); /* vgpuR3CtrlCmdSize and this switch disagree. */
@@ -3469,13 +4268,13 @@ static DECLCALLBACK(int) vgpuR3SavePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
     PVIRTIOGPUCC pThisCC = PDMDEVINS_2_DATA_CC(pDevIns, PVIRTIOGPUCC);
     RT_NOREF(pSSM);
-    if (pThisCC->cContexts || pThisCC->cBlobs || ASMAtomicReadU32(&pThisCC->cPending))
+    if (pThisCC->cContexts || pThisCC->cBlobs || pThisCC->cRes3d || ASMAtomicReadU32(&pThisCC->cPending))
     {
         /* Note! pfnSSMSetCfgError only works while loading, so report it as a VM error. */
         return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                    N_("virtio-gpu cannot save the VM state while the guest uses the host GPU (%u contexts, "
                                       "%u buffers): close the programs that use Vulkan in the guest first"),
-                                   pThisCC->cContexts, pThisCC->cBlobs);
+                                   pThisCC->cContexts, pThisCC->cBlobs + pThisCC->cRes3d);
     }
     return VINF_SUCCESS;
 }
@@ -3545,7 +4344,7 @@ static DECLCALLBACK(int) vgpuR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uin
         LogRel(("%s: Unsupported saved state unit version %RU32\n", pThis->szInstance, uVersion));
         return VERR_SSM_UNSUPPORTED_DATA_UNIT_VERSION;
     }
-    AssertReturn(RTListIsEmpty(&pThisCC->ListResources) && !pThisCC->pScanoutRes, VERR_WRONG_ORDER);
+    AssertReturn(RTListIsEmpty(&pThisCC->ListResources) && !pThisCC->cRes3d && !pThisCC->pScanoutRes, VERR_WRONG_ORDER);
 
     uint32_t uMarker = 0;
     int rc = pHlp->pfnSSMGetU32(pSSM, &uMarker);
@@ -3706,7 +4505,8 @@ static DECLCALLBACK(void) vgpuR3Info(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, con
     vgpuR3StateLock(pDevIns, pThis);
     pHlp->pfnPrintf(pHlp, "Preferred mode: %RU32x%RU32\n", pThisCC->cxHint, pThisCC->cyHint);
     if (pThisCC->pScanoutRes)
-        pHlp->pfnPrintf(pHlp, "Scanout 0: resource %RU32, rect %RU32,%RU32 %RU32x%RU32\n",
+        pHlp->pfnPrintf(pHlp, "Scanout 0: %sresource %RU32, rect %RU32,%RU32 %RU32x%RU32\n",
+                        pThisCC->fScanoutBlob ? "blob " : "",
                         pThisCC->pScanoutRes->idResource, pThisCC->ScanoutRect.x, pThisCC->ScanoutRect.y,
                         pThisCC->ScanoutRect.cx, pThisCC->ScanoutRect.cy);
     else
@@ -3716,6 +4516,8 @@ static DECLCALLBACK(void) vgpuR3Info(PPDMDEVINS pDevIns, PCDBGFINFOHLP pHlp, con
                     pThisCC->uScanoutGen, pThisCC->uScanoutGenMain);
     pHlp->pfnPrintf(pHlp, "Resources: %RU32 (shadow memory %zu bytes, %RU32 backing entries), %RU32 blobs\n",
                     pThisCC->cResources, pThisCC->cbShadowTotal, pThisCC->cTotalBackingEntries, pThisCC->cBlobs);
+    pHlp->pfnPrintf(pHlp, "OpenGL: %s, %RU32 resources (about %RU64 MB on the host), %RU32 guest pages mapped as their backing\n",
+                    pThisCC->fVirgl ? "on" : "off", pThisCC->cRes3d, pThisCC->cbRes3dTotal / _1M, pThisCC->cRes3dPages);
     PVIRTIOGPURESOURCE pRes;
     RTListForEach(&pThisCC->ListResources, pRes, VIRTIOGPURESOURCE, Node)
     {
@@ -4035,7 +4837,7 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
      * Validate and read the configuration.  MmioBase and Irq are read by VirtioCore
      * (MmioBase also here, Venus needs the PCI transport).
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|RendererPath|HostVisibleSize|MaxBlobMemory|HaltPollHint|MaxHostMemory", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "MonitorCount|MmioBase|Irq|Venus|Virgl|RendererPath|HostVisibleSize|MaxBlobMemory|HaltPollHint|MaxHostMemory", "");
 
     uint32_t cMonitors = 1;
     int rc = pHlp->pfnCFGMQueryU32Def(pCfg, "MonitorCount", &cMonitors, 1);
@@ -4050,6 +4852,10 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
     rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "Venus", &fVenus, false);
     if (RT_FAILURE(rc))
         return PDMDEV_SET_ERROR(pDevIns, rc, N_("virtio-gpu: Failed to read \"Venus\""));
+    bool fVirgl = false;
+    rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "Virgl", &fVirgl, false);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc, N_("virtio-gpu: Failed to read \"Virgl\""));
 
     char szRendererPath[RTPATH_MAX];
     rc = pHlp->pfnCFGMQueryStringDef(pCfg, "RendererPath", szRendererPath, sizeof(szRendererPath), "");
@@ -4150,11 +4956,19 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
             AssertReturn(pThisCC->paContexts, VERR_NO_MEMORY);
 
             RTERRINFOSTATIC ErrInfo;
-            rc = vgpuR3RendererCreate(szPath, vgpuR3FenceCallback, pDevIns, &pThisCC->pRenderer, RTErrInfoInitStatic(&ErrInfo));
+            rc = vgpuR3RendererCreate(szPath, fVirgl, vgpuR3FenceCallback, pDevIns, &pThisCC->pRenderer,
+                                      RTErrInfoInitStatic(&ErrInfo));
+            if (RT_SUCCESS(rc) && vgpuR3RendererHasVirgl(pThisCC->pRenderer))
+            {
+                pThisCC->papRes3d = (PVIRTIOGPURESOURCE *)RTMemAllocZ(sizeof(PVIRTIOGPURESOURCE) * VIRTIOGPU_3D_HASH_SIZE);
+                AssertReturn(pThisCC->papRes3d, VERR_NO_MEMORY);
+                pThisCC->fVirgl = true;
+                LogRel(("%s: OpenGL (virgl) is offered to the guest\n", pThis->szInstance));
+            }
             if (RT_SUCCESS(rc))
             {
                 pThis->cbHostVisible   = cbHostVisible;
-                pThis->Config.cCapsets = 1;
+                pThis->Config.cCapsets = pThisCC->fVirgl ? 3 : 1;
                 fFeatures              = VIRTIOGPU_FEATURES_OFFERED_VENUS;
 
                 /* Limit what the guest can allocate on the host GPU (default: no limit). */
@@ -4304,6 +5118,12 @@ static DECLCALLBACK(int) vgpuR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
                           "Fenced commands parked until their renderer fence retired.");
     PDMDevHlpSTAMRegister(pDevIns, &pThis->StatFencesSignaled, STAMTYPE_COUNTER, "Venus/FencesSignaled", STAMUNIT_OCCURENCES,
                           "Fence retirements reported by the renderer.");
+    PDMDevHlpSTAMRegister(pDevIns, &pThis->StatRes3dCreates,   STAMTYPE_COUNTER, "OpenGL/ResourceCreates", STAMUNIT_OCCURENCES,
+                          "OpenGL resources created.");
+    PDMDevHlpSTAMRegister(pDevIns, &pThis->StatTransfers3d,    STAMTYPE_COUNTER, "OpenGL/Transfers",       STAMUNIT_OCCURENCES,
+                          "Transfers between OpenGL resources and their guest backing.");
+    PDMDevHlpSTAMRegister(pDevIns, &pThis->StatScanoutReads3d, STAMTYPE_COUNTER, "OpenGL/ScanoutReads",    STAMUNIT_OCCURENCES,
+                          "Read backs of an OpenGL resource shown on the scanout.");
 
     if (pThisCC->pRenderer)
         LogRel(("%s: Virtio GPU with %RU32 scanout(s) and Venus 3D, host visible window %RU64 MB at BAR%u\n",
