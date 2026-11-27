@@ -33,6 +33,7 @@
 
 /* GUI includes: */
 #include "UIChooserItem.h"
+#include "UIExtraDataDefs.h"
 #include "UIManagerDefs.h"
 
 /* Forward declarations: */
@@ -73,6 +74,9 @@ public:
 
         /** Returns whether VM is locked. */
         bool isLockedMachine() const;
+
+        /** Applies the VM item size currently chosen. */
+        void updateItemSize();
     /** @} */
 
     /** @name Navigation stuff.
@@ -313,6 +317,9 @@ private:
         QSize  m_visibleSnapshotNameSize;
         /** Holds state text size. */
         QSize  m_stateTextSize;
+
+        /** Holds the VM item size. */
+        UIChooserItemSize  m_enmItemSize;
 
         /** Holds first row maximum width. */
         int  m_iFirstRowMaximumWidth;

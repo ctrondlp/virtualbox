@@ -57,6 +57,9 @@
             outputclass="bold">Sort</b>. </p>
       </li>
     </ul>
+    <p>To see more VMs in the list at once, with or without groups, choose <uicontrol>File</uicontrol>,
+        <uicontrol>VM List Size</uicontrol> and select <uicontrol>Medium</uicontrol> or
+        <uicontrol>Small</uicontrol>. <uicontrol>Large</uicontrol> is the default.</p>
   </body>
   
 </topic>

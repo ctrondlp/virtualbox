@@ -1209,6 +1209,26 @@ bool UIExtraDataManager::setToolTextVisible(bool fVisible)
     return setExtraDataString(GUI_Tools_Text, toFeatureAllowed(fVisible));
 }
 
+UIChooserItemSize UIExtraDataManager::chooserItemSize()
+{
+    /* 'Large' unless another known size is stored: */
+    const QString strSize = extraDataString(GUI_Chooser_ItemSize);
+    if (strSize.compare("Small", Qt::CaseInsensitive) == 0)
+        return UIChooserItemSize_Small;
+    if (strSize.compare("Medium", Qt::CaseInsensitive) == 0)
+        return UIChooserItemSize_Medium;
+    return UIChooserItemSize_Large;
+}
+
+bool UIExtraDataManager::setChooserItemSize(UIChooserItemSize enmSize)
+{
+    /* Null-string (key removed) for the default size: */
+    return setExtraDataString(GUI_Chooser_ItemSize,
+                                enmSize == UIChooserItemSize_Small  ? QString("Small")
+                              : enmSize == UIChooserItemSize_Medium ? QString("Medium")
+                              : QString());
+}
+
 bool UIExtraDataManager::selectorWindowStatusBarVisible()
 {
     /* 'True' unless feature restricted: */
@@ -3182,6 +3202,9 @@ void UIExtraDataManager::sltExtraDataChange(const QUuid &uMachineID, const QStri
             /* Tool labels visibility changed? */
             else if (strKey == GUI_Tools_Text)
                 emit sigToolLabelsVisibilityChange(isToolTextVisible());
+            /* Chooser-pane VM item size changed? */
+            else if (strKey == GUI_Chooser_ItemSize)
+                emit sigChooserItemSizeChange();
             /* Cloud Profile Manager restrictions changed: */
             else if (strKey == GUI_CloudProfileManager_Restrictions)
                 emit sigCloudProfileManagerRestrictionChange();

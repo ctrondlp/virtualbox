@@ -191,6 +191,8 @@ namespace UIExtraDataDefs
         SHARED_LIBRARY_STUFF extern const char *GUI_Tools_Detached;
         /** Holds whether tools tool-bar text visible. */
         SHARED_LIBRARY_STUFF extern const char *GUI_Tools_Text;
+        /** Holds the size of VM items in the Chooser-pane. */
+        SHARED_LIBRARY_STUFF extern const char *GUI_Chooser_ItemSize;
         /** Holds whether selector-window status-bar visible. */
         SHARED_LIBRARY_STUFF extern const char *GUI_Statusbar;
         /** Prefix used by composite extra-data keys,
@@ -938,6 +940,14 @@ enum UIColorThemeType
     UIColorThemeType_Dark,
 };
 Q_DECLARE_METATYPE(UIColorThemeType);
+
+/** Chooser-pane VM item sizes. */
+enum UIChooserItemSize
+{
+    UIChooserItemSize_Large,
+    UIChooserItemSize_Medium,
+    UIChooserItemSize_Small
+};
 
 /** Tool item classes. */
 enum UIToolClass

@@ -1267,6 +1267,19 @@ void UIChooserModel::sltHandleSettingsExpertModeChange()
     m_cloudMenus.value(UIChooserNodeType_Machine)->setProperty("is_valid", QVariant());
 }
 
+void UIChooserModel::sltHandleItemSizeChange()
+{
+    if (!root())
+        return;
+
+    /* Resize all the machine-items, then lay them out again: */
+    QList<UIChooserItemMachine*> machineItems;
+    UIChooserItemMachine::enumerateMachineItems(QList<UIChooserItem*>() << root(), machineItems);
+    foreach (UIChooserItemMachine *pItem, machineItems)
+        pItem->updateItemSize();
+    updateLayout();
+}
+
 void UIChooserModel::sltHandleMachineStateChange(const QUuid &uId)
 {
     /* If that was first selected VM item: */
@@ -1678,6 +1691,8 @@ void UIChooserModel::prepareConnections()
             this, &UIChooserModel::sltHandleCommitData);
     connect(gEDataManager, &UIExtraDataManager::sigSettingsExpertModeChange,
             this, &UIChooserModel::sltHandleSettingsExpertModeChange);
+    connect(gEDataManager, &UIExtraDataManager::sigChooserItemSizeChange,
+            this, &UIChooserModel::sltHandleItemSizeChange);
     connect(gVBoxEvents, &UIVirtualBoxEventHandler::sigMachineStateChange,
             this, &UIChooserModel::sltHandleMachineStateChange);
     connect(this, &UIChooserModel::sigSelectionChanged,

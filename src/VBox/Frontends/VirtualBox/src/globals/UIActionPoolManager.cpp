@@ -175,6 +175,63 @@ protected:
 };
 
 
+/** Menu action extension, used as 'VM List Size' menu class. */
+class UIActionMenuManagerListSize : public UIActionMenu
+{
+    Q_OBJECT;
+
+public:
+
+    /** Constructs action passing @a pParent to the base-class. */
+    UIActionMenuManagerListSize(UIActionPool *pParent)
+        : UIActionMenu(pParent)
+    {}
+
+protected:
+
+    /** Handles translation event. */
+    virtual void retranslateUi() RT_OVERRIDE
+    {
+        setName(QApplication::translate("UIActionPool", "VM &List Size"));
+    }
+};
+
+
+/** Toggle action extension, used as VM list size choice class. */
+class UIActionToggleManagerListSize : public UIActionToggle
+{
+    Q_OBJECT;
+
+public:
+
+    /** Constructs action for @a enmSize, passing @a pParent to the base-class. */
+    UIActionToggleManagerListSize(UIActionPool *pParent, UIChooserItemSize enmSize)
+        : UIActionToggle(pParent)
+        , m_enmSize(enmSize)
+    {
+        setProperty("UIChooserItemSize", static_cast<int>(enmSize));
+    }
+
+protected:
+
+    /** Handles translation event. */
+    virtual void retranslateUi() RT_OVERRIDE
+    {
+        switch (m_enmSize)
+        {
+            case UIChooserItemSize_Large:  setName(QApplication::translate("UIActionPool", "&Large")); break;
+            case UIChooserItemSize_Medium: setName(QApplication::translate("UIActionPool", "&Medium")); break;
+            case UIChooserItemSize_Small:  setName(QApplication::translate("UIActionPool", "&Small")); break;
+        }
+    }
+
+private:
+
+    /** Holds the size this action chooses. */
+    const UIChooserItemSize  m_enmSize;
+};
+
+
 /** Simple action extension, used as 'Show Home Screen' action class. */
 class UIActionToggleManagerToolsGlobalShowHomeScreen : public UIActionToggle
 {
@@ -3790,6 +3847,10 @@ void UIActionPoolManager::preparePool()
     m_pool[UIActionIndexMN_M_File] = new UIActionMenuManagerFile(this);
     m_pool[UIActionIndexMN_M_File_S_ImportAppliance] = new UIActionSimpleManagerFileShowImportApplianceWizard(this);
     m_pool[UIActionIndexMN_M_File_S_ExportAppliance] = new UIActionSimpleManagerFileShowExportApplianceWizard(this);
+    m_pool[UIActionIndexMN_M_File_M_ListSize] = new UIActionMenuManagerListSize(this);
+    m_pool[UIActionIndexMN_M_File_M_ListSize_T_Large] = new UIActionToggleManagerListSize(this, UIChooserItemSize_Large);
+    m_pool[UIActionIndexMN_M_File_M_ListSize_T_Medium] = new UIActionToggleManagerListSize(this, UIChooserItemSize_Medium);
+    m_pool[UIActionIndexMN_M_File_M_ListSize_T_Small] = new UIActionToggleManagerListSize(this, UIChooserItemSize_Small);
     m_pool[UIActionIndexMN_M_File_M_Tools] = new UIActionMenuManagerToolsGlobal(this);
     m_pool[UIActionIndexMN_M_File_M_Tools_T_HomeScreen] = new UIActionToggleManagerToolsGlobalShowHomeScreen(this);
     m_pool[UIActionIndexMN_M_File_M_Tools_T_MachineManager] = new UIActionToggleManagerToolsGlobalShowMachineManager(this);
@@ -3957,6 +4018,10 @@ void UIActionPoolManager::preparePool()
     m_pool[UIActionIndexMN_M_VMActivityOverview_S_SwitchToMachineActivity] = new UIActionMenuManagerVMActivityOverviewSwitchToMachineActivity(this);
 
     /* 'File' action groups: */
+    m_groupPool[UIActionIndexMN_M_File_M_ListSize] = new QActionGroup(m_pool.value(UIActionIndexMN_M_File_M_ListSize));
+    m_groupPool[UIActionIndexMN_M_File_M_ListSize]->addAction(m_pool.value(UIActionIndexMN_M_File_M_ListSize_T_Large));
+    m_groupPool[UIActionIndexMN_M_File_M_ListSize]->addAction(m_pool.value(UIActionIndexMN_M_File_M_ListSize_T_Medium));
+    m_groupPool[UIActionIndexMN_M_File_M_ListSize]->addAction(m_pool.value(UIActionIndexMN_M_File_M_ListSize_T_Small));
     m_groupPool[UIActionIndexMN_M_File_M_Tools] = new QActionGroup(m_pool.value(UIActionIndexMN_M_File_M_Tools));
     m_groupPool[UIActionIndexMN_M_File_M_Tools]->addAction(m_pool.value(UIActionIndexMN_M_File_M_Tools_T_HomeScreen));
     m_groupPool[UIActionIndexMN_M_File_M_Tools]->addAction(m_pool.value(UIActionIndexMN_M_File_M_Tools_T_ExtensionPackManager));
@@ -4253,6 +4318,14 @@ void UIActionPoolManager::updateMenuFile()
     /* Clear contents: */
     pMenu->clear();
 
+    /* Populate 'File' / 'VM List Size' menu: */
+    UIMenu *pMenuListSize = action(UIActionIndexMN_M_File_M_ListSize)->menu();
+    AssertPtrReturnVoid(pMenuListSize);
+    pMenuListSize->clear();
+    pMenuListSize->addAction(action(UIActionIndexMN_M_File_M_ListSize_T_Large));
+    pMenuListSize->addAction(action(UIActionIndexMN_M_File_M_ListSize_T_Medium));
+    pMenuListSize->addAction(action(UIActionIndexMN_M_File_M_ListSize_T_Small));
+
     /* The Application / 'File' menu contents is very different depending on host type. */
 
 #ifdef VBOX_WS_MAC
@@ -4283,6 +4356,8 @@ void UIActionPoolManager::updateMenuFile()
     pMenu->addSeparator();
     /* 'Tools' submenu goes to 'File' menu: */
     pMenu->addMenu(action(UIActionIndexMN_M_File_M_Tools)->menu());
+    /* 'VM List Size' submenu goes to 'File' menu: */
+    pMenu->addMenu(action(UIActionIndexMN_M_File_M_ListSize)->menu());
 #else /* !VBOX_WS_MAC */
 
     /* 'Preferences' action goes to 'File' menu: */
@@ -4303,6 +4378,8 @@ void UIActionPoolManager::updateMenuFile()
 # endif
     /* 'Tools' submenu goes to 'File' menu: */
     pMenu->addMenu(action(UIActionIndexMN_M_File_M_Tools)->menu());
+    /* 'VM List Size' submenu goes to 'File' menu: */
+    pMenu->addMenu(action(UIActionIndexMN_M_File_M_ListSize)->menu());
     /* Separator after 'Tools' submenu of the 'File' menu: */
     pMenu->addSeparator();
 # ifdef VBOX_GUI_WITH_NETWORK_MANAGER
