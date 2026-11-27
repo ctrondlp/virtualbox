@@ -2637,6 +2637,22 @@ void UIVirtualBoxManager::prepareConnections()
     connect(actionPool()->actionGroup(UIActionIndexMN_M_File_M_Tools), &QActionGroup::triggered,
             this, &UIVirtualBoxManager::sltPerformSwitchToTool);
 
+    /* 'File/VM List Size' menu connections: */
+    QActionGroup *pGroupListSize = actionPool()->actionGroup(UIActionIndexMN_M_File_M_ListSize);
+    foreach (QAction *pAction, pGroupListSize->actions())
+        if (pAction->property("UIChooserItemSize").toInt() == gEDataManager->chooserItemSize())
+            pAction->setChecked(true);
+    connect(pGroupListSize, &QActionGroup::triggered, this, [](QAction *pAction)
+    {
+        gEDataManager->setChooserItemSize(static_cast<UIChooserItemSize>(pAction->property("UIChooserItemSize").toInt()));
+    });
+    connect(gEDataManager, &UIExtraDataManager::sigChooserItemSizeChange, this, [pGroupListSize]()
+    {
+        foreach (QAction *pAction, pGroupListSize->actions())
+            if (pAction->property("UIChooserItemSize").toInt() == gEDataManager->chooserItemSize())
+                pAction->setChecked(true);
+    });
+
     /* 'Home' menu connections: */
     connect(actionPool()->action(UIActionIndexMN_M_Home_S_New), &UIAction::triggered,
             this, &UIVirtualBoxManager::sltOpenNewMachineWizard);

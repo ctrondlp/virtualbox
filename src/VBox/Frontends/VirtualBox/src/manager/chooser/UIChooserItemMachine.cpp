@@ -39,6 +39,7 @@
 #include "UIChooserModel.h"
 #include "UIChooserNodeGroup.h"
 #include "UIChooserNodeMachine.h"
+#include "UIExtraDataManager.h"
 #include "UIIconPool.h"
 #include "UIImageTools.h"
 #include "UITranslationEventListener.h"
@@ -55,6 +56,7 @@ UIChooserItemMachine::UIChooserItemMachine(UIChooserItem *pParent, UIChooserNode
     , m_iHoverLightnessFinal(0)
     , m_iHighlightLightnessStart(0)
     , m_iHighlightLightnessFinal(0)
+    , m_enmItemSize(UIChooserItemSize_Large)
     , m_iFirstRowMaximumWidth(0)
     , m_iMinimumNameWidth(0)
     , m_iMaximumNameWidth(0)
@@ -237,6 +239,18 @@ void UIChooserItemMachine::startEditing()
     AssertMsgFailed(("Machine graphics item do NOT support editing yet!"));
 }
 
+void UIChooserItemMachine::updateItemSize()
+{
+    m_enmItemSize = gEDataManager->chooserItemSize();
+
+    /* Forget the cached first row width, the margins and icon may differ: */
+    m_iFirstRowMaximumWidth = 0;
+    updateItem();
+    updateFirstRowMaximumWidth();
+    updateGeometry();
+    update();
+}
+
 void UIChooserItemMachine::updateItem()
 {
     /* Update this machine-item: */
@@ -340,7 +354,10 @@ int UIChooserItemMachine::minimumWidthHint() const
     int iBottomLineWidth = m_statePixmapSize.width() +
                            iMinorSpacing +
                            m_stateTextSize.width();
-    int iMiddleColumnWidth = qMax(iTopLineWidth, iBottomLineWidth);
+    /* The 'Small' size has a single line with the state icon at its end: */
+    int iMiddleColumnWidth = m_enmItemSize == UIChooserItemSize_Small
+                           ? m_iMinimumNameWidth + iMinorSpacing + m_statePixmapSize.width()
+                           : qMax(iTopLineWidth, iBottomLineWidth);
     int iMachineItemWidth = m_pixmapSize.width() +
                             iMajorSpacing +
                             iMiddleColumnWidth;
@@ -364,9 +381,9 @@ int UIChooserItemMachine::minimumHeightHint() const
     /* And machine-item content to take into account: */
     int iTopLineHeight = qMax(m_visibleNameSize.height(), m_visibleSnapshotNameSize.height());
     int iBottomLineHeight = qMax(m_statePixmapSize.height(), m_stateTextSize.height());
-    int iMiddleColumnHeight = iTopLineHeight +
-                              iMachineItemTextSpacing +
-                              iBottomLineHeight;
+    int iMiddleColumnHeight = m_enmItemSize == UIChooserItemSize_Small
+                            ? qMax(m_visibleNameSize.height(), m_statePixmapSize.height())
+                            : iTopLineHeight + iMachineItemTextSpacing + iBottomLineHeight;
     QList<int> heights;
     heights << m_pixmapSize.height() << iMiddleColumnHeight;
     int iMaxHeight = 0;
@@ -565,6 +582,8 @@ void UIChooserItemMachine::prepare()
     m_snapshotNameFont = font();
     m_stateTextFont = font();
 
+    m_enmItemSize = gEDataManager->chooserItemSize();
+
     /* Sizes: */
     m_iFirstRowMaximumWidth = 0;
     m_iMinimumNameWidth = 0;
@@ -629,7 +648,16 @@ QVariant UIChooserItemMachine::data(int iKey) const
         /* Layout hints: */
         case MachineItemData_MarginHL:     return QApplication::style()->pixelMetric(QStyle::PM_SmallIconSize);
         case MachineItemData_MarginHR:     return QApplication::style()->pixelMetric(QStyle::PM_SmallIconSize) / 4 * 5;
-        case MachineItemData_MarginV:      return QApplication::style()->pixelMetric(QStyle::PM_SmallIconSize) / 4 * 3;
+        case MachineItemData_MarginV:
+        {
+            const int iMetric = QApplication::style()->pixelMetric(QStyle::PM_SmallIconSize);
+            switch (m_enmItemSize)
+            {
+                case UIChooserItemSize_Small:  return iMetric * 3 / 16;
+                case UIChooserItemSize_Medium: return iMetric / 4;
+                default:                       return iMetric / 4 * 3;
+            }
+        }
         case MachineItemData_MajorSpacing: return QApplication::style()->pixelMetric(QStyle::PM_SmallIconSize) / 2;
         case MachineItemData_MinorSpacing: return QApplication::style()->pixelMetric(QStyle::PM_SmallIconSize) / 4;
         case MachineItemData_TextSpacing:  return 0;
@@ -656,6 +684,14 @@ void UIChooserItemMachine::updatePixmap()
     AssertPtrReturnVoid(cache());
     QSize pixmapSize;
     QPixmap pixmap = cache()->osPixmap(&pixmapSize);
+    if (m_enmItemSize == UIChooserItemSize_Small && !pixmap.isNull())
+    {
+        const int iIconMetric = QApplication::style()->pixelMetric(QStyle::PM_SmallIconSize);
+        const qreal dDpr = pixmap.devicePixelRatio();
+        pixmapSize.scale(iIconMetric, iIconMetric, Qt::KeepAspectRatio);
+        pixmap = pixmap.scaled(pixmapSize * dDpr, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        pixmap.setDevicePixelRatio(dDpr);
+    }
     /* Update linked values: */
     if (m_pixmapSize != pixmapSize)
     {
@@ -730,6 +766,8 @@ void UIChooserItemMachine::updateFirstRowMaximumWidth()
     iFirstRowMaximumWidth -= m_pixmapSize.width(); /* left pixmap width */
     iFirstRowMaximumWidth -= iMajorSpacing; /* spacing between left pixmap and name(s) */
     iFirstRowMaximumWidth -= iMarginHR; /* right margin */
+    if (m_enmItemSize == UIChooserItemSize_Small) /* state pixmap at the end of the line */
+        iFirstRowMaximumWidth -= data(MachineItemData_MinorSpacing).toInt() + m_statePixmapSize.width();
 
     /* Is there something changed? */
     if (m_iFirstRowMaximumWidth == iFirstRowMaximumWidth)
@@ -763,7 +801,8 @@ void UIChooserItemMachine::updateMinimumSnapshotNameWidth()
     /* Calculate new minimum snapshot-name width: */
     int iMinimumSnapshotNameWidth = 0;
     /* Is there any snapshot exists? */
-    if (   cacheType() == UIVirtualMachineItemType_Local
+    if (   m_enmItemSize != UIChooserItemSize_Small
+        && cacheType() == UIVirtualMachineItemType_Local
         && !cache()->toLocal()->snapshotName().isEmpty())
     {
         const QFontMetrics fm(m_snapshotNameFont, model()->paintDevice());
@@ -1110,6 +1149,20 @@ void UIChooserItemMachine::paintMachineInfo(QPainter *pPainter, const QRect &rec
     int iMiddleColumnIndent = iLeftColumnIndent +
                               m_pixmapSize.width() +
                               iMajorSpacing;
+
+    /* The 'Small' size is a single line: name, then the state icon at the right edge. */
+    if (m_enmItemSize == UIChooserItemSize_Small)
+    {
+        paintText(pPainter,
+                  QPoint(iMiddleColumnIndent, (iFullHeight - m_visibleNameSize.height()) / 2),
+                  m_nameFont, model()->paintDevice(), m_strVisibleName);
+        const int iMarginHR = data(MachineItemData_MarginHR).toInt();
+        paintPixmap(pPainter,
+                    QPoint(rectangle.width() - iMarginHR - m_statePixmapSize.width(),
+                           (iFullHeight - m_statePixmapSize.height()) / 2),
+                    m_statePixmap);
+        return;
+    }
 
     /* Paint middle column: */
     {
