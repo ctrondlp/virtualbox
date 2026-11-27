@@ -123,6 +123,10 @@ the measurements.
 
 ## Other changes
 
+* **A smaller VM list in the manager window:** *File > VM List Size* offers Large (the default, unchanged), Medium (two
+  lines with tighter margins) and Small (one line), so that more VMs fit without scrolling or grouping. A row went from
+  57 to 41 or 23 pixels on this PC. Tried on a Windows host only; groups, custom VM icons, high DPI and the dark theme
+  were not tested.
 * **Graphics:** VMSVGA can create its DirectX 11 device on the high performance GPU (`VMSVGA3dAdapter`), and VGA modes
   with very wide scanlines no longer miss changed pixels.
 * **Correctness:** silent Linux guests on the HD Audio controller with more than about 4 GB of RAM, a saved state of a running virtio-SCSI VM that could not be loaded, wrong source register in two AVX conversions, a RIP-relative decoding bug (pull request

@@ -59,6 +59,12 @@ in this fork.
 | `nat-throughput` | Guest to host TCP over NAT is faster: libslirp writes the data of a burst of guest packets to the host connection in one call instead of one call per packet (on by default, DeferHostWrites=0 turns it off) | local: it changes the bundled libslirp, so it would go to libslirp first ([speed page](speed.html#7-nat-faster-uploads-from-the-guest)) |
 | `virtio-hwsim-wifi` | A simulated Wi-Fi adapter for Linux guests (the virtio transport of mac80211_hwsim) that never finds a network, for guests that misbehave without a Wi-Fi adapter such as the first-time setup of SteamOS 3.8 | local: experimental, may be offered later ([details](virtio-gpu.html#a-simulated-wi-fi-adapter)) |
 
+## Manager window (GUI)
+
+| Branch | What it does | Status |
+|---|---|---|
+| `gui-vm-list-size` | The manager window can show the VM list in Large (default), Medium or Small rows (File > VM List Size), so that more VMs fit without scrolling | local for now: may be offered later |
+
 ## Graphics
 
 | Branch | What it does | Status |
