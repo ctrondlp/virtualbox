@@ -96,6 +96,9 @@ signals:
     /** Notifies about tool labels visibility change. */
     void sigToolLabelsVisibilityChange(bool fVisible);
 
+    /** Notifies about Chooser-pane VM item size change. */
+    void sigChooserItemSizeChange();
+
     /** Notifies about Cloud Profile Manager restriction change. */
     void sigCloudProfileManagerRestrictionChange();
 
@@ -429,6 +432,11 @@ public:
         bool isToolTextVisible();
         /** Defines whether tools tool-bar text @a fVisible. */
         bool setToolTextVisible(bool fVisible);
+
+        /** Returns the size of VM items in the Chooser-pane. */
+        UIChooserItemSize chooserItemSize();
+        /** Defines the @a enmSize of VM items in the Chooser-pane. */
+        bool setChooserItemSize(UIChooserItemSize enmSize);
 
         /** Returns whether selector-window status-bar visible. */
         bool selectorWindowStatusBarVisible();

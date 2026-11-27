@@ -327,6 +327,8 @@ private slots:
       * @{ */
         /** Handles signal about experience-mode being changed. */
         void sltHandleSettingsExpertModeChange();
+        /** Handles VM item size change. */
+        void sltHandleItemSizeChange();
         /** Handles CVirtualBox event about state change for machine with @a uId. */
         void sltHandleMachineStateChange(const QUuid &uId);
         /** Handles signal about selection changed. */

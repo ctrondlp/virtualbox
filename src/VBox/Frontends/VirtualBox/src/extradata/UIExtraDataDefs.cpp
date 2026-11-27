@@ -108,6 +108,7 @@ const char *UIExtraDataDefs::GUI_Toolbar_GlobalTools_Order = "GUI/Toolbar/Global
 const char *UIExtraDataDefs::GUI_Tools_LastItemsSelected = "GUI/Tools/LastItemsSelected";
 const char *UIExtraDataDefs::GUI_Tools_Detached = "GUI/Tools/Detached";
 const char *UIExtraDataDefs::GUI_Tools_Text = "GUI/Tools/Text";
+const char *UIExtraDataDefs::GUI_Chooser_ItemSize = "GUI/Chooser/ItemSize";
 const char *UIExtraDataDefs::GUI_Statusbar = "GUI/Statusbar";
 const char *UIExtraDataDefs::GUI_GroupDefinitions = "GUI/GroupDefinitions";
 const char *UIExtraDataDefs::GUI_LastItemSelected = "GUI/LastItemSelected";
