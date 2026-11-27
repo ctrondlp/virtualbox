@@ -1,6 +1,7 @@
 ---
 layout: default
-title: Storage
+title: "VirtualBox storage: NVMe boot and disk speed"
+description: "BIOS boot from NVMe in VirtualBox, disk controller and host I/O cache measurements, virtio-SCSI saved states and Windows on NVMe"
 ---
 
 # Storage

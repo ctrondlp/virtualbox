@@ -1,6 +1,7 @@
 ---
 layout: default
-title: All changes
+title: "All changes in this VirtualBox fork"
+description: "Every feature branch in this VirtualBox fork, what it does and whether it is planned for upstream"
 ---
 
 # All changes

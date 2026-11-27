@@ -1,6 +1,7 @@
 ---
 layout: default
-title: Guest CPU features
+title: "Guest CPU features in VirtualBox"
+description: "Passing GFNI, VAES, AVX-VNNI, AVX-IFMA and other CPU extensions through to VirtualBox guests, with a switch for each"
 ---
 
 # Guest CPU features

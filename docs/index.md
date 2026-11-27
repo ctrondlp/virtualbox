@@ -1,6 +1,8 @@
 ---
 layout: default
-title: Home
+title: "A faster VirtualBox fork with Vulkan and macOS guests"
+description: "VirtualBox fork: faster on Windows hosts running Hyper-V, Vulkan for Linux guests through virtio-gpu, SteamOS in a virtual machine and macOS guests"
+image: /assets/img/steamos-tf2.jpg
 ---
 
 # What this fork adds
@@ -23,7 +25,7 @@ This is a fork of VirtualBox (Oracle's open source repository) with these kinds 
 [`integration`](https://github.com/ctrondlp/virtualbox/tree/integration) branch of this fork, which is the branch to build
 and try (see [Build it yourself](building.html)). The branch names on the other pages are the individual feature branches
 that were merged into it (they are not all published separately, but their commits are in `integration`); the stand-alone ones are being prepared for upstream one by one. `main` is VirtualBox's own code
-as of the last sync, and `showcase` only holds this site.
+as of the last sync, and `showcase` is `integration` plus this site.
 
 These changes are meant to go back into VirtualBox, see [Upstream](#upstream-we-want-these-changes-in-virtualbox).
 Everything on this site was measured on one machine, and the pages say how. Nothing here is endorsed by or affiliated
@@ -81,6 +83,10 @@ For ordinary desktop graphics VMSVGA is still better, and the page says so with 
 
 **Stock SteamOS runs in Game mode in a virtual machine, and Team Fortress 2 starts in it with Vulkan:** the intro movie
 plays, the main menu comes up and there is sound. Nothing inside the guest was changed.
+
+![Team Fortress 2 main menu running in a SteamOS virtual machine in VirtualBox](assets/img/steamos-tf2.jpg)
+
+*Team Fortress 2's main menu in the SteamOS virtual machine (account name painted over).*
 
 * **Game mode tested with** SteamOS 3.8.14 and 3.9.5 on a Windows 11 host with an RTX 5070. Signing in to Steam and downloading
   the game work too.

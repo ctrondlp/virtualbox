@@ -1,6 +1,7 @@
 ---
 layout: default
-title: Speed
+title: "VirtualBox speed on Hyper-V hosts"
+description: "Measured speed fixes for VirtualBox on Windows hosts running Hyper-V: interrupts, timers, MSR and MMIO exits, disk I/O and NAT"
 ---
 
 # Speed

@@ -1,6 +1,7 @@
 ---
 layout: default
-title: virtio-gpu
+title: "virtio-gpu in VirtualBox: Vulkan for Linux guests"
+description: "A virtio-gpu device for VirtualBox: Vulkan on the host GPU for Linux guests, LLM benchmarks, SteamOS Game mode and the current limits"
 ---
 
 # virtio-gpu: Vulkan on the host GPU for Linux guests

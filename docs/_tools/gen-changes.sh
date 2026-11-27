@@ -69,7 +69,8 @@ Test tooling (VBoxBFE, the stand-alone front end used for testing)|vboxbfe-test-
 {
     echo '---'
     echo 'layout: default'
-    echo 'title: All changes'
+    echo 'title: "All changes in this VirtualBox fork"'
+    echo 'description: "Every feature branch in this VirtualBox fork, what it does and whether it is planned for upstream"'
     echo '---'
     echo
     echo '# All changes'

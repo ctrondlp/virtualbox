@@ -1,6 +1,7 @@
 ---
 layout: default
-title: Build and run it yourself
+title: "Build this VirtualBox fork"
+description: "How to build and run this unofficial VirtualBox fork, and what does not work without the kernel drivers"
 ---
 
 # Build and run it yourself

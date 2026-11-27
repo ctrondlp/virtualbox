@@ -1,6 +1,7 @@
 ---
 layout: default
-title: macOS guests
+title: "macOS guests in VirtualBox on a PC"
+description: "Running macOS 10.14 to 26 guests in VirtualBox: guest types, CPU model, Apple SMC and EFI fixes, boot times and what was not tested"
 ---
 
 # macOS guests

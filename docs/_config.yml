@@ -4,6 +4,8 @@ theme: jekyll-theme-cayman
 show_downloads: false
 url: https://ctrondlp.github.io
 baseurl: /virtualbox
+webmaster_verifications:
+  google: "WAkg4CZb403mar-M0bzpmnWW94vsEBoNW4aiuheV2b0"
 plugins:
   - jekyll-sitemap
 markdown: kramdown
