@@ -75,13 +75,21 @@ by the host timer. Any VM can get the Vulkan GPU as a second, compute-only devic
 (`VBoxManage modifyvm --compute-gpu on`), the host GPU memory a guest can take can be limited (`--gpu-memory-limit`), and
 the VM state can be saved while no Vulkan program runs in the guest.
 
-**Stock SteamOS runs in Game mode.** The device can also offer OpenGL next to Vulkan (off by default, Windows hosts). SteamOS
-draws with OpenGL and composites with Vulkan, so with Vulkan alone its Game mode stayed black; now gamescope and the Steam
-interface come up on an unmodified guest, and so does the Plasma desktop
-([details](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop)). Team Fortress 2 starts with Vulkan and shows its main menu, and sound plays. The renderer side is offered upstream as
-[pull request 2](https://github.com/cmspam/winq-emu-virglrenderer/pull/2) of the winq renderer.
-
 For ordinary desktop graphics VMSVGA is still better, and the page says so with numbers.
+
+## Tested with SteamOS and Team Fortress 2
+
+**Stock SteamOS runs in Game mode in a virtual machine, and Team Fortress 2 starts in it with Vulkan:** the intro movie
+plays, the main menu comes up and there is sound. Nothing inside the guest was changed.
+
+* **Game mode tested with** SteamOS 3.8.14 and 3.9.5 on a Windows 11 host with an RTX 5070. Signing in to Steam and downloading
+  the game work too.
+* **What it took:** the device can offer OpenGL next to Vulkan, because SteamOS draws with OpenGL and composites with
+  Vulkan, so with Vulkan alone Game mode stayed black. The Plasma desktop works as well.
+* **Not tested yet:** a full game session, host graphics cards other than NVIDIA, and Linux hosts.
+* **To try it:** OpenGL is off by default, works on Windows hosts only and needs the renderer from our fork
+  ([how to turn it on](virtio-gpu.html#opengl-for-steamos-game-mode-and-desktop)). The renderer changes are offered
+  upstream as [pull request 2](https://github.com/cmspam/winq-emu-virglrenderer/pull/2) of the winq renderer.
 
 ## macOS guests
 
