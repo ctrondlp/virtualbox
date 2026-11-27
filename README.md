@@ -1,3 +1,24 @@
+# VirtualBox fork: faster on Hyper-V, Vulkan for Linux guests, macOS guests
+
+This is a fork of [Oracle VirtualBox](https://github.com/VirtualBox/virtualbox).
+It adds:
+
+- speed on Windows hosts where VirtualBox runs on top of Hyper-V;
+- a virtio-gpu device that gives Linux guests Vulkan on the host graphics card,
+  for example to run an LLM in a guest;
+- support for macOS guests;
+- newer guest CPU features, storage and networking improvements, and
+  correctness fixes.
+
+The [project site](https://ctrondlp.github.io/virtualbox/) describes the changes,
+how they were measured and their limits. The code is on the
+[`integration`](https://github.com/ctrondlp/virtualbox/tree/integration) branch;
+see [Build it yourself](https://ctrondlp.github.io/virtualbox/building.html).
+The changes are meant to go back into VirtualBox. This fork is not affiliated
+with or endorsed by Oracle.
+
+The rest of this file is VirtualBox's own README.
+
 # Oracle VirtualBox
 
 VirtualBox is a general-purpose full virtualization software for x86_64
