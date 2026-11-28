@@ -47,9 +47,9 @@
  *
  *  - The library is never unloaded (RTLDRLOAD_FLAGS_NO_UNLOAD): on Windows its
  *    render server is an in-process thread that is detached and may still run
- *    briefly after virgl_renderer_cleanup().  For the same reason no log
- *    callback is installed: it would point into VBoxDD, which is unloaded
- *    when the VM is destroyed.
+ *    briefly after virgl_renderer_cleanup().  VBoxDD, on the other hand, is
+ *    unloaded when the VM is destroyed, so the log callback (which lives
+ *    there) is removed again when the renderer is destroyed.
  *
  *  - OpenGL (virgl) is optional.  The library renders the guest's OpenGL
  *    with the host's OpenGL and asks its user for the contexts.  On Windows
@@ -1603,6 +1603,13 @@ DECLHIDDEN(void) vgpuR3RendererDestroy(PVGPURENDERER pThis, bool fCleanup)
             Req.enmType = kVGpuRenderReq_Cleanup;
             vgpuR3RendererCall(pThis, &Req);
         }
+
+        /* The library keeps the log callback and stays loaded, and its threads may log after
+           VBoxDD is gone.  Remove it after the cleanup, so that the cleanup is still logged,
+           and before any of the returns below that leave the library running. */
+        if (pThis->Fns.pfnSetLogCallback)
+            pThis->Fns.pfnSetLogCallback(NULL /*pfnLog*/, NULL /*pvUser*/, NULL /*pfnFreeUser*/);
+
         if (ASMAtomicReadBool(&pThis->fDead))
         {
             /* A call is stuck inside the library and the thread still references the instance. */
